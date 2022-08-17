@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::{iter, mem, array};
 
 use crate::camera::{Camera, CameraUniforms};
-use crate::resource::{self, MappedMemory, Buffer, ResourcePool, Res};
+use crate::resource::{self, MappedMemory, Buffer, BufferReq, ResourcePool, Res};
 use crate::core::*;
 
 #[repr(C)]
@@ -131,16 +131,15 @@ pub struct ClusterInfoBuffer {
 
 impl ClusterInfoBuffer {
     fn new(renderer: &Renderer, pool: &ResourcePool, camera: &Camera) -> Result<Self> {
-        let info = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-            .size(mem::size_of::<ClusterInfo>() as u64)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .build();
+        let req = BufferReq {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ClusterInfo>() as u64,
+        };
 
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let buffer = Buffer::new(&renderer, pool, &info, memory_flags)?;
+        let buffer = Buffer::new(&renderer, pool, &req, memory_flags)?;
         let mapped = MappedMemory::new(buffer.block.clone())?;
         let info = ClusterInfo::new(&renderer.swapchain, camera);
 
@@ -248,43 +247,39 @@ impl Lights {
         let cluster_info = ClusterInfoBuffer::new(renderer, pool, camera)?;
         let cluster_count = cluster_info.info.cluster_count() as usize;
 
-        let light_buffer = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
-            .size(mem::size_of::<LightBufferData>() as u64)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .build();
-        let light_position_buffer = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-            .size(mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as u64)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .build();
-        let cluster_aabb_buffer = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-            .size((cluster_count * mem::size_of::<Aabb>()) as u64)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .build();
-        let light_mask_buffer = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::STORAGE_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .size((cluster_count * mem::size_of::<LightMask>()) as u64)
-            .build();
+        let light_req = BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            size: mem::size_of::<LightBufferData>() as u64,
+        };
+
+        let cluster_aabb_req = BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            size: (cluster_count * mem::size_of::<Aabb>()) as u64,
+        };
+
+        let light_mask_req = BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            size: (cluster_count * mem::size_of::<LightMask>()) as u64
+        };
+
+        let light_pos_req = BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+            size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as u64,
+        };
 
         let buffers = {
             let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-            let mut create_infos = vec![
-                light_buffer,
-                cluster_aabb_buffer,
-            ];
+            let mut reqs = vec![light_req, cluster_aabb_req];
 
-            for info in iter::repeat(light_mask_buffer).take(FRAMES_IN_FLIGHT) {
-                create_infos.push(info); 
+            for req in iter::repeat(light_mask_req).take(FRAMES_IN_FLIGHT) {
+                reqs.push(req); 
             }
 
-            for info in iter::repeat(light_position_buffer).take(FRAMES_IN_FLIGHT) {
-                create_infos.push(info); 
+            for req in iter::repeat(light_pos_req).take(FRAMES_IN_FLIGHT) {
+                reqs.push(req); 
             }
 
-            let (buffers, _) = resource::create_buffers(&renderer, pool, &create_infos, memory_flags, 4)?;
+            let (buffers, _) = resource::create_buffers(&renderer, pool, &reqs, memory_flags, 4)?;
 
             buffers
         };
@@ -299,15 +294,15 @@ impl Lights {
         assert!(buffers.next().is_none());
 
         let light_staging = {
-            let info = vk::BufferCreateInfo::builder()
-                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                .size((mem::size_of::<LightBufferData>()) as u64)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE);
+            let req = BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: mem::size_of::<LightBufferData>() as u64,
+            };
 
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let buffer = Buffer::new(&renderer, pool, &info, memory_flags)?;
+            let buffer = Buffer::new(&renderer, pool, &req, memory_flags)?;
             let light_data = LightBufferData::new(lights); 
 
             MappedMemory::new(buffer.block.clone())?

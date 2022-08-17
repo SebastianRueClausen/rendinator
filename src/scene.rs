@@ -9,7 +9,7 @@ use crate::light::Lights;
 use crate::core::*;
 use crate::camera::CameraUniforms;
 use crate::resource::{
-    self, Buffer, Image, ImageReq, MappedMemory, TextureSampler, ResourcePool, Res,
+    self, Buffer, BufferReq, Image, ImageReq, MappedMemory, TextureSampler, ResourcePool, Res,
 };
 
 #[repr(C)]
@@ -80,17 +80,9 @@ impl Scene {
         let index_size = scene.indices.len() as u64;
 
         let staging = {
-            let create_infos = [
-                vk::BufferCreateInfo::builder()
-                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .size(vertex_size)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
-                vk::BufferCreateInfo::builder()
-                    .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                    .size(index_size)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+            let reqs = [
+                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: vertex_size },
+                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: index_size },
             ];
 
             let memory_flags =
@@ -99,7 +91,7 @@ impl Scene {
             let (buffers, block) = resource::create_buffers(
                 &renderer,
                 &pool,
-                &create_infos,
+                &reqs,
                 memory_flags,
                 4,
             )?;
@@ -120,28 +112,23 @@ impl Scene {
         };
 
         let buffers = {
-            let create_infos = [
-                vk::BufferCreateInfo::builder()
-                    .usage(
-                        vk::BufferUsageFlags::VERTEX_BUFFER
-                            | vk::BufferUsageFlags::TRANSFER_DST
-                    )
-                    .size(vertex_size)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
-                vk::BufferCreateInfo::builder()
-                    .usage(
-                        vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST
-                    )
-                    .size(index_size)
-                    .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                    .build(),
+            let reqs = [
+                BufferReq {
+                    usage: vk::BufferUsageFlags::VERTEX_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    size: vertex_size,
+                },
+                BufferReq {
+                    usage: vk::BufferUsageFlags::INDEX_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    size: index_size,
+                },
             ];
 
             let (buffers, _) = resource::create_buffers(
                 &renderer,
                 &pool,
-                &create_infos,
+                &reqs,
                 vk::MemoryPropertyFlags::DEVICE_LOCAL,
                 4,
             )?;
@@ -159,21 +146,18 @@ impl Scene {
             let create_infos: Vec<_> = scene.materials
                 .iter()
                 .flat_map(|mat| [
-                    vk::BufferCreateInfo::builder()
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .size(mat.base_color.data.len() as u64)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .build(),
-                    vk::BufferCreateInfo::builder()
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .size(mat.normal.data.len() as u64)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .build(),
-                    vk::BufferCreateInfo::builder()
-                        .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                        .size(mat.metallic_roughness.data.len() as u64)
-                        .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                        .build(),
+                    BufferReq {
+                        usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                        size: mat.base_color.data.len() as u64,
+                    },
+                    BufferReq {
+                        usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                        size: mat.normal.data.len() as u64,
+                    },
+                    BufferReq {
+                        usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                        size: mat.metallic_roughness.data.len() as u64,
+                    },
                 ])
                 .collect();
 

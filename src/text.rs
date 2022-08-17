@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use crate::core::*;
 use crate::resource::{
-    self, Buffer, Image, ImageReq, MappedMemory, TextureSampler, ResourcePool, Res,
+    self, Buffer, BufferReq, Image, ImageReq, MappedMemory, TextureSampler, ResourcePool, Res,
 };
 use asset::{Font, Glyph};
 
@@ -42,23 +42,21 @@ impl TextPass {
         let text_objects = TextObjects::new(FontAtlas::new(font));
 
         let (buffers, block) = {
-            let vertex_info = vk::BufferCreateInfo::builder()
-                .usage(vk::BufferUsageFlags::VERTEX_BUFFER)
-                .size(mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as u64)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .build();
-            let fragment_info = vk::BufferCreateInfo::builder()
-                .usage(vk::BufferUsageFlags::INDEX_BUFFER)
-                .size(mem::size_of::<[u16; MAX_INDEX_COUNT]>() as u64)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .build();
-            let infos: SmallVec<[_; FRAMES_IN_FLIGHT]> = iter::repeat(vertex_info)
+            let vertex_req = BufferReq {
+                usage: vk::BufferUsageFlags::VERTEX_BUFFER,
+                size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as u64,
+            };
+            let index_req = BufferReq {
+                usage: vk::BufferUsageFlags::INDEX_BUFFER,
+                size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as u64,
+            };
+            let reqs: SmallVec<[_; FRAMES_IN_FLIGHT]> = iter::repeat(vertex_req)
                 .take(FRAMES_IN_FLIGHT)
-                .chain(iter::repeat(fragment_info).take(FRAMES_IN_FLIGHT))
+                .chain(iter::repeat(index_req).take(FRAMES_IN_FLIGHT))
                 .collect();
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-            resource::create_buffers(&renderer, pool, &infos, memory_flags, 4)?
+            resource::create_buffers(&renderer, pool, &reqs, memory_flags, 4)?
         };
 
         let mut buffers = buffers.into_iter();
@@ -69,15 +67,15 @@ impl TextPass {
         let mapped = MappedMemory::new(block.clone())?;
 
         let staging = {
-            let create_info = vk::BufferCreateInfo::builder()
-                .usage(vk::BufferUsageFlags::TRANSFER_SRC)
-                .size(font.atlas.data.len() as u64)
-                .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .build();
+            let req = BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: font.atlas.data.len() as u64,
+            };
+
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let staging = Buffer::new(&renderer, pool, &create_info, memory_flags)?;
+            let staging = Buffer::new(&renderer, pool, &req, memory_flags)?;
             let mapped = MappedMemory::new(staging.block.clone())?;
 
             mapped.get_buffer_data(&staging).copy_from_slice(font.atlas.data.as_slice());

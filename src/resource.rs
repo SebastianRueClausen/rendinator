@@ -94,6 +94,22 @@ impl PartialEq for MemoryBlock {
 
 impl Eq for MemoryBlock {}
 
+#[derive(Clone, Copy)]
+pub struct BufferReq {
+    pub usage: vk::BufferUsageFlags,
+    pub size: u64,
+}
+
+impl Into<vk::BufferCreateInfo> for BufferReq {
+    fn into(self) -> vk::BufferCreateInfo {
+        vk::BufferCreateInfo::builder()
+            .usage(self.usage)
+            .size(self.size)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE)
+            .build()
+    }
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     pub handle: vk::Buffer,
@@ -105,12 +121,21 @@ impl Buffer {
     pub fn new(
         renderer: &Renderer,
         pool: &ResourcePool,
-        info: &vk::BufferCreateInfo,
+        info: &BufferReq,
         memory_flags: vk::MemoryPropertyFlags,
     ) -> Result<Res<Self>> {
-        let device = renderer.device.clone();
+        Self::from_raw(renderer.device.clone(), pool, info, memory_flags)
+    }
 
-        let handle = unsafe { device.handle.create_buffer(info, None)? };
+    pub fn from_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
+        device: Res<Device>,
+        pool: &ResourcePool,
+        req: &T,
+        memory_flags: vk::MemoryPropertyFlags,
+    ) -> Result<Res<Self>> {
+        let info = (*req).into();
+
+        let handle = unsafe { device.handle.create_buffer(&info, None)? };
         let req = unsafe { device.handle.get_buffer_memory_requirements(handle) };
 
         let memory_type = memory_type_index(
@@ -152,19 +177,29 @@ impl Drop for Buffer {
 pub fn create_buffers(
     renderer: &Renderer,
     pool: &ResourcePool,
-    create_infos: &[vk::BufferCreateInfo],
+    reqs: &[BufferReq],
     memory_flags: vk::MemoryPropertyFlags,
     alignment: vk::DeviceSize,
 ) -> Result<(Vec<Res<Buffer>>, Res<MemoryBlock>)> {
-    let device = renderer.device.clone();
+    create_buffers_raw(renderer.device.clone(), pool, reqs, memory_flags, alignment)
+}
 
+pub fn create_buffers_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
+    device: Res<Device>,
+    pool: &ResourcePool,
+    create_infos: &[T],
+    memory_flags: vk::MemoryPropertyFlags,
+    alignment: vk::DeviceSize,
+) -> Result<(Vec<Res<Buffer>>, Res<MemoryBlock>)> {
     let mut memory_type_bits = u32::MAX;
     let mut current_size = 0;
 
     let buffers: Result<SmallVec<[_; 12]>> = create_infos
         .iter()
         .map(|info| unsafe {
-            let handle = device.handle.create_buffer(info, None)?;
+            let info = (*info).into();
+
+            let handle = device.handle.create_buffer(&info, None)?;
             let requirements = device.handle.get_buffer_memory_requirements(handle);
 
             memory_type_bits &= requirements.memory_type_bits;
@@ -196,8 +231,8 @@ pub fn create_buffers(
 
     let mut flags = vk::MemoryAllocateFlagsInfo::builder();
     if create_infos.iter().any(|info| {
-        info.usage
-            .contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
+        let info: vk::BufferCreateInfo = (*info).into();
+        info.usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
     }) {
         flags = flags
             .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS_KHR)

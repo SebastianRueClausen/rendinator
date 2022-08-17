@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use crate::core::*;
 use crate::InputState;
-use crate::resource::{self, MappedMemory, Buffer, ResourcePool, Res};
+use crate::resource::{self, MappedMemory, Buffer, BufferReq, ResourcePool, Res};
 
 pub struct Camera {
     pub pos: Vec3,
@@ -178,19 +178,17 @@ pub struct CameraUniforms {
 
 impl CameraUniforms {
     pub fn new(renderer: &Renderer, pool: &ResourcePool, camera: &Camera) -> Result<Self> {
-        let proj_info = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .size(mem::size_of::<ProjUniform>() as u64)
-            .build();
-        let view_info = vk::BufferCreateInfo::builder()
-            .usage(vk::BufferUsageFlags::UNIFORM_BUFFER)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .size(mem::size_of::<ViewUniform>() as u64)
-            .build();
-        let infos: SmallVec<[_; 3]> = iter::repeat(proj_info)
+        let proj_req = BufferReq {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ProjUniform>() as u64,
+        };
+        let view_req = BufferReq {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ViewUniform>() as u64,
+        };
+        let reqs: SmallVec<[_; 3]> = iter::repeat(proj_req)
             .take(1)
-            .chain(iter::repeat(view_info).take(FRAMES_IN_FLIGHT))
+            .chain(iter::repeat(view_req).take(FRAMES_IN_FLIGHT))
             .collect();
 
         let alignment = renderer
@@ -205,7 +203,7 @@ impl CameraUniforms {
         let (buffers, block) = resource::create_buffers(
             &renderer,
             &pool,
-            &infos,
+            &reqs,
             memory_flags,
             alignment,
         )?;
