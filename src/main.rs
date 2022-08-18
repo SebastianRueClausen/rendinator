@@ -12,12 +12,13 @@ mod macros;
 mod resource;
 mod core;
 mod scene;
+mod skybox;
 mod light;
 mod text;
 mod camera;
 
 use anyhow::Result;
-use glam::{UVec3, Vec3};
+use glam::{UVec3, Vec3, Mat3, Mat4};
 use winit::event::VirtualKeyCode;
 use ash::vk;
 
@@ -30,6 +31,7 @@ use crate::scene::Scene;
 use crate::light::{Lights, PointLight};
 use crate::camera::{Camera, CameraUniforms};
 use crate::resource::ResourcePool;
+use crate::skybox::Skybox;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -54,7 +56,6 @@ fn main() -> Result<()> {
     let resource_pool = ResourcePool::new();
 
     let font = asset::Font::load(Path::new("assets/fonts/source_code_pro.font"))?;
-
     let mut text_pass = TextPass::new(&renderer, &resource_pool, &font)?;
 
     let mut camera = Camera::new(renderer.swapchain.aspect_ratio());
@@ -63,8 +64,18 @@ fn main() -> Result<()> {
     let lights = debug_lights();
     let mut lights = Lights::new(&renderer, &resource_pool, &camera_uniforms, &camera, &lights)?;
 
+    let skybox = asset::Skybox::load(Path::new("assets/skyboxes/beach.skybox"))?;
+    let skybox = Skybox::new(&renderer, &resource_pool, &skybox)?;
+
     let scene = asset::Scene::load(Path::new("assets/scenes/helmet.scene"))?;
-    let scene = Scene::from_scene_asset(&renderer, &resource_pool, &camera_uniforms, &lights, &scene)?;
+    let scene = Scene::from_scene_asset(
+        &renderer,
+        &resource_pool,
+        &camera_uniforms,
+        &skybox,
+        &lights,
+        &scene,
+    )?;
 
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
@@ -164,12 +175,33 @@ fn main() -> Result<()> {
                                 *&model.transform(),
                             );
 
-                            recorder.draw(
+                            recorder.draw_indexed(
                                 model.index_count,
                                 model.index_start,
                                 model.vertex_start as i32,
                             );
                         }
+
+                        recorder.bind_vertex_buffer(&skybox.cube_map.vertex_buffer);
+                        recorder.bind_graphics_pipeline(&skybox.pipeline);
+
+                        recorder.bind_descriptor_sets(
+                            vk::PipelineBindPoint::GRAPHICS,
+                            skybox.pipeline.layout(),
+                            &[&skybox.descriptor],
+                        );
+
+                        let transform =
+                            camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));
+
+                        recorder.push_constants(
+                            &skybox.pipeline.layout(),
+                            vk::ShaderStageFlags::VERTEX,
+                            0,
+                            &transform,
+                        );
+
+                        recorder.draw(36, 0);
                 
                         text_pass.draw_text(recorder, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());

@@ -1,5 +1,6 @@
 use anyhow::Result;
 use smallvec::SmallVec;
+use glam::Vec3;
 use ash::vk;
 
 use std::{ops, slice, alloc, mem};
@@ -11,6 +12,10 @@ use std::hash::{Hash, Hasher};
 use crate::core::{Renderer, Device};
 
 type MemoryRange = ops::Range<vk::DeviceSize>;
+
+fn range_length(range: &MemoryRange) -> vk::DeviceSize {
+    range.end - range.start
+}
 
 /// A wrapper around a raw ptr into a mapped memory block.
 pub struct MappedMemory {
@@ -30,16 +35,40 @@ impl MappedMemory {
 
     unsafe fn get_range_unchecked(&self, range: MemoryRange) -> &mut [u8] {
         let start = self.ptr.offset(range.start as isize);
-        let len = range.end - range.start;
+        let len = range_length(&range);
         slice::from_raw_parts_mut(start, len as usize)
+    }
+
+    /// Fill memory in `range` with the memory of `bytes`.
+    ///
+    /// # Panics
+    ///
+    /// * If the range doesn't fit into the mapped block.
+    /// * If the length of `bytes` isn't the same as the span of range.
+    ///
+    pub fn fill_range(&self, range: MemoryRange, bytes: &[u8]) {
+        if range_length(&range) != bytes.len() as vk::DeviceSize {
+            panic!("bytes is not the same size as the range");
+        }
+       
+        // The end should always be greater than start, but just to be sure.
+        if range.start.max(range.end) > self.block.size() {
+            panic!("range goes past the end of the mapped memory");
+        }
+
+        let dst = unsafe { self.get_range_unchecked(range) };
+
+        dst.copy_from_slice(bytes);
     }
 
     /// Get the mapped data of a buffer.
     ///
-    /// # Panic
+    /// # Panics
     ///
-    /// This will panic if the underlying memory block of the buffer isn't the same as the
+    /// Panics if the underlying memory block of the buffer isn't the same as the
     /// underlying block of `self`.
+    ///
+    /// TODO: Make this `fill_buffer` for better safety.
     pub fn get_buffer_data(&self, buffer: &Buffer) -> &mut [u8] {
         if *buffer.block != *self.block {
             panic!("block of buffer isn't same as mapped memory");
@@ -260,15 +289,26 @@ pub fn create_buffers_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
     Ok((buffers, block))
 }
 
+
+#[derive(Clone, Copy)]
+pub enum ImageKind {
+    Texture,
+    CubeMap,
+}
+
 #[derive(Clone, Copy)]
 pub struct ImageReq {
-    pub usage: vk::ImageUsageFlags,
+    pub kind: ImageKind,
     pub format: vk::Format,
     pub extent: vk::Extent3D,
 }
 
 impl Into<vk::ImageCreateInfo> for ImageReq {
     fn into(self) -> vk::ImageCreateInfo {
+        let (array_layers, flags) = match self.kind {
+            ImageKind::Texture => (1, vk::ImageCreateFlags::empty()),
+            ImageKind::CubeMap => (6, vk::ImageCreateFlags::CUBE_COMPATIBLE),
+        };
         vk::ImageCreateInfo::builder()
             .image_type(vk::ImageType::TYPE_2D)
             .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
@@ -279,21 +319,26 @@ impl Into<vk::ImageCreateInfo> for ImageReq {
             .extent(self.extent)
             .mip_levels(1)
             .samples(vk::SampleCountFlags::TYPE_1)
-            .array_layers(1)
+            .array_layers(array_layers)
+            .flags(flags)
             .build()
     }
 }
 
 impl Into<vk::ImageViewCreateInfo> for ImageReq {
     fn into(self) -> vk::ImageViewCreateInfo {
+        let (view_type, layer_count) = match self.kind {
+            ImageKind::Texture => (vk::ImageViewType::TYPE_2D, 1),
+            ImageKind::CubeMap => (vk::ImageViewType::CUBE, 6),
+        };
         let subresource_range = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
             .level_count(1)
             .base_array_layer(0)
-            .layer_count(1);
+            .layer_count(layer_count);
         vk::ImageViewCreateInfo::builder()
-            .view_type(vk::ImageViewType::TYPE_2D)
+            .view_type(view_type)
             .subresource_range(*subresource_range)
             .format(self.format)
             .build()
@@ -306,6 +351,8 @@ pub struct Image {
     pub view: vk::ImageView,
     pub extent: vk::Extent3D,
     pub format: vk::Format,
+
+    pub array_layers: u32,
 
     // Layout may change.
     pub layout: Cell<vk::ImageLayout>,
@@ -375,6 +422,7 @@ impl Image {
             extent: image_info.extent,
             format: image_info.format,
             range: 0..requirements.size,
+            array_layers: image_info.array_layers,
             handle,
             view,
             block,
@@ -425,6 +473,7 @@ where
         layout: vk::ImageLayout,
         format: vk::Format,
         extent: vk::Extent3D,
+        array_layers: u32,
         range: MemoryRange,
     }
 
@@ -444,6 +493,7 @@ where
 
             Ok(TempImage {
                 handle,
+                array_layers: image_info.array_layers,
                 extent: image_info.extent,
                 layout: image_info.initial_layout,
                 format: image_info.format,
@@ -478,6 +528,7 @@ where
 
             Ok(pool.alloc(Image {
                 handle: image.handle,
+                array_layers: image.array_layers,
                 layout: Cell::new(image.layout),
                 format: image.format,
                 extent: image.extent,
@@ -522,6 +573,95 @@ impl TextureSampler {
 impl Drop for TextureSampler {
     fn drop(&mut self) {
         unsafe { self.device.handle.destroy_sampler(self.handle, None); }
+    }
+}
+
+const CUBE_VERTICES: [Vec3; 36] = [
+    Vec3::new(-1.0, 1.0, 1.0),
+    Vec3::new(-1.0, -1.0, 1.0),
+    Vec3::new(1.0, -1.0, 1.0),
+    Vec3::new(1.0, -1.0, 1.0),
+    Vec3::new(1.0, 1.0, 1.0),
+    Vec3::new(-1.0, 1.0, 1.0),
+
+    Vec3::new(-1.0, -1.0, -1.0),
+    Vec3::new(-1.0, -1.0, 1.0),
+    Vec3::new(-1.0, 1.0, 1.0),
+    Vec3::new(-1.0, 1.0, 1.0),
+    Vec3::new(-1.0, 1.0, -1.0),
+    Vec3::new(-1.0, -1.0, -1.0),
+
+    Vec3::new(1.0, -1.0, 1.0),
+    Vec3::new(1.0, -1.0, -1.0),
+    Vec3::new(1.0, 1.0, -1.0),
+    Vec3::new(1.0, 1.0, -1.0),
+    Vec3::new(1.0, 1.0, 1.0),
+    Vec3::new(1.0, -1.0, 1.0),
+
+    Vec3::new(-1.0, -1.0, -1.0),
+    Vec3::new(-1.0, 1.0, -1.0),
+    Vec3::new(1.0, 1.0, -1.0),
+    Vec3::new(1.0, 1.0, -1.0),
+    Vec3::new(1.0, -1.0, -1.0),
+    Vec3::new(-1.0, -1.0, -1.0),
+
+    Vec3::new(-1.0, 1.0, 1.0),
+    Vec3::new(1.0, 1.0, 1.0),
+    Vec3::new(1.0, 1.0, -1.0),
+    Vec3::new(1.0, 1.0, -1.0),
+    Vec3::new(-1.0, 1.0, -1.0),
+    Vec3::new(-1.0, 1.0, 1.0),
+
+    Vec3::new(-1.0, -1.0, 1.0),
+    Vec3::new(-1.0, -1.0, -1.0),
+    Vec3::new(1.0, -1.0, 1.0),
+    Vec3::new(1.0, -1.0, 1.0),
+    Vec3::new(-1.0, -1.0, -1.0),
+    Vec3::new(1.0, -1.0, -1.0),
+];
+
+pub struct CubeMap {
+    pub image: Res<Image>,
+    pub vertex_buffer: Res<Buffer>,
+}
+
+impl CubeMap {
+    pub fn new(renderer: &Renderer, pool: &ResourcePool, image: Res<Image>) -> Result<Self> {
+        let vertex_data: &[u8] = bytemuck::cast_slice(&CUBE_VERTICES);
+
+        let staging = {
+            let req = BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: vertex_data.len() as u64
+            };
+
+            let memory_flags =
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+            let buffer = Buffer::new(renderer, pool, &req, memory_flags)?;
+            let mapped = MappedMemory::new(buffer.block.clone())?;
+
+            mapped.get_buffer_data(&buffer ).copy_from_slice(vertex_data);
+
+            buffer
+        };
+
+        let vertex_buffer = {
+            let req = BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+                size: vertex_data.len() as u64
+            };
+
+            let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+            Buffer::new(renderer, pool, &req, memory_flags)?
+        };
+
+        renderer.device.transfer_with(|recorder|
+            recorder.copy_buffers(&staging, &vertex_buffer)
+        )?;
+
+        Ok(Self { image, vertex_buffer })
     }
 }
 

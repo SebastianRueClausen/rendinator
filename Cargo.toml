@@ -14,7 +14,7 @@ winit = "0.26.1"
 raw-window-handle = "^0.4.2"
 
 bytemuck = { version = "1.11.0", features = ["derive"] }
-glam = { version = "0.20.4", features = ["bytemuck", "serde"] }
+glam = { version = "0.21.3", features = ["bytemuck", "serde"] }
 smallvec = { version = "1.8.0", features = ["union"] }
 arrayvec = "0.7.2"
 nohash-hasher = "0.2.0"

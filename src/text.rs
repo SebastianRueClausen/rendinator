@@ -8,9 +8,7 @@ use std::{array, mem, iter, hash};
 use std::collections::HashMap;
 
 use crate::core::*;
-use crate::resource::{
-    self, Buffer, BufferReq, Image, ImageReq, MappedMemory, TextureSampler, ResourcePool, Res,
-};
+use crate::resource::{self, *};
 use asset::{Font, Glyph};
 
 #[repr(C)]
@@ -87,9 +85,7 @@ impl TextPass {
         let sampler = pool.alloc(TextureSampler::new(&renderer)?);
     
         let mut glyph_atlas = {
-            let usage = vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED;
-            let req = ImageReq { format: vk::Format::R8_UNORM, usage, extent };
-
+            let req = ImageReq { format: vk::Format::R8_UNORM, kind: ImageKind::Texture, extent };
             Image::new(&renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, req)?
         };
 
@@ -153,6 +149,7 @@ impl TextPass {
             depth_stencil_info: &depth_stencil_info,
             vertex_shader: &vertex_module,
             fragment_shader: &fragment_module,
+            cull_mode: vk::CullModeFlags::BACK,
         })?;
 
         let width = renderer.swapchain.extent.width as f32;
@@ -216,7 +213,7 @@ impl TextPass {
                 &proj_transform,
             );
 
-            recorder.draw(label.index_count, label.index_offset, 0);
+            recorder.draw_indexed(label.index_count, label.index_offset, 0);
         }
     }
 }

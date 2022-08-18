@@ -61,7 +61,7 @@ impl Scene {
 }
 
 /// A raw image without specified format.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct Image {
     pub data: Vec<u8>,
 
@@ -71,6 +71,30 @@ pub struct Image {
     /// The pixel height of the image.
     pub height: u32,
 }
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub struct Skybox {
+    pub images: [Image; 6],
+}
+
+impl Skybox {
+    pub fn width(&self) -> u32 {
+        self.images[0].width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.images[0].height
+    }
+
+    pub fn load(path: &Path) -> Result<Self> {
+       Ok(bincode::deserialize(&fs::read(path)?)?)
+    }
+
+    pub fn store(&self, path: &Path) -> Result<()> {
+        fs::write(path, bincode::serialize(self)?).map_err(|err| err.into())
+    }
+}
+
 
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Mesh {

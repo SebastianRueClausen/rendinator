@@ -1,4 +1,4 @@
-#![feature(let_else)]
+#![feature(let_else, iterator_try_collect)]
 
 use anyhow::{anyhow, Result};
 use glam::{Vec2, Vec3, Vec4, Mat4};
@@ -11,6 +11,7 @@ use asset::*;
 #[derive(Clone, clap::ValueEnum)]
 enum AssetKind {
     Font,
+    Skybox,
     Gltf,
 }
 
@@ -20,46 +21,89 @@ struct Args {
     #[clap(arg_enum)]
     asset_kind: AssetKind,
 
-    /// The input file.
-    input: PathBuf,
+    /// The input files.
+    /// 
+    /// Font:
+    ///
+    ///   A single json file in the angelcode bm font format. The bitmap is expected to be encoded
+    ///   as signed distance fields.
+    ///
+    /// Skybox:
+    ///
+    ///   A list of 6 images.
+    ///
+    ///   The images are expected to be in the order:
+    ///     - positive x
+    ///     - negaive x
+    ///     - positive y
+    ///     - negaive y
+    ///     - positive z
+    ///     - negaive z
+    ///
+    /// Gltf:
+    ///
+    ///  A gltf scene file,
+    ///
+    inputs: Vec<PathBuf>,
 
     /// The ouput file.
     #[clap(short, long)]
     ouput: Option<PathBuf>, 
 }
 
-fn main() {
+fn main() -> Result<()> {
     use clap::Parser;
 
     let args = Args::parse();
 
     match &args.asset_kind {
         AssetKind::Gltf => {
+            let Some(input) = args.inputs.first() else {
+                return Err(anyhow!("expected a single gltf input file"));
+            };
             let output = args.ouput
                 .as_ref()
                 .map(|path| path.as_path())
                 .unwrap_or(&Path::new("./out.scene"));
-            let res = load_scene_from_gltf(&args.input)
-                .expect("failed to load gltf scene")
-                .store(output);
+            let res = load_scene_from_gltf(&input)?.store(output);
             if let Err(err) = res {
-                panic!("failed to store scene to {output:?}: {err}");
+                return Err(anyhow!("failed to store scene to {output:?}: {err}"));
             }
         },
         AssetKind::Font => {
+            let Some(input) = args.inputs.first() else {
+                return Err(anyhow!("expected a single font metadata file"));
+            };
             let output = args.ouput
                 .as_ref()
                 .map(|path| path.as_path())
                 .unwrap_or(&Path::new("./out.font"));
-            let res = load_font(&args.input)
-                .expect("failed to load font")
-                .store(output);
+            let res = load_font(&input)?.store(output);
             if let Err(err) = res {
-                panic!("failed to store scene to {output:?}: {err}");
+                return Err(anyhow!("failed to store font to {output:?}: {err}"));
+            }
+        }
+        AssetKind::Skybox => {
+            let inputs: Vec<&Path> = args.inputs
+                .iter()
+                .take(6)
+                .map(|buf| buf.as_ref())
+                .collect();
+            let Ok(inputs) = inputs.try_into() else {
+                return Err(anyhow!("expected 6 input image files"));
+            };
+            let output = args.ouput
+                .as_ref()
+                .map(|path| path.as_path())
+                .unwrap_or(&Path::new("./out.skybox"));
+            let res = load_skybox(inputs)?.store(output);
+            if let Err(err) = res {
+                return Err(anyhow!("failed to store skybox to {output:?}: {err}"));
             }
         }
     }
 
+    Ok(())
 }
 
 enum ImageImportFormat {
@@ -402,6 +446,26 @@ impl GltfImporter {
 
 fn load_scene_from_gltf(path: &Path) -> Result<Scene> {
     GltfImporter::new(path)?.load_scene()
+}
+
+fn load_skybox(images: [&Path; 6]) -> Result<Skybox> {
+    let images: Result<Vec<_>> = images
+        .iter()
+        .map(|path| {
+            let image = image::open(path)?.into_rgba8();
+            let data = image.as_raw();
+
+            Ok(Image {
+                width: image.width() as u32,
+                height: image.height() as u32,
+                data: data.clone(),
+            })
+        })
+        .collect();
+
+    let images = images?.try_into().unwrap();
+
+    Ok(Skybox { images })
 }
 
 /// Glyph of the angelcode bitmap format.

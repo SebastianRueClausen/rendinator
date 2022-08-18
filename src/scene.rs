@@ -7,10 +7,9 @@ use std::ops::Index;
 
 use crate::light::Lights;
 use crate::core::*;
+use crate::resource::{self, *};
 use crate::camera::CameraUniforms;
-use crate::resource::{
-    self, Buffer, BufferReq, Image, ImageReq, MappedMemory, TextureSampler, ResourcePool, Res,
-};
+use crate::skybox::Skybox;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -73,6 +72,7 @@ impl Scene {
         renderer: &Renderer,
         pool: &ResourcePool,
         camera_uniforms: &CameraUniforms,
+        skybox: &Skybox,
         lights: &Lights,
         scene: &asset::Scene,
     ) -> Result<Self> {
@@ -101,12 +101,9 @@ impl Scene {
             let vertex_data: &[u8] = bytemuck::cast_slice(scene.vertices.as_slice());
             let index_data = scene.indices.as_slice();
 
-            [vertex_data, index_data]
-                .iter()
-                .zip(buffers.iter())
-                .for_each(|(data, buffer)| {
-                    mapped.get_buffer_data(buffer).copy_from_slice(&data);
-                });
+            for (data, buffer) in [vertex_data, index_data].iter().zip(buffers.iter()) {
+                mapped.get_buffer_data(buffer).copy_from_slice(&data);
+            }
 
             buffers
         };
@@ -195,8 +192,7 @@ impl Scene {
                 .flat_map(|mat| [
                     ImageReq {
                         format: vk::Format::R8G8B8A8_SRGB,
-                        usage: vk::ImageUsageFlags::TRANSFER_DST
-                            | vk::ImageUsageFlags::SAMPLED,
+                        kind: ImageKind::Texture,
                         extent: vk::Extent3D {
                             width: mat.base_color.width,
                             height: mat.base_color.height,
@@ -205,8 +201,7 @@ impl Scene {
                     },
                     ImageReq {
                         format: vk::Format::R8G8B8A8_UNORM,
-                        usage: vk::ImageUsageFlags::TRANSFER_DST
-                            | vk::ImageUsageFlags::SAMPLED,
+                        kind: ImageKind::Texture,
                         extent: vk::Extent3D {
                             width: mat.normal.width,
                             height: mat.normal.height,
@@ -215,8 +210,7 @@ impl Scene {
                     },
                     ImageReq {
                         format: vk::Format::R8G8_UNORM,
-                        usage: vk::ImageUsageFlags::TRANSFER_DST
-                            | vk::ImageUsageFlags::SAMPLED,
+                        kind: ImageKind::Texture,
                         extent: vk::Extent3D {
                             width: mat.metallic_roughness.width,
                             height: mat.metallic_roughness.height,
@@ -320,6 +314,10 @@ impl Scene {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
             },
+            LayoutBinding {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage: vk::ShaderStageFlags::FRAGMENT,
+            },
         ])?);
 
         let materials: Result<Vec<_>> = scene.materials
@@ -340,6 +338,10 @@ impl Scene {
                     DescriptorBinding::Buffer([
                         camera_uniforms.proj_uniform().clone(),
                         camera_uniforms.proj_uniform().clone(),
+                    ]),
+                    DescriptorBinding::Image(sampler.clone(), [
+                        skybox.cube_map.image.clone(),
+                        skybox.cube_map.image.clone(),
                     ]),
                     DescriptorBinding::Image(sampler.clone(), [
                         images[base_color_index].clone(),
@@ -373,7 +375,7 @@ impl Scene {
             let vertex_module = ShaderModule::new(&renderer, "main", vertex_code)?;
             let fragment_module = ShaderModule::new(&renderer, "main", fragment_code)?;
 
-            let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
+            let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
                 .depth_test_enable(true)
                 .depth_write_enable(true)
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
@@ -390,7 +392,6 @@ impl Scene {
             ])?);
 
             let pipeline = GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
-                layout,
                 vertex_attributes: &[
                     vk::VertexInputAttributeDescription {
                         format: vk::Format::R32G32B32_SFLOAT,
@@ -422,9 +423,11 @@ impl Scene {
                     stride: mem::size_of::<asset::Vertex>() as u32,
                     input_rate: vk::VertexInputRate::VERTEX,
                 }],
-                depth_stencil_info: &depth_stencil_info,
+                cull_mode: vk::CullModeFlags::BACK,
                 vertex_shader: &vertex_module,
                 fragment_shader: &fragment_module,
+                depth_stencil_info,
+                layout,
             })?;
 
             pipeline

@@ -1,6 +1,5 @@
 use anyhow::Result;
-use ash::extensions::{ext, khr};
-use ash::vk;
+use ash::extensions::{ext, khr}; use ash::vk;
 use glam::UVec3;
 use smallvec::SmallVec;
 use arrayvec::ArrayVec;
@@ -1683,11 +1682,15 @@ impl Drop for ComputePipeline {
 
 pub struct GraphicsPipelineReq<'a> {
     pub layout: Res<PipelineLayout>,
+
     pub vertex_attributes: &'a [vk::VertexInputAttributeDescription],
     pub vertex_bindings: &'a [vk::VertexInputBindingDescription],
     pub depth_stencil_info: &'a vk::PipelineDepthStencilStateCreateInfo,
+
     pub vertex_shader: &'a ShaderModule,
     pub fragment_shader: &'a ShaderModule,
+
+    pub cull_mode: vk::CullModeFlags,
 }
 
 pub struct GraphicsPipeline {
@@ -1720,10 +1723,10 @@ impl GraphicsPipeline {
             .viewports(&viewports)
             .scissors(&scissors);
         let rasterize_info = vk::PipelineRasterizationStateCreateInfo::builder()
-            .line_width(1.0)
             .front_face(vk::FrontFace::CLOCKWISE)
-            .cull_mode(vk::CullModeFlags::BACK)
-            .polygon_mode(vk::PolygonMode::FILL);
+            .cull_mode(req.cull_mode)
+            .polygon_mode(vk::PolygonMode::FILL)
+            .line_width(1.0);
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(renderer.render_targets.sample_count);
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
@@ -1827,12 +1830,11 @@ impl CommandRecorder {
     }
 
     pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Image) {
-        // NOTE: Make sure this is updated when adding mip levels.
         let subresource = vk::ImageSubresourceLayers::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .mip_level(0)
             .base_array_layer(0)
-            .layer_count(1)
+            .layer_count(dst.array_layers)
             .build();
         let regions = [vk::BufferImageCopy::builder()
             .buffer_offset(0)
@@ -1869,7 +1871,7 @@ impl CommandRecorder {
             .base_mip_level(0)
             .level_count(1)
             .base_array_layer(0)
-            .layer_count(1)
+            .layer_count(image.array_layers)
             .build();
         let mut barrier = vk::ImageMemoryBarrier::builder()
             .image(image.handle)
@@ -1977,8 +1979,14 @@ impl CommandRecorder {
         let bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe { self.device.cmd_bind_pipeline(self.buffer, bind_point, pipeline.handle); }
     }
+    
+    pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
+        unsafe {
+            self.device.cmd_draw(self.buffer, vertex_count, 1, vertex_start, 0);
+        }
+    }
 
-    pub fn draw(&self, index_count: u32, index_start: u32, vertex_off: i32) {
+    pub fn draw_indexed(&self, index_count: u32, index_start: u32, vertex_off: i32) {
         unsafe {
             self.device.cmd_draw_indexed(self.buffer, index_count, 1, index_start, vertex_off, 0);
         }

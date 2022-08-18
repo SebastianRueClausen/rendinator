@@ -1,7 +1,7 @@
 #version 450
 #pragma shader_stage(vertex)
 
-layout (push_constant) uniform PushConstant {
+layout (push_constant, std140) uniform PushConsts {
 	mat4 proj_transform;
 };
 

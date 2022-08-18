@@ -21,9 +21,10 @@ readonly layout (std140, set = 0, binding = 1) uniform Proj {
 	vec2 screen_dimensions;
 };
 
-layout (set = 0, binding = 2) uniform sampler2D base_color_sampler;
-layout (set = 0, binding = 3) uniform sampler2D normal_sampler;
-layout (set = 0, binding = 4) uniform sampler2D specular_sampler;
+layout (set = 0, binding = 2) uniform samplerCube skybox_sampler;
+layout (set = 0, binding = 3) uniform sampler2D base_color_sampler;
+layout (set = 0, binding = 4) uniform sampler2D normal_sampler;
+layout (set = 0, binding = 5) uniform sampler2D specular_sampler;
 
 readonly layout (std140, set = 1, binding = 0) uniform Cluster {
 	ClusterInfo cluster_info;
@@ -72,10 +73,12 @@ void main() {
 	const float metallic = specular_params.r;
 	const float rough = clamp(geometric_aa(normal, specular_params.g * specular_params.g), 0.05, 1.0);
 
-	const vec3 view_dir = normalize(vec3(eye) - vec3(in_world_position));
-	const float norm_dot_view = max(dot(normal, view_dir), 0.0001);
+	const vec3 view_dir = normalize(eye.xyz - in_world_position.xyz);
+	const float norm_dot_view = clamp(dot(normal, view_dir), 0.0001, 1.0);
 
-	const vec3 diffuse_albedo = (1.0 - metallic) * albedo;
+	const vec3 env_map = texture(skybox_sampler, reflect(view_dir, normal)).xyz;
+
+	const vec3 diffuse_albedo = (1.0 - metallic) * albedo + metallic * env_map;
 	const vec3 f0 = mix(vec3(0.04), albedo, metallic);
 
 	vec3 radiance = vec3(0.0);
