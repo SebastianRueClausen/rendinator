@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.57"
+ash = "0.37.0"
 bytemuck = { version = "1.11.0", features = ["derive"] }
 glam = { version = "0.21.3", features = ["bytemuck", "serde"] }
 serde = { version = "1.0.137", features = ["derive"] }

@@ -191,7 +191,7 @@ impl Scene {
                 .iter()
                 .flat_map(|mat| [
                     ImageReq {
-                        format: vk::Format::R8G8B8A8_SRGB,
+                        format: mat.base_color.format.into(),
                         kind: ImageKind::Texture,
                         extent: vk::Extent3D {
                             width: mat.base_color.width,
@@ -200,7 +200,7 @@ impl Scene {
                         },
                     },
                     ImageReq {
-                        format: vk::Format::R8G8B8A8_UNORM,
+                        format: mat.normal.format.into(),
                         kind: ImageKind::Texture,
                         extent: vk::Extent3D {
                             width: mat.normal.width,
@@ -209,7 +209,7 @@ impl Scene {
                         },
                     },
                     ImageReq {
-                        format: vk::Format::R8G8_UNORM,
+                        format: mat.metallic_roughness.format.into(),
                         kind: ImageKind::Texture,
                         extent: vk::Extent3D {
                             width: mat.metallic_roughness.width,

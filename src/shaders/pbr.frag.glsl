@@ -69,14 +69,14 @@ void main() {
 			+ normal.z * normalize(in_world_normal)
 	);
 
-	const vec2 specular_params = texture(specular_sampler, in_texcoord).rg;
+	const vec2 specular_params = texture(specular_sampler, in_texcoord).ba;
 	const float metallic = specular_params.r;
 	const float rough = clamp(geometric_aa(normal, specular_params.g * specular_params.g), 0.05, 1.0);
 
 	const vec3 view_dir = normalize(eye.xyz - in_world_position.xyz);
 	const float norm_dot_view = clamp(dot(normal, view_dir), 0.0001, 1.0);
 
-	const vec3 env_map = texture(skybox_sampler, reflect(view_dir, normal)).xyz;
+	const vec3 env_map = texture(skybox_sampler, reflect(-view_dir, normal)).xyz;
 
 	const vec3 diffuse_albedo = (1.0 - metallic) * albedo + metallic * env_map;
 	const vec3 f0 = mix(vec3(0.04), albedo, metallic);

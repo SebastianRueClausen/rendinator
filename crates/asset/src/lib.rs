@@ -1,12 +1,14 @@
 use anyhow::Result;
+use ash::vk;
 use glam::{Vec2, Vec3, Vec4, Mat4};
+use serde::{Serialize, Deserialize};
 
 use std::path::Path;
 use std::fs;
 
 /// The vertex format used by the [`Mesh`].
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::NoUninit, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, bytemuck::NoUninit, Serialize, Deserialize)]
 pub struct Vertex {
     pub position: Vec3,
     pub normal: Vec3,
@@ -15,10 +17,10 @@ pub struct Vertex {
 }
 
 
-#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Serialize, Deserialize)]
 pub enum IndexFormat {
-    U16,
-    U32,
+    U16 = vk::IndexType::UINT16.as_raw() as isize,
+    U32 = vk::IndexType::UINT32.as_raw() as isize,
 }
 
 impl IndexFormat {
@@ -30,8 +32,14 @@ impl IndexFormat {
     }
 }
 
+impl Into<vk::IndexType> for IndexFormat {
+    fn into(self) -> vk::IndexType {
+        vk::IndexType::from_raw(self as i32) 
+    }
+}
+
 /// All mesh and texture data for at scene.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Scene {
     pub meshes: Vec<Mesh>,
 
@@ -60,10 +68,62 @@ impl Scene {
     }
 }
 
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum BcFormat {
+    Bc5Unorm = vk::Format::BC5_UNORM_BLOCK.as_raw() as isize,
+    Bc7Unorm = vk::Format::BC7_UNORM_BLOCK.as_raw() as isize,
+    Bc7Srgb = vk::Format::BC7_SRGB_BLOCK.as_raw() as isize,
+}
+
+impl BcFormat {
+    pub fn block_size(self) -> usize {
+        match self {
+            BcFormat::Bc5Unorm | BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => 16,
+        }
+    }
+}
+
+impl Into<vk::Format> for BcFormat {
+    fn into(self) -> vk::Format {
+        vk::Format::from_raw(self as i32) 
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum RawFormat {
+    Rgba8Unorm = vk::Format::R8G8B8A8_UNORM.as_raw() as isize,
+    Rgba8Srgb = vk::Format::R8G8B8A8_SRGB.as_raw() as isize,
+    Rg8Unorm = vk::Format::R8G8_UNORM.as_raw() as isize,
+    R8Unorm = vk::Format::R8_UNORM.as_raw() as isize,
+}
+
+impl Into<vk::Format> for RawFormat {
+    fn into(self) -> vk::Format {
+        vk::Format::from_raw(self as i32) 
+    }
+}
+
+#[derive(Copy, Clone, Debug, Serialize, Deserialize)]
+pub enum ImageFormat {
+    Raw(RawFormat),
+    Bc(BcFormat),
+}
+
+impl Into<vk::Format> for ImageFormat {
+    fn into(self) -> vk::Format {
+        match self {
+            ImageFormat::Raw(format) => format.into(),
+            ImageFormat::Bc(format) => format.into(),
+        }
+    }
+}
+
 /// A raw image without specified format.
-#[derive(Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Image {
     pub data: Vec<u8>,
+
+    pub format: ImageFormat,
 
     /// The pixel width of the image.
     pub width: u32,
@@ -72,7 +132,7 @@ pub struct Image {
     pub height: u32,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Skybox {
     pub images: [Image; 6],
 }
@@ -96,7 +156,7 @@ impl Skybox {
 }
 
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Mesh {
     /// The index of the material in [`Scene`].
     pub material: usize,
@@ -116,7 +176,7 @@ pub struct Mesh {
     pub vertex_start: u32,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Material {
     /// Base color / albedo texture image.
     ///
@@ -135,7 +195,7 @@ pub struct Material {
 }
 
 /// Metadata of a single character glyph.
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Glyph {
     pub codepoint: char,
 
@@ -155,7 +215,7 @@ pub struct Glyph {
     pub advance: f32,
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct Font {
     /// The size of the font.
     pub size: u32,

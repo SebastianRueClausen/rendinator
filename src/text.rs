@@ -85,7 +85,7 @@ impl TextPass {
         let sampler = pool.alloc(TextureSampler::new(&renderer)?);
     
         let mut glyph_atlas = {
-            let req = ImageReq { format: vk::Format::R8_UNORM, kind: ImageKind::Texture, extent };
+            let req = ImageReq { format: font.atlas.format.into(), kind: ImageKind::Texture, extent };
             Image::new(&renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, req)?
         };
 

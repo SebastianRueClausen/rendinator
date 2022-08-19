@@ -2,6 +2,7 @@
 
 use anyhow::{anyhow, Result};
 use glam::{Vec2, Vec3, Vec4, Mat4};
+use intel_tex_2::{bc5, bc7};
 
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -64,7 +65,7 @@ fn main() -> Result<()> {
             let output = args.ouput
                 .as_ref()
                 .map(|path| path.as_path())
-                .unwrap_or(&Path::new("./out.scene"));
+                .unwrap_or(&Path::new("out.scene"));
             let res = load_scene_from_gltf(&input)?.store(output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store scene to {output:?}: {err}"));
@@ -77,7 +78,7 @@ fn main() -> Result<()> {
             let output = args.ouput
                 .as_ref()
                 .map(|path| path.as_path())
-                .unwrap_or(&Path::new("./out.font"));
+                .unwrap_or(&Path::new("out.font"));
             let res = load_font(&input)?.store(output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store font to {output:?}: {err}"));
@@ -95,7 +96,7 @@ fn main() -> Result<()> {
             let output = args.ouput
                 .as_ref()
                 .map(|path| path.as_path())
-                .unwrap_or(&Path::new("./out.skybox"));
+                .unwrap_or(&Path::new("out.skybox"));
             let res = load_skybox(inputs)?.store(output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store skybox to {output:?}: {err}"));
@@ -106,9 +107,67 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-enum ImageImportFormat {
-    Rgba,
-    Rg,
+fn create_image(image: image::DynamicImage, format: ImageFormat) -> Image {
+    match format {
+        ImageFormat::Bc(bc) => {
+            use intel_tex_2::{RgbaSurface, divide_up_by_multiple};
+
+            let (width, height, stride) = (image.width(), image.height(), image.width() * 4);
+
+            let block_bytes = bc.block_size();
+            let block_count = divide_up_by_multiple(width * height, block_bytes as u32) as usize;
+
+            let mut image = image.into_rgba8();
+            let mut compressed = vec![0x0; block_bytes * block_count];
+
+            match bc {
+                BcFormat::Bc5Unorm => {
+                    // Swizzle.
+                    for px in image.pixels_mut() {
+                        px.0[0] = px.0[1];
+                        px.0[1] = px.0[2];
+                        px.0[2] = px.0[0];
+                    } 
+                
+                    let data = image.as_raw().to_vec();
+                    let surface = RgbaSurface { width, height, stride, data: &data };
+
+                    bc5::compress_blocks_into(&surface, &mut compressed);
+                }
+                BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => {
+                    let data = image.as_raw().to_vec();
+                    let surface = RgbaSurface { width, height, stride, data: &data };
+
+                    let settings = if image.pixels().any(|px| px.0[3] != u8::MAX) {
+                        bc7::alpha_basic_settings()
+                    } else {
+                        bc7::opaque_basic_settings()
+                    };
+
+                    bc7::compress_blocks_into(&settings, &surface, &mut compressed);      
+                }
+            }
+
+            Image { width, height, format, data: compressed }
+        }
+        ImageFormat::Raw(raw) => match raw {
+            RawFormat::Rgba8Unorm | RawFormat::Rgba8Srgb => {
+                let image = image.into_rgba8();
+                let data = image.as_raw().to_vec();
+                Image { width: image.width(), height: image.height(), format, data }
+            }
+            RawFormat::Rg8Unorm => {
+                let image = image.into_luma_alpha8();
+                let data = image.as_raw().to_vec();
+                Image { width: image.width(), height: image.height(), format, data }
+            }
+            RawFormat::R8Unorm => {
+                let image = image.into_luma8();
+                let data = image.as_raw().to_vec();
+                Image { width: image.width(), height: image.height(), format, data }
+            }
+        }
+    }
 }
 
 struct GltfImporter {
@@ -169,7 +228,7 @@ impl GltfImporter {
 
     fn load_image_data(
         &self,
-        import_format: ImageImportFormat,
+        format: ImageFormat,
         source: &gltf::image::Source,
     ) -> Result<Image> {
         let image = match source {
@@ -194,28 +253,7 @@ impl GltfImporter {
             }
         };
 
-        match import_format {
-            ImageImportFormat::Rgba => {
-                let image = image.into_rgba8();
-                let data = image.as_raw().to_vec();
-
-                return Ok(Image {
-                    width: image.width(),
-                    height: image.height(),
-                    data,
-                });
-            },
-            ImageImportFormat::Rg => {
-                let image = image.into_luma_alpha8();
-                let data = image.as_raw().to_vec();
-
-                return Ok(Image {
-                    width: image.width(),
-                    height: image.height(),
-                    data,
-                });
-            },
-        }
+        Ok(create_image(image, format))
     }
 
     fn load_scene(self) -> Result<Scene> {
@@ -242,12 +280,19 @@ impl GltfImporter {
                     .texture()
                     .source()
                     .source();
-                let base_color = self.load_image_data(ImageImportFormat::Rgba, &base_color)?;
-                let normal = self.load_image_data(ImageImportFormat::Rgba, &normal)?;
+
+                let base_color = self.load_image_data(
+                    ImageFormat::Bc(BcFormat::Bc7Srgb),
+                    &base_color,
+                )?;
+
                 let metallic_roughness = self.load_image_data(
-                    ImageImportFormat::Rg,
+                    ImageFormat::Bc(BcFormat::Bc5Unorm),
                     &metallic_roughness,
                 )?;
+
+                let normal = self.load_image_data(ImageFormat::Bc(BcFormat::Bc7Unorm), &normal)?;
+
                 Ok(Material { base_color, normal, metallic_roughness })
             })
             .collect();
@@ -280,7 +325,11 @@ impl GltfImporter {
             .filter(|node| node.mesh().is_some())
             .map(|node| {
                 let mesh = node.mesh().unwrap();
-                let transform = node.transform().matrix();
+
+                let mut flip = Mat4::IDENTITY;
+                flip.col_mut(1)[1] = -1.0;
+
+                let transform = flip * Mat4::from_cols_array_2d(&node.transform().matrix());
 
                 let mut meshes = Vec::default();
 
@@ -423,8 +472,6 @@ impl GltfImporter {
                         (index_start, index_count)
                     };
 
-                    let transform = Mat4::from_cols_array_2d(&transform);
-
                     meshes.push(Mesh {
                         vertex_start,
                         index_start,
@@ -454,11 +501,13 @@ fn load_skybox(images: [&Path; 6]) -> Result<Skybox> {
         .map(|path| {
             let image = image::open(path)?.into_rgba8();
             let data = image.as_raw();
+            let format = ImageFormat::Raw(RawFormat::Rgba8Srgb);
 
             Ok(Image {
                 width: image.width() as u32,
                 height: image.height() as u32,
                 data: data.clone(),
+                format,
             })
         })
         .collect();
@@ -536,7 +585,6 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
     let height = image.height();
 
     let atlas_dim = Vec2::new(width as f32, height as f32);
-    let atlas = image.into_luma8().as_raw().to_vec();
 
     let size = font.info.size as f32;
     let glyphs: Result<Vec<_>> = font.chars
@@ -569,8 +617,8 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
         })
         .collect();
 
-    let glyphs = glyphs?;  
-    let atlas = Image { data: atlas, width, height };
+    let glyphs = glyphs?;
+    let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm));
 
     Ok(Font { size: font.info.size, atlas, glyphs })
 }
