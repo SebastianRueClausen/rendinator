@@ -67,7 +67,7 @@ fn main() -> Result<()> {
     let skybox = asset::Skybox::load(Path::new("assets/skyboxes/beach.skybox"))?;
     let skybox = Skybox::new(&renderer, &resource_pool, &skybox)?;
 
-    let scene = asset::Scene::load(Path::new("assets/scenes/helmet.scene"))?;
+    let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
     let scene = Scene::from_scene_asset(
         &renderer,
         &resource_pool,
@@ -159,22 +159,26 @@ fn main() -> Result<()> {
                         recorder.bind_graphics_pipeline(&scene.render_pipeline);
 
                         for (id, instance) in scene.instances.iter().enumerate() {
-                            let model = &scene.models[instance.model];
-                            let mat = &scene.materials[model.material];
-                            let descs = [&mat.descriptor, &scene.light_descriptor];
+                            let mesh = &scene.meshes[instance.mesh];
 
-                            recorder.bind_descriptor_sets(
-                                vk::PipelineBindPoint::GRAPHICS,
-                                scene.render_pipeline.layout(),
-                                &descs,
-                            );
-                           
-                            recorder.draw_indexed(IndexedDrawCall {
-                                vertex_offset: model.vertex_offset,
-                                index_count: model.index_count,
-                                index_start: model.index_start,
-                                instance: id as u32,
-                            });
+                            for primitive in &scene.primitives[mesh.primitives.clone()] {
+                                let mat = &scene.materials[primitive.material];
+                                let descs = [&mat.descriptor, &scene.light_descriptor];
+
+                                recorder.bind_descriptor_sets(
+                                    vk::PipelineBindPoint::GRAPHICS,
+                                    scene.render_pipeline.layout(),
+                                    &descs,
+                                );
+                               
+                                recorder.draw_indexed(IndexedDrawCall {
+                                    vertex_offset: primitive.vertex_offset,
+                                    index_count: primitive.index_count,
+                                    index_start: primitive.index_start,
+                                    instance: id as u32,
+                                });
+                            }
+
                         }
 
                         recorder.bind_vertex_buffer(&skybox.cube_map.vertex_buffer);
@@ -200,7 +204,10 @@ fn main() -> Result<()> {
                 
                         text_pass.draw_text(recorder, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
-                            texts.add_label(40.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
+                            texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
+
+                            let pos = format!("position: ({}, {}, {})", camera.pos.x, camera.pos.y, camera.pos.z);
+                            texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);
                         });
                     },
                 );
@@ -217,8 +224,10 @@ pub struct InputState {
     /// Keeps track of if each `VirtualKeyCode` is pressed or not. Each key code represents a
     /// single bit.
     key_pressed: [u64; 3],
+
     /// The current position of the mouse. `None` if no `mouse_moved` event has been received.
     mouse_pos: Option<(f64, f64)>,
+
     /// Contains the mouse position delta since last time `mouse_delta`.
     mouse_delta: Option<(f64, f64)>,
 }

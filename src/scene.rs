@@ -3,7 +3,7 @@ use anyhow::Result;
 use ash::vk;
 
 use std::mem;
-use std::ops::Index;
+use std::ops::{Range, Index};
 
 use crate::light::Lights;
 use crate::core::*;
@@ -21,16 +21,19 @@ struct InstanceData {
     inverse_transpose_transform: Mat4,
 }
 
-pub struct Model {
+pub struct Primitive {
     pub index_start: u32,
     pub index_count: u32,
     pub vertex_offset: i32,
     pub material: usize,
 }
 
+pub struct Mesh {
+    pub primitives: Range<usize>,
+}
+
 pub struct Instance {
-    /// The index of the model.
-    pub model: usize,
+    pub mesh: usize,
 }
 
 pub struct Material {
@@ -58,7 +61,11 @@ pub struct Scene {
     pub render_pipeline: GraphicsPipeline,
     pub light_descriptor: DescriptorSet,
     pub materials: Materials,
-    pub models: Vec<Model>,
+
+    /// All the primitives in the scene.
+    pub primitives: Vec<Primitive>,
+
+    pub meshes: Vec<Mesh>,
 
     /// The instances to be rendered.
     ///
@@ -281,20 +288,32 @@ impl Scene {
             }
         })?;
 
-        let instances: Vec<_> = scene.instances
+        let mut primitives = Vec::default();
+
+        let meshes: Vec<_> = scene.meshes
             .iter()
-            .map(|instance| Instance {
-                model: instance.mesh,  
+            .map(|mesh| {
+                let first = primitives.len();
+
+                primitives.extend(
+                    mesh.primitives
+                        .iter()
+                        .map(|prim| Primitive {
+                            vertex_offset: prim.vertex_start as i32,
+                            index_start: prim.index_start,
+                            index_count: prim.index_count,
+                            material: prim.material,
+                        })
+                );
+
+                Mesh { primitives: first..primitives.len() }
             })
             .collect();
 
-        let models: Vec<_> = scene.meshes
+        let instances: Vec<_> = scene.instances
             .iter()
-            .map(|mesh| Model {
-                vertex_offset: mesh.vertex_start as i32,
-                index_start: mesh.index_start,
-                index_count: mesh.index_count,
-                material: mesh.material,
+            .map(|instance| Instance {
+                mesh: instance.mesh,  
             })
             .collect();
 
@@ -481,7 +500,8 @@ impl Scene {
             index_buffer,
             instance_buffer,
             instances,
-            models,
+            meshes,
+            primitives,
             materials,
             index_format,
         })

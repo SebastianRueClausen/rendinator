@@ -197,8 +197,7 @@ impl GltfImporter {
             .buffers()
             .map(|buffer| {
                 Ok(match buffer.source() {
-                    gltf::buffer::Source::Bin => gltf
-                        .blob
+                    gltf::buffer::Source::Bin => gltf.blob
                         .as_ref()
                         .map(|blob| blob.clone().into_boxed_slice())
                         .ok_or_else(|| anyhow!("no binary blob in gltf scene"))?,
@@ -303,10 +302,14 @@ impl GltfImporter {
             .nodes()
             .filter_map(|node| node.mesh().map(|mesh| (node, mesh.index())))
             .map(|(node, mesh)| {
+                /*
                 let mut flip = Mat4::IDENTITY;
                 flip.col_mut(1)[1] = -1.0;
 
                 let transform = flip * Mat4::from_cols_array_2d(&node.transform().matrix());
+                */
+                
+                let transform = Mat4::from_cols_array_2d(&node.transform().matrix());
 
                 Instance { mesh, transform }
             })
@@ -316,16 +319,9 @@ impl GltfImporter {
         let mut indices = Vec::<u8>::new();
 
         let index_format = self.gltf
-            .nodes()
-            .filter(|node| node
-                .mesh()
-                .is_some()
-            )
-            .flat_map(|node| node
-                .mesh()
-                .unwrap()
-                .primitives()
-            )
+            .meshes()
+            .map(|mesh| mesh.primitives())
+            .flatten()
             .filter_map(|prim| prim
                 .indices()
                 .map(|acc| acc.data_type())
@@ -337,7 +333,7 @@ impl GltfImporter {
         let meshes: Result<Vec<_>> = self.gltf
             .meshes()
             .map(|mesh| {
-                let mut meshes = Vec::default();
+                let mut primitives = Vec::default();
 
                 for primitive in mesh.primitives() {
                     let Some(material) = primitive.material().index() else {
@@ -478,14 +474,14 @@ impl GltfImporter {
                         (index_start, index_count)
                     };
 
-                    meshes.push(Mesh { vertex_start, index_start, index_count, material })
+                    primitives.push(Primitive { vertex_start, index_start, index_count, material })
                 }
 
-                Ok(meshes)
+                Ok(Mesh { primitives })
             })
             .collect();
 
-        let meshes = meshes?.into_iter().flatten().collect();
+        let meshes = meshes?;
 
         Ok(Scene { vertices, indices, meshes, materials, instances, index_format })
     }

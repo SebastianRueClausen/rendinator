@@ -158,12 +158,12 @@ impl Skybox {
 }
 
 
-#[derive(Serialize, Deserialize)]
-pub struct Mesh {
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct Primitive {
     /// The material of the mesh.
     pub material: usize,
 
-    /// The first index from `Mesh::indices` used.
+    /// The first index from `Scene::indices` used.
     pub index_start: u32,
 
     /// The number of indices in the mesh.
@@ -176,8 +176,13 @@ pub struct Mesh {
 }
 
 #[derive(Serialize, Deserialize)]
+pub struct Mesh {
+    pub primitives: Vec<Primitive> 
+}
+
+#[derive(Serialize, Deserialize)]
 pub struct Instance {
-    /// The index of the mesh used.
+    /// The index of the model used.
     pub mesh: usize,
 
     /// The transform matrix of the instance.
