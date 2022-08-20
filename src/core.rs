@@ -273,7 +273,7 @@ impl Device {
         let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let layer_names = [validation_layer.as_ptr()];
 
-        let version = vk::make_api_version(0, 1, 0, 0);
+        let version = vk::make_api_version(0, 1, 2, 0);
 
         let instance = unsafe {
             let engine_name = CString::new("spillemotor").unwrap();
@@ -1791,6 +1791,13 @@ impl Drop for GraphicsPipeline {
     }
 }
 
+pub struct IndexedDrawCall {
+    pub instance: u32,
+    pub index_count: u32,
+    pub index_start: u32,
+    pub vertex_offset: i32,
+}
+
 pub struct CommandRecorder {
     pub buffer: vk::CommandBuffer,
     frame_index: usize,
@@ -1955,7 +1962,7 @@ impl CommandRecorder {
     }
 
     pub fn bind_vertex_buffer(&self, buffer: &Buffer) {
-        unsafe { self.device.cmd_bind_vertex_buffers( self.buffer, 0, &[buffer.handle], &[0]); }
+        unsafe { self.device.cmd_bind_vertex_buffers(self.buffer, 0, &[buffer.handle], &[0]); }
     }
 
     pub fn bind_index_buffer(&self, buffer: &Buffer, index_type: vk::IndexType) {
@@ -1986,9 +1993,16 @@ impl CommandRecorder {
         }
     }
 
-    pub fn draw_indexed(&self, index_count: u32, index_start: u32, vertex_off: i32) {
+    pub fn draw_indexed(&self, call: IndexedDrawCall) {
         unsafe {
-            self.device.cmd_draw_indexed(self.buffer, index_count, 1, index_start, vertex_off, 0);
+            self.device.cmd_draw_indexed(
+                self.buffer,
+                call.index_count,
+                1,
+                call.index_start,
+                call.vertex_offset,
+                call.instance,
+            );
         }
     }
 

@@ -1,4 +1,4 @@
-#![feature(let_else, int_roundings, array_from_fn)]
+#![feature(let_else, int_roundings)]
 
 #[macro_use]
 extern crate log;
@@ -25,7 +25,7 @@ use ash::vk;
 use std::time::Instant;
 use std::path::Path;
 
-use crate::core::Renderer;
+use crate::core::{IndexedDrawCall, Renderer};
 use crate::text::TextPass;
 use crate::scene::Scene;
 use crate::light::{Lights, PointLight};
@@ -153,12 +153,13 @@ fn main() -> Result<()> {
                             IndexFormat::U32 => vk::IndexType::UINT32,
                         };
 
-                        recorder.bind_index_buffer(scene.index_buffer(), index_type);
-                        recorder.bind_vertex_buffer(scene.vertex_buffer());
+                        recorder.bind_index_buffer(&scene.index_buffer, index_type);
+                        recorder.bind_vertex_buffer(&scene.vertex_buffer);
 
                         recorder.bind_graphics_pipeline(&scene.render_pipeline);
 
-                        for model in scene.models.iter() {
+                        for (id, instance) in scene.instances.iter().enumerate() {
+                            let model = &scene.models[instance.model];
                             let mat = &scene.materials[model.material];
                             let descs = [&mat.descriptor, &scene.light_descriptor];
 
@@ -168,18 +169,12 @@ fn main() -> Result<()> {
                                 &descs,
                             );
                            
-                            recorder.push_constants(
-                                &scene.render_pipeline.layout(),
-                                vk::ShaderStageFlags::VERTEX,
-                                0,
-                                *&model.transform(),
-                            );
-
-                            recorder.draw_indexed(
-                                model.index_count,
-                                model.index_start,
-                                model.vertex_start as i32,
-                            );
+                            recorder.draw_indexed(IndexedDrawCall {
+                                vertex_offset: model.vertex_offset,
+                                index_count: model.index_count,
+                                index_start: model.index_start,
+                                instance: id as u32,
+                            });
                         }
 
                         recorder.bind_vertex_buffer(&skybox.cube_map.vertex_buffer);

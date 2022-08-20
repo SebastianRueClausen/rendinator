@@ -213,7 +213,12 @@ impl TextPass {
                 &proj_transform,
             );
 
-            recorder.draw_indexed(label.index_count, label.index_offset, 0);
+            recorder.draw_indexed(IndexedDrawCall {
+                index_count: label.index_count,
+                index_start: label.index_offset,
+                vertex_offset: 0,
+                instance: 0,
+            });
         }
     }
 }

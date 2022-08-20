@@ -13,7 +13,7 @@ use crate::skybox::Skybox;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
-pub struct ModelTransform {
+struct InstanceData {
     #[allow(dead_code)]
     transform: Mat4,
 
@@ -24,17 +24,13 @@ pub struct ModelTransform {
 pub struct Model {
     pub index_start: u32,
     pub index_count: u32,
-    pub vertex_start: u32,
-    
+    pub vertex_offset: i32,
     pub material: usize,
-
-    transform: ModelTransform,
 }
 
-impl Model {
-    pub fn transform(&self) -> &ModelTransform {
-        &self.transform
-    }
+pub struct Instance {
+    /// The index of the model.
+    pub model: usize,
 }
 
 pub struct Material {
@@ -63,7 +59,22 @@ pub struct Scene {
     pub light_descriptor: DescriptorSet,
     pub materials: Materials,
     pub models: Vec<Model>,
-    pub buffers: Vec<Res<Buffer>>,
+
+    /// The instances to be rendered.
+    ///
+    /// Their index is determined by their index in the vector.
+    pub instances: Vec<Instance>,
+
+    /// Vertex buffer containing all vertex data for all objects in the scene.
+    pub vertex_buffer: Res<Buffer>,
+
+    /// Index buffer containing all vertex data for objects in the scene.
+    pub index_buffer: Res<Buffer>,
+
+    /// Buffer containing [`InstanceData`] for each model.
+    pub instance_buffer: Res<Buffer>,
+
+    /// The format of the indices in `index_buffer`.
     pub index_format: asset::IndexFormat,
 }
 
@@ -76,13 +87,26 @@ impl Scene {
         lights: &Lights,
         scene: &asset::Scene,
     ) -> Result<Self> {
+        let instances: Vec<_> = scene.instances
+            .iter()
+            .map(|instance| InstanceData {
+                transform: instance.transform,
+                inverse_transpose_transform: instance
+                    .transform
+                    .inverse()
+                    .transpose()
+            })
+            .collect();
+
         let vertex_size = (scene.vertices.len() * mem::size_of::<asset::Vertex>()) as u64;
+        let instance_size = (instances.len() * mem::size_of::<InstanceData>()) as u64;
         let index_size = scene.indices.len() as u64;
 
         let staging = {
             let reqs = [
                 BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: vertex_size },
                 BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: index_size },
+                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: instance_size },
             ];
 
             let memory_flags =
@@ -97,11 +121,15 @@ impl Scene {
             )?;
 
             let mapped = MappedMemory::new(block.clone())?;
-
-            let vertex_data: &[u8] = bytemuck::cast_slice(scene.vertices.as_slice());
             let index_data = scene.indices.as_slice();
 
-            for (data, buffer) in [vertex_data, index_data].iter().zip(buffers.iter()) {
+            let vertex_data: &[u8] = bytemuck::cast_slice(scene.vertices.as_slice());
+            let instance_data: &[u8] = bytemuck::cast_slice(instances.as_slice());
+
+            for (data, buffer) in [vertex_data, index_data, instance_data]
+                .iter()
+                .zip(buffers.iter())
+            {
                 mapped.get_buffer_data(buffer).copy_from_slice(&data);
             }
 
@@ -119,6 +147,11 @@ impl Scene {
                     usage: vk::BufferUsageFlags::INDEX_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_DST,
                     size: index_size,
+                },
+                BufferReq {
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    size: instance_size, 
                 },
             ];
 
@@ -138,6 +171,10 @@ impl Scene {
                 recorder.copy_buffers(src, dst);
             }
         })?;
+
+        let vertex_buffer = buffers[0].clone();
+        let index_buffer = buffers[1].clone();
+        let instance_buffer = buffers[2].clone();
 
         let staging = {
             let create_infos: Vec<_> = scene.materials
@@ -244,21 +281,20 @@ impl Scene {
             }
         })?;
 
+        let instances: Vec<_> = scene.instances
+            .iter()
+            .map(|instance| Instance {
+                model: instance.mesh,  
+            })
+            .collect();
+
         let models: Vec<_> = scene.meshes
             .iter()
-            .map(|mesh| {
-                let transform = ModelTransform {
-                    transform: mesh.transform,
-                    inverse_transpose_transform: mesh.transform.inverse().transpose(),
-                };
-
-                Model {
-                    material: mesh.material,
-                    transform,
-                    vertex_start: mesh.vertex_start,
-                    index_start: mesh.index_start,
-                    index_count: mesh.index_count,
-                }
+            .map(|mesh| Model {
+                vertex_offset: mesh.vertex_start as i32,
+                index_start: mesh.index_start,
+                index_count: mesh.index_count,
+                material: mesh.material,
             })
             .collect();
 
@@ -303,6 +339,10 @@ impl Scene {
                 stage: vk::ShaderStageFlags::FRAGMENT,
             },
             LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX,
+            },
+            LayoutBinding {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
             },
@@ -338,6 +378,10 @@ impl Scene {
                     DescriptorBinding::Buffer([
                         camera_uniforms.proj_uniform().clone(),
                         camera_uniforms.proj_uniform().clone(),
+                    ]),
+                    DescriptorBinding::Buffer([
+                        instance_buffer.clone(),
+                        instance_buffer.clone(),
                     ]),
                     DescriptorBinding::Image(sampler.clone(), [
                         skybox.cube_map.image.clone(),
@@ -380,13 +424,7 @@ impl Scene {
                 .depth_write_enable(true)
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::VERTEX)
-                .size(mem::size_of::<ModelTransform>() as u32)
-                .offset(0)
-                .build()];
-
-            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
+            let layout = pool.alloc(PipelineLayout::new(&renderer, &[], &[
                 descriptor_layout.clone(),
                 light_descriptor.layout.clone(),
             ])?);
@@ -436,14 +474,16 @@ impl Scene {
         let materials = Materials { images, sampler, materials };
         let index_format = scene.index_format;
 
-        Ok(Self { light_descriptor, render_pipeline, buffers, models, materials, index_format })
-    }
-
-    pub fn vertex_buffer(&self) -> &Buffer {
-        &self.buffers[0]
-    }
-
-    pub fn index_buffer(&self) -> &Buffer {
-        &self.buffers[1]
+        Ok(Self {
+            light_descriptor,
+            render_pipeline,
+            vertex_buffer,
+            index_buffer,
+            instance_buffer,
+            instances,
+            models,
+            materials,
+            index_format,
+        })
     }
 }

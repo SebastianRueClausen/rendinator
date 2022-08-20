@@ -43,6 +43,8 @@ impl Into<vk::IndexType> for IndexFormat {
 pub struct Scene {
     pub meshes: Vec<Mesh>,
 
+    pub instances: Vec<Instance>,
+
     /// All materials used in the scene.
     pub materials: Vec<Material>,
 
@@ -158,11 +160,8 @@ impl Skybox {
 
 #[derive(Serialize, Deserialize)]
 pub struct Mesh {
-    /// The index of the material in [`Scene`].
+    /// The material of the mesh.
     pub material: usize,
-
-    /// The transform matrix of the mesh.
-    pub transform: Mat4,
 
     /// The first index from `Mesh::indices` used.
     pub index_start: u32,
@@ -174,6 +173,15 @@ pub struct Mesh {
     ///
     /// This is the first vertex index 0 points to.
     pub vertex_start: u32,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Instance {
+    /// The index of the mesh used.
+    pub mesh: usize,
+
+    /// The transform matrix of the instance.
+    pub transform: Mat4,
 }
 
 #[derive(Serialize, Deserialize)]

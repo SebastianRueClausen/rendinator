@@ -7,9 +7,13 @@ layout (set = 0, binding = 0) uniform View {
 	mat4 proj_view;
 };
 
-layout (push_constant) uniform PushConstant {
+struct InstanceData {
 	mat4 transform;
 	mat4 inverse_transpose_transform;
+};
+
+layout (std430, set = 0, binding = 2) buffer Instances {
+	InstanceData instance_data[];
 };
 
 layout (location = 0) in vec3 in_position;
@@ -27,13 +31,14 @@ layout (location = 4) out vec4 out_world_position;
 layout (location = 5) out float out_view_z;
 
 void main() {
-	vec4 position = vec4(in_position, 1.0);
-	vec4 world = transform * position;
+	const vec4 position = vec4(in_position, 1.0);
+	const InstanceData instance = instance_data[gl_InstanceIndex];
+	const vec4 world = instance.transform * position;
 
 	out_texcoord = in_texcoord;
 
-	out_world_normal = normalize(mat3(inverse_transpose_transform) * in_normal);
-	out_world_tangent = normalize(vec4(mat3(transform) * in_tangent.xyz, in_tangent.w));
+	out_world_normal = normalize(mat3(instance.inverse_transpose_transform) * in_normal);
+	out_world_tangent = normalize(vec4(mat3(instance.transform) * in_tangent.xyz, in_tangent.w));
 	out_world_bitangent = out_world_tangent.w * cross(out_world_tangent.xyz, out_world_normal);
 	out_world_position = world;
 

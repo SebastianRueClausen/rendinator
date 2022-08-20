@@ -299,6 +299,19 @@ impl GltfImporter {
 
         let materials = materials?;
 
+        let instances: Vec<_> = self.gltf
+            .nodes()
+            .filter_map(|node| node.mesh().map(|mesh| (node, mesh.index())))
+            .map(|(node, mesh)| {
+                let mut flip = Mat4::IDENTITY;
+                flip.col_mut(1)[1] = -1.0;
+
+                let transform = flip * Mat4::from_cols_array_2d(&node.transform().matrix());
+
+                Instance { mesh, transform }
+            })
+            .collect();
+
         let mut vertices = Vec::<Vertex>::new();
         let mut indices = Vec::<u8>::new();
 
@@ -321,16 +334,9 @@ impl GltfImporter {
             .then_some(IndexFormat::U32)
             .unwrap_or(IndexFormat::U16);
 
-        let meshes: Result<Vec<_>> = self.gltf.nodes()
-            .filter(|node| node.mesh().is_some())
-            .map(|node| {
-                let mesh = node.mesh().unwrap();
-
-                let mut flip = Mat4::IDENTITY;
-                flip.col_mut(1)[1] = -1.0;
-
-                let transform = flip * Mat4::from_cols_array_2d(&node.transform().matrix());
-
+        let meshes: Result<Vec<_>> = self.gltf
+            .meshes()
+            .map(|mesh| {
                 let mut meshes = Vec::default();
 
                 for primitive in mesh.primitives() {
@@ -472,13 +478,7 @@ impl GltfImporter {
                         (index_start, index_count)
                     };
 
-                    meshes.push(Mesh {
-                        vertex_start,
-                        index_start,
-                        index_count,
-                        material,
-                        transform,
-                    })
+                    meshes.push(Mesh { vertex_start, index_start, index_count, material })
                 }
 
                 Ok(meshes)
@@ -487,7 +487,7 @@ impl GltfImporter {
 
         let meshes = meshes?.into_iter().flatten().collect();
 
-        Ok(Scene { vertices, indices, meshes, materials, index_format })
+        Ok(Scene { vertices, indices, meshes, materials, instances, index_format })
     }
 }
 

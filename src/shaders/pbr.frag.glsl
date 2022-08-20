@@ -21,10 +21,10 @@ readonly layout (std140, set = 0, binding = 1) uniform Proj {
 	vec2 screen_dimensions;
 };
 
-layout (set = 0, binding = 2) uniform samplerCube skybox_sampler;
-layout (set = 0, binding = 3) uniform sampler2D base_color_sampler;
-layout (set = 0, binding = 4) uniform sampler2D normal_sampler;
-layout (set = 0, binding = 5) uniform sampler2D specular_sampler;
+layout (set = 0, binding = 3) uniform samplerCube skybox_sampler;
+layout (set = 0, binding = 4) uniform sampler2D base_color_sampler;
+layout (set = 0, binding = 5) uniform sampler2D normal_sampler;
+layout (set = 0, binding = 6) uniform sampler2D specular_sampler;
 
 readonly layout (std140, set = 1, binding = 0) uniform Cluster {
 	ClusterInfo cluster_info;
