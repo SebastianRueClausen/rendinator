@@ -24,8 +24,9 @@ use ash::vk;
 
 use std::time::Instant;
 use std::path::Path;
+use std::mem;
 
-use crate::core::{IndexedDrawCall, Renderer};
+use crate::core::Renderer;
 use crate::text::TextPass;
 use crate::scene::Scene;
 use crate::light::{Lights, PointLight};
@@ -158,28 +159,18 @@ fn main() -> Result<()> {
 
                         recorder.bind_graphics_pipeline(&scene.render_pipeline);
 
-                        for (id, instance) in scene.instances.iter().enumerate() {
-                            let mesh = &scene.meshes[instance.mesh];
-
-                            for primitive in &scene.primitives[mesh.primitives.clone()] {
-                                let mat = &scene.materials[primitive.material];
-                                let descs = [&mat.descriptor, &scene.light_descriptor];
-
-                                recorder.bind_descriptor_sets(
-                                    vk::PipelineBindPoint::GRAPHICS,
-                                    scene.render_pipeline.layout(),
-                                    &descs,
-                                );
+                        recorder.bind_descriptor_sets(
+                            vk::PipelineBindPoint::GRAPHICS,
+                            scene.render_pipeline.layout(),
+                            &[&scene.descriptor, &scene.light_descriptor],
+                        );
                                
-                                recorder.draw_indexed(IndexedDrawCall {
-                                    vertex_offset: primitive.vertex_offset,
-                                    index_count: primitive.index_count,
-                                    index_start: primitive.index_start,
-                                    instance: id as u32,
-                                });
-                            }
-
-                        }
+                        recorder.draw_indexed_indirect(
+                            &scene.draw_buffer,
+                            0,
+                            mem::size_of::<scene::DrawCommand>(),
+                            scene.draw_count,
+                        );
 
                         recorder.bind_vertex_buffer(&skybox.cube_map.vertex_buffer);
                         recorder.bind_graphics_pipeline(&skybox.pipeline);

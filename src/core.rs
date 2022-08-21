@@ -1,7 +1,7 @@
 use anyhow::Result;
 use ash::extensions::{ext, khr}; use ash::vk;
 use glam::UVec3;
-use smallvec::SmallVec;
+use smallvec::{SmallVec, smallvec};
 use arrayvec::ArrayVec;
 
 use std::ffi::{self, CStr, CString};
@@ -428,22 +428,35 @@ impl Device {
 
         let enabled_features = vk::PhysicalDeviceFeatures::builder()
             .sampler_anisotropy(true)
+            .multi_draw_indirect(true)
             .build();
 
-        // Only create queues for both transfer and graphics if they aren't the same queue.
-        let device_info = if transfer_index != graphics_index {
-            vk::DeviceCreateInfo::builder()
-                .queue_create_infos(&queue_infos)
-                .enabled_extension_names(&extensions)
-                .enabled_layer_names(&layer_names)
-                .enabled_features(&enabled_features)
+        let mut vk11_features = vk::PhysicalDeviceVulkan11Features::builder()
+            .shader_draw_parameters(true)
+            .build();
+
+        let mut vk12_features = vk::PhysicalDeviceVulkan12Features::builder()
+            .shader_sampled_image_array_non_uniform_indexing(true)
+            .shader_input_attachment_array_dynamic_indexing(true)
+            .runtime_descriptor_array(true)
+            .descriptor_binding_variable_descriptor_count(true)
+            .draw_indirect_count(true)
+            .descriptor_indexing(true)
+            .build();
+
+        let queue_create_infos = if transfer_index != graphics_index {
+            &queue_infos
         } else {
-            vk::DeviceCreateInfo::builder()
-                .queue_create_infos(&queue_infos[1..])
-                .enabled_extension_names(&extensions)
-                .enabled_layer_names(&layer_names)
-                .enabled_features(&enabled_features)
+            &queue_infos[1..]
         };
+
+        let device_info = vk::DeviceCreateInfo::builder()
+            .queue_create_infos(queue_create_infos)
+            .enabled_extension_names(&extensions)
+            .enabled_layer_names(&layer_names)
+            .enabled_features(&enabled_features)
+            .push_next(&mut vk11_features)
+            .push_next(&mut vk12_features);
 
         let handle = unsafe { instance.create_device(physical, &device_info, None)? };
 
@@ -1364,14 +1377,28 @@ impl Drop for ShaderModule {
 pub struct LayoutBinding {
     pub stage: vk::ShaderStageFlags,
     pub ty: vk::DescriptorType,
+    pub array_count: Option<u32>,
 }
 
 struct LayoutBindings {
     bindings: SmallVec<[vk::DescriptorSetLayoutBinding; 6]>,
+    flags: SmallVec<[vk::DescriptorBindingFlags; 6]>,
 }
 
 impl LayoutBindings {
     fn new(bindings: &[LayoutBinding]) -> Self  {
+        let flags = bindings
+            .iter()
+            .map(|binding| {
+                let mut flags = vk::DescriptorBindingFlags::empty(); 
+
+                if binding.array_count.is_some() {
+                    flags |= vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
+                }
+
+                flags
+            })
+            .collect();
         let bindings = bindings
             .iter()
             .enumerate()
@@ -1379,12 +1406,12 @@ impl LayoutBindings {
                 vk::DescriptorSetLayoutBinding::builder()
                     .binding(i as u32)
                     .descriptor_type(binding.ty)
-                    .descriptor_count(1)
+                    .descriptor_count(binding.array_count.unwrap_or(1))
                     .stage_flags(binding.stage)
                     .build()
             })
             .collect();
-        Self { bindings }
+        Self { bindings, flags }
     }
 
     fn iter(&self) -> impl Iterator<Item = &vk::DescriptorSetLayoutBinding> {
@@ -1392,9 +1419,10 @@ impl LayoutBindings {
     }
 }
 
-pub enum DescriptorBinding<const N: usize> {
+pub enum DescriptorBinding<'a, const N: usize> {
     Buffer([Res<Buffer>; N]),
     Image(Res<TextureSampler>, [Res<Image>; N]),
+    VariableImageArray(Res<TextureSampler>, [&'a [Res<Image>]; N]),
 }
 
 pub struct DescriptorSetLayout {
@@ -1410,8 +1438,12 @@ impl DescriptorSetLayout {
 
     fn create(renderer: &Renderer, bindings: LayoutBindings) -> Result<Self> {
         let device = renderer.device.clone();
+        let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
+            .binding_flags(&bindings.flags)
+            .build();
         let layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
             .bindings(&bindings.bindings)
+            .push_next(&mut binding_flags)
             .build();
         let handle = unsafe { device.handle.create_descriptor_set_layout(&layout_info, None)? };
         Ok(Self { handle, bindings, device })
@@ -1497,13 +1529,32 @@ impl DescriptorSet {
         };
 
         let sets = unsafe {
-            let layouts: SmallVec<[_; 12]> = iter::repeat(layout.clone())
+            let set_counts: SmallVec<[u32; FRAMES_IN_FLIGHT]> = iter::repeat(bindings)
+                .take(N)
+                .enumerate()
+                .map(|(i, bindings)| {
+                    bindings
+                        .iter()
+                        .last()
+                        .map(|binding| match binding {
+                            DescriptorBinding::Buffer(_) | DescriptorBinding::Image(_, _) => 1,
+                            DescriptorBinding::VariableImageArray(_, array) => array[i].len() as u32,
+                        })
+                        .unwrap_or(1)
+                })
+                .collect();
+            let mut variable_count_info =
+                vk::DescriptorSetVariableDescriptorCountAllocateInfo::builder()
+                    .descriptor_counts(&set_counts)
+                    .build();
+            let layouts: SmallVec<[_; FRAMES_IN_FLIGHT]> = iter::repeat(layout.clone())
                 .take(N)
                 .map(|layout| layout.handle)
                 .collect();
             let alloc_info = vk::DescriptorSetAllocateInfo::builder()
                 .descriptor_pool(pool)
-                .set_layouts(&layouts);
+                .set_layouts(&layouts)
+                .push_next(&mut variable_count_info);
 
             device.handle.allocate_descriptor_sets(&alloc_info)?
         };
@@ -1511,8 +1562,8 @@ impl DescriptorSet {
         for (n, set) in sets.iter().enumerate() {
             struct Info {
                 ty: vk::DescriptorType,
-                buffer: [vk::DescriptorBufferInfo; 1],
-                image: [vk::DescriptorImageInfo; 1],
+                buffers: SmallVec<[vk::DescriptorBufferInfo; 1]>,
+                images: SmallVec<[vk::DescriptorImageInfo; 1]>,
             }
 
             let infos: SmallVec<[Info; 12]> = bindings
@@ -1522,8 +1573,8 @@ impl DescriptorSet {
                     match &binding {
                         DescriptorBinding::Buffer(buffers) => Info {
                             ty: layout_binding.descriptor_type,
-                            image: Default::default(),
-                            buffer: [vk::DescriptorBufferInfo {
+                            images: smallvec![vk::DescriptorImageInfo::default()],
+                            buffers: smallvec![vk::DescriptorBufferInfo {
                                 buffer: buffers[n].handle,
                                 offset: 0,
                                 range: buffers[n].size(),
@@ -1531,12 +1582,24 @@ impl DescriptorSet {
                         },
                         DescriptorBinding::Image(sampler, images) => Info {
                             ty: layout_binding.descriptor_type,
-                            buffer: Default::default(),
-                            image: [vk::DescriptorImageInfo {
-                                image_layout: images[n].layout.get(),
+                            buffers: smallvec![vk::DescriptorBufferInfo::default()],
+                            images: smallvec![vk::DescriptorImageInfo {
+                                image_layout: images[n].layout(),
                                 image_view: images[n].view,
                                 sampler: sampler.handle,
                             }],
+                        },
+                        DescriptorBinding::VariableImageArray(sampler, arrays) => Info {
+                            ty: layout_binding.descriptor_type,
+                            buffers: smallvec![vk::DescriptorBufferInfo::default()],
+                            images: arrays[n]
+                                .iter()
+                                .map(|image| vk::DescriptorImageInfo {
+                                    image_layout: image.layout(),
+                                    image_view: image.view,
+                                    sampler: sampler.handle,
+                                })
+                                .collect(),
                         },
                     }
                 })
@@ -1550,8 +1613,8 @@ impl DescriptorSet {
                         .dst_set(*set)
                         .dst_binding(binding as u32)
                         .descriptor_type(info.ty)
-                        .buffer_info(&info.buffer)
-                        .image_info(&info.image)
+                        .buffer_info(&info.buffers)
+                        .image_info(&info.images)
                         .build()
                 })
                 .collect();
@@ -1572,6 +1635,15 @@ impl DescriptorSet {
 
                     for image in images {
                         resources.push(BoundResource::Image(image.clone()));
+                    }
+                }
+                DescriptorBinding::VariableImageArray(sampler, arrays) => {
+                    resources.push(BoundResource::Sampler(sampler.clone()));
+
+                    for array in arrays {
+                        for image in *array {
+                            resources.push(BoundResource::Image(image.clone())); 
+                        }
                     }
                 }
             }
@@ -2005,6 +2077,25 @@ impl CommandRecorder {
             );
         }
     }
+
+    pub fn draw_indexed_indirect(
+        &self,
+        buffer: &Buffer,
+        offset: u64,
+        command_size: usize,
+        draw_count: u32,
+    ) {
+        unsafe {
+            self.device.cmd_draw_indexed_indirect(
+                self.buffer,
+                buffer.handle,
+                offset,
+                draw_count,
+                command_size as u32,
+            );
+        }
+    }
+
 
     pub fn buffer_rw_barrier(
         &self,

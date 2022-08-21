@@ -321,14 +321,17 @@ impl Lights {
                 LayoutBinding {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
             ])?);
 
@@ -355,14 +358,17 @@ impl Lights {
                 LayoutBinding {
                     ty: vk::DescriptorType::UNIFORM_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
             ])?);
 
@@ -392,18 +398,22 @@ impl Lights {
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
                 LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     stage: vk::ShaderStageFlags::COMPUTE,
+                    array_count: None,
                 },
             ])?);
 

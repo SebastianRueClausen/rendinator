@@ -302,15 +302,7 @@ impl GltfImporter {
             .nodes()
             .filter_map(|node| node.mesh().map(|mesh| (node, mesh.index())))
             .map(|(node, mesh)| {
-                /*
-                let mut flip = Mat4::IDENTITY;
-                flip.col_mut(1)[1] = -1.0;
-
-                let transform = flip * Mat4::from_cols_array_2d(&node.transform().matrix());
-                */
-                
                 let transform = Mat4::from_cols_array_2d(&node.transform().matrix());
-
                 Instance { mesh, transform }
             })
             .collect();

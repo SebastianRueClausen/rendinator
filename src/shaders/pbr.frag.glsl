@@ -1,6 +1,9 @@
 #version 450
 #pragma shader_stage(fragment)
 
+#extension GL_GOOGLE_include_directive: require
+#extension GL_EXT_nonuniform_qualifier: require
+
 #include "cluster_general.glsl"
 
 #ifdef CLUSTER_DEBUG
@@ -21,10 +24,8 @@ readonly layout (std140, set = 0, binding = 1) uniform Proj {
 	vec2 screen_dimensions;
 };
 
-layout (set = 0, binding = 3) uniform samplerCube skybox_sampler;
-layout (set = 0, binding = 4) uniform sampler2D base_color_sampler;
-layout (set = 0, binding = 5) uniform sampler2D normal_sampler;
-layout (set = 0, binding = 6) uniform sampler2D specular_sampler;
+layout (set = 0, binding = 4) uniform samplerCube skybox_sampler;
+layout (set = 0, binding = 5) uniform sampler2D textures[];
 
 readonly layout (std140, set = 1, binding = 0) uniform Cluster {
 	ClusterInfo cluster_info;
@@ -42,13 +43,12 @@ readonly layout (std430, set = 1, binding = 2) buffer LightMasks {
 };
 
 layout (location = 0) in vec2 in_texcoord;
-
 layout (location = 1) in vec3 in_world_normal;
 layout (location = 2) in vec4 in_world_tangent;
 layout (location = 3) in vec3 in_world_bitangent;
 layout (location = 4) in vec4 in_world_position;
-
 layout (location = 5) in float in_view_z;
+layout (location = 6) flat in uvec3 in_textures;
 
 layout (location = 0) out vec4 out_color;
 
@@ -59,19 +59,20 @@ uvec3 cluster_coords(vec2 coords, float view_z) {
 }
 
 void main() {
-	const vec4 color = texture(base_color_sampler, in_texcoord);
+	const vec4 color = texture(textures[in_textures.x], in_texcoord);
+	const vec2 specular_params = texture(textures[in_textures.y], in_texcoord).ba;
+	vec3 normal = texture(textures[in_textures.z], in_texcoord).rgb * 2.0 - 1.0;
+
 	const vec3 albedo = color.rgb;
 
-	vec3 normal = texture(normal_sampler, in_texcoord).rgb * 2.0 - 1.0;
+	const float metallic = specular_params.r;
+	const float rough = clamp(geometric_aa(normal, specular_params.g * specular_params.g), 0.05, 1.0);
+
 	normal = normalize(
 		normal.x * in_world_tangent.xyz
 			+ normal.y * in_world_bitangent
 			+ normal.z * normalize(in_world_normal)
 	);
-
-	const vec2 specular_params = texture(specular_sampler, in_texcoord).ba;
-	const float metallic = specular_params.r;
-	const float rough = clamp(geometric_aa(normal, specular_params.g * specular_params.g), 0.05, 1.0);
 
 	const vec3 view_dir = normalize(eye.xyz - in_world_position.xyz);
 	const float norm_dot_view = clamp(dot(normal, view_dir), 0.0001, 1.0);

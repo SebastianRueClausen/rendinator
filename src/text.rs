@@ -98,6 +98,7 @@ impl TextPass {
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[LayoutBinding {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             stage: vk::ShaderStageFlags::FRAGMENT,
+            array_count: None,
         }])?);
 
         let descriptor = DescriptorSet::new_single(&renderer, layout, &[

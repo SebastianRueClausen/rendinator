@@ -60,6 +60,7 @@ impl Skybox {
             LayoutBinding {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
+                array_count: None,
             },
         ])?);
 
