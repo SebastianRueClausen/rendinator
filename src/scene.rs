@@ -98,13 +98,11 @@ impl Scene {
                     mesh.primitives
                         .iter()
                         .map(|prim| {
-                            let base = prim.material as u32 * 3;
-
+                            let material = &scene.materials[prim.material];
                             DrawCommand {
-                                albedo_map: base,
-                                normal_map: base + 1,
-                                specular_map: base + 2,
-
+                                albedo_map: material.albedo_map as u32,
+                                normal_map: material.normal_map as u32,
+                                specular_map: material.specular_map as u32,
                                 command: vk::DrawIndexedIndirectCommand {
                                     first_index: prim.index_start,
                                     index_count: prim.index_count,
@@ -211,22 +209,12 @@ impl Scene {
         let draw_buffer = buffers[3].clone();
 
         let staging = {
-            let create_infos: Vec<_> = scene.materials
+            let create_infos: Vec<_> = scene.textures
                 .iter()
-                .flat_map(|mat| [
-                    BufferReq {
-                        usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                        size: mat.base_color.data.len() as u64,
-                    },
-                    BufferReq {
-                        usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                        size: mat.normal.data.len() as u64,
-                    },
-                    BufferReq {
-                        usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                        size: mat.metallic_roughness.data.len() as u64,
-                    },
-                ])
+                .map(|tex| BufferReq {
+                    usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                    size: tex.data.len() as u64,
+                })
                 .collect();
 
             let memory_flags =
@@ -242,13 +230,9 @@ impl Scene {
 
             let mapped = MappedMemory::new(block.clone())?;
            
-            scene.materials
+            scene.textures
                 .iter()
-                .flat_map(|mat| [
-                    mat.base_color.data.as_slice(),
-                    mat.normal.data.as_slice(),
-                    mat.metallic_roughness.data.as_slice(),
-                ])
+                .map(|tex| tex.data.as_slice())
                 .zip(staging.iter())
                 .for_each(|(data, buffer)| {
                     mapped.get_buffer_data(buffer).copy_from_slice(&data);
@@ -258,37 +242,17 @@ impl Scene {
         };
 
         let mut images = {
-            let image_reqs: Vec<_> = scene.materials
+            let image_reqs: Vec<_> = scene.textures
                 .iter()
-                .flat_map(|mat| [
-                    ImageReq {
-                        format: mat.base_color.format.into(),
-                        kind: ImageKind::Texture,
-                        extent: vk::Extent3D {
-                            width: mat.base_color.width,
-                            height: mat.base_color.height,
-                            depth: 1,
-                        },
+                .map(|tex| ImageReq {
+                    format: tex.format.into(),
+                    kind: ImageKind::Texture,
+                    extent: vk::Extent3D {
+                        width: tex.width,
+                        height: tex.height,
+                        depth: 1,
                     },
-                    ImageReq {
-                        format: mat.normal.format.into(),
-                        kind: ImageKind::Texture,
-                        extent: vk::Extent3D {
-                            width: mat.normal.width,
-                            height: mat.normal.height,
-                            depth: 1,
-                        },
-                    },
-                    ImageReq {
-                        format: mat.metallic_roughness.format.into(),
-                        kind: ImageKind::Texture,
-                        extent: vk::Extent3D {
-                            width: mat.metallic_roughness.width,
-                            height: mat.metallic_roughness.height,
-                            depth: 1,
-                        },
-                    },
-                ])
+                })
                 .collect();
 
             let (images, _) = resource::create_images(

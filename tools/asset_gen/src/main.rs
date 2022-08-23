@@ -256,47 +256,56 @@ impl GltfImporter {
     }
 
     fn load_scene(self) -> Result<Scene> {
-        let materials: Result<Vec<_>> = self.gltf
-            .materials()
-            .map(|mat| {
-                let base_color = mat
-                    .pbr_metallic_roughness()
-                    .base_color_texture()
-                    .ok_or_else(|| anyhow!("no base color texture on material"))?
-                    .texture()
-                    .source()
-                    .source();
-                let normal = mat
-                    .normal_texture()
-                    .ok_or_else(|| anyhow!("no normal texture in material"))?
-                    .texture()
-                    .source()
-                    .source();
-                let metallic_roughness = mat
-                    .pbr_metallic_roughness()
-                    .metallic_roughness_texture()
-                    .ok_or_else(|| anyhow!("no metallic roughness texture in material"))?
-                    .texture()
-                    .source()
-                    .source();
+        let mut textures = Vec::default();
 
-                let base_color = self.load_image_data(
+        for mat in self.gltf.materials() {
+            let albedo_map = mat
+                .pbr_metallic_roughness()
+                .base_color_texture()
+                .ok_or_else(|| anyhow!("no base color texture on material"))?
+                .texture()
+                .source()
+                .source();
+            let normal_map = mat
+                .normal_texture()
+                .ok_or_else(|| anyhow!("no normal texture in material"))?
+                .texture()
+                .source()
+                .source();
+            let specular_map = mat
+                .pbr_metallic_roughness()
+                .metallic_roughness_texture()
+                .ok_or_else(|| anyhow!("no metallic roughness texture in material"))?
+                .texture()
+                .source()
+                .source();
+
+            textures.extend([
+                self.load_image_data(
                     ImageFormat::Bc(BcFormat::Bc7Srgb),
-                    &base_color,
-                )?;
-
-                let metallic_roughness = self.load_image_data(
+                    &albedo_map,
+                )?,
+                self.load_image_data(
                     ImageFormat::Bc(BcFormat::Bc5Unorm),
-                    &metallic_roughness,
-                )?;
+                    &specular_map,
+                )?,
+                self.load_image_data(
+                    ImageFormat::Bc(BcFormat::Bc7Unorm),
+                    &normal_map,
+                )?,
+            ].into_iter());
+        }
 
-                let normal = self.load_image_data(ImageFormat::Bc(BcFormat::Bc7Unorm), &normal)?;
-
-                Ok(Material { base_color, normal, metallic_roughness })
+        let materials: Vec<_> = self.gltf
+            .materials()
+            .enumerate()
+            .map(|(i, _)| i * 3)
+            .map(|base| Material {
+                albedo_map: base,
+                specular_map: base + 1,
+                normal_map: base + 2,
             })
             .collect();
-
-        let materials = materials?;
 
         let instances: Vec<_> = self.gltf
             .nodes()
@@ -475,7 +484,7 @@ impl GltfImporter {
 
         let meshes = meshes?;
 
-        Ok(Scene { vertices, indices, meshes, materials, instances, index_format })
+        Ok(Scene { vertices, indices, meshes, textures, materials, instances, index_format })
     }
 }
 

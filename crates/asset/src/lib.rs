@@ -48,6 +48,8 @@ pub struct Scene {
     /// All materials used in the scene.
     pub materials: Vec<Material>,
 
+    pub textures: Vec<Image>,
+
     /// All the vertices of the while scene.
     pub vertices: Vec<Vertex>,
 
@@ -191,20 +193,9 @@ pub struct Instance {
 
 #[derive(Serialize, Deserialize)]
 pub struct Material {
-    /// Base color / albedo texture image.
-    ///
-    /// This is an rgba8 image.
-    pub base_color: Image,
-
-    /// The normal map of the material.
-    ///
-    /// This is an unormalized rgba8 image.
-    pub normal: Image,
-
-    /// The metallic roughness map.
-    ///
-    /// This is an unormalized rg8 image.
-    pub metallic_roughness: Image,
+    pub albedo_map: usize,
+    pub specular_map: usize,
+    pub normal_map: usize,
 }
 
 /// Metadata of a single character glyph.
