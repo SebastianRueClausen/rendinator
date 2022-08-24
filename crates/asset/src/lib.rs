@@ -159,6 +159,11 @@ impl Skybox {
     }
 }
 
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct BoundingSphere {
+    pub center: Vec3,
+    pub radius: f32,
+}
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct Primitive {
@@ -175,6 +180,8 @@ pub struct Primitive {
     ///
     /// This is the first vertex index 0 points to.
     pub vertex_start: u32,
+
+    pub bounding_sphere: BoundingSphere,
 }
 
 #[derive(Serialize, Deserialize)]

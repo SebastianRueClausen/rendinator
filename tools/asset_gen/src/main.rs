@@ -341,6 +341,18 @@ impl GltfImporter {
                         return Err(anyhow!("primitive {} doesn't have a material", primitive.index()));
                     };
 
+                    let bounding_sphere = {
+                        let bounding_box = primitive.bounding_box();
+
+                        let min = Vec3::from(bounding_box.min);
+                        let max = Vec3::from(bounding_box.max);
+
+                        let center = ((min - max) * 0.5) + max;
+                        let radius = (center - max).length();
+
+                        BoundingSphere { center, radius }
+                    };
+
                     let vertex_start = {
                         let positions = primitive.get(&gltf::Semantic::Positions);
                         let texcoords = primitive.get(&gltf::Semantic::TexCoords(0));
@@ -475,7 +487,13 @@ impl GltfImporter {
                         (index_start, index_count)
                     };
 
-                    primitives.push(Primitive { vertex_start, index_start, index_count, material })
+                    primitives.push(Primitive {
+                        bounding_sphere,
+                        vertex_start,
+                        index_start,
+                        index_count,
+                        material,
+                    })
                 }
 
                 Ok(Mesh { primitives })

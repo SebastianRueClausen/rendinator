@@ -2078,34 +2078,52 @@ impl CommandRecorder {
         }
     }
 
-    pub fn draw_indexed_indirect(
+    pub fn update_buffer<T: bytemuck::NoUninit>(&self, buffer: &Buffer, val: &T) {
+        assert_eq!(
+            buffer.size(),
+            mem::size_of::<T>() as vk::DeviceSize,
+            "size of buffer doesn't match length of data"
+        );
+
+        unsafe {
+            self.device.cmd_update_buffer(self.buffer, buffer.handle, 0, bytemuck::bytes_of(val));
+        }
+    }
+
+    pub fn draw_indexed_indirect_count(
         &self,
         buffer: &Buffer,
         offset: u64,
         command_size: usize,
-        draw_count: u32,
+        count_buffer: &Buffer,
+        count_offset: u64,
+        max_draw_count: u32,
     ) {
         unsafe {
-            self.device.cmd_draw_indexed_indirect(
+            self.device.cmd_draw_indexed_indirect_count(
                 self.buffer,
                 buffer.handle,
                 offset,
-                draw_count,
+                count_buffer.handle,
+                count_offset,
+                max_draw_count,
                 command_size as u32,
             );
         }
     }
 
 
-    pub fn buffer_rw_barrier(
+    pub fn buffer_barrier(
         &self,
         buffer: &Buffer,
-        write_stage: vk::PipelineStageFlags,
-        read_stage: vk::PipelineStageFlags,
+        src_mask: vk::AccessFlags,
+        dst_mask: vk::AccessFlags,
+        src_stage: vk::PipelineStageFlags,
+        dst_stage: vk::PipelineStageFlags,
     ) {
         let barriers = [vk::BufferMemoryBarrier::builder()
-            .src_access_mask(vk::AccessFlags::SHADER_WRITE)
-            .dst_access_mask(vk::AccessFlags::SHADER_READ)
+            .src_access_mask(src_mask)
+            .dst_access_mask(dst_mask)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .buffer(buffer.handle)
@@ -2115,8 +2133,8 @@ impl CommandRecorder {
         unsafe {
             self.device.cmd_pipeline_barrier(
                 self.buffer,
-                write_stage,
-                read_stage,
+                src_stage,
+                dst_stage,
                 vk::DependencyFlags::empty(),
                 &[],
                 &barriers,

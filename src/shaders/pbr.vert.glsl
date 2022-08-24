@@ -12,11 +12,6 @@ layout (set = 0, binding = 0) uniform View {
 	mat4 proj_view;
 };
 
-struct InstanceData {
-	mat4 transform;
-	mat4 inverse_transpose_transform;
-};
-
 layout (std430, set = 0, binding = 2) buffer Instances {
 	InstanceData instance_data[];
 };

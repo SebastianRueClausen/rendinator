@@ -2,8 +2,7 @@ use glam::{Vec3, Vec2, Mat4};
 use anyhow::Result;
 use ash::vk;
 
-use std::mem;
-use std::ops::Range;
+use std::{array, mem};
 
 use crate::light::Lights;
 use crate::core::*;
@@ -21,6 +20,9 @@ struct InstanceData {
     inverse_transpose_transform: Mat4,
 }
 
+/// Draw command used in draw indirect.
+///
+/// These correspond to a single primitive.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DrawCommand {
@@ -33,8 +35,57 @@ pub struct DrawCommand {
 
 unsafe impl bytemuck::NoUninit for DrawCommand {}
 
-pub struct Instance {
-    draw_commands: Range<usize>,
+#[repr(align(16))]
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Primitive {
+    center: Vec3,
+    radius: f32,
+
+    /// The vertex offset of the indices in the index buffer.
+    vertex_offset: u32,
+
+    /// The first index in the index buffer belonging to this primitive.
+    first_index: u32,
+
+    /// The amount of indices used by this primitive.
+    index_count: u32,
+
+    /// The instance index.
+    instance: u32,
+
+    /// The index of the albedo texture.
+    albedo_map: u32,
+
+    /// The index of the specular texture.
+    specular_map: u32,
+
+    /// The index of the normal texture.
+    normal_map: u32,
+}
+
+unsafe impl bytemuck::NoUninit for Primitive {}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::NoUninit)]
+pub struct DrawCount {
+    /// The amount of draw commands.
+    pub command_count: u32, 
+
+    /// The amount of primitives.
+    pub primitive_count: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::NoUninit)]
+pub struct FrustrumInfo {
+    pub z_near: f32,
+    pub z_far: f32,
+
+    pub left: f32,
+    pub right: f32,
+    pub top: f32,
+    pub bottom: f32,
 }
 
 pub struct Scene {
@@ -43,12 +94,10 @@ pub struct Scene {
     pub light_descriptor: DescriptorSet,
     pub descriptor: DescriptorSet,
 
-    pub draw_count: u32,
+    pub cull_descriptor: DescriptorSet,
+    pub cull_pipeline: ComputePipeline,
 
-    /// The instances to be rendered.
-    ///
-    /// Their index is determined by their index in the vector.
-    pub instances: Vec<Instance>,
+    pub primitive_count: u32,
 
     /// Vertex buffer containing all vertex data for all objects in the scene.
     pub vertex_buffer: Res<Buffer>,
@@ -59,7 +108,14 @@ pub struct Scene {
     /// Buffer containing [`InstanceData`] for each model.
     pub instance_buffer: Res<Buffer>,
 
-    pub draw_buffer: Res<Buffer>,
+    /// [`DrawCommand`] for each primitive that should be drawn.
+    pub draw_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+
+    /// [`DrawCount`] for each frame in flight.
+    pub draw_count_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+
+    /// Buffer containing [`Primitive`] for every primitive in the scene.
+    pub primitive_buffer: Res<Buffer>,
 
     /// The format of the indices in `index_buffer`.
     pub index_format: asset::IndexFormat,
@@ -85,52 +141,51 @@ impl Scene {
             })
             .collect();
 
-        let mut draw_commands = Vec::new();
-
-        let instances: Vec<_> = scene.instances
+        let primitives: Vec<Primitive> = scene.instances
             .iter()
             .enumerate()
-            .map(|(i, instance)| {
-                let mesh = &scene.meshes[instance.mesh];
-                let first = draw_commands.len();
+            .flat_map(|(i, instance)| {
+                scene.meshes[instance.mesh].primitives
+                    .iter()
+                    .map(move |prim| {
+                        let material = &scene.materials[prim.material];
 
-                draw_commands.extend(
-                    mesh.primitives
-                        .iter()
-                        .map(|prim| {
-                            let material = &scene.materials[prim.material];
-                            DrawCommand {
-                                albedo_map: material.albedo_map as u32,
-                                normal_map: material.normal_map as u32,
-                                specular_map: material.specular_map as u32,
-                                command: vk::DrawIndexedIndirectCommand {
-                                    first_index: prim.index_start,
-                                    index_count: prim.index_count,
+                        Primitive {
+                            center: prim.bounding_sphere.center,
+                            radius: prim.bounding_sphere.radius,
+                            albedo_map: material.albedo_map as u32,
+                            normal_map: material.normal_map as u32,
+                            specular_map: material.specular_map as u32,
 
-                                    vertex_offset: prim.vertex_start as i32,
-
-                                    first_instance: i as u32,
-                                    instance_count: 1,
-                                },
-                            }
-                        })
-                );
-
-                Instance { draw_commands: first..draw_commands.len() }
+                            vertex_offset: prim.vertex_start,
+                            first_index: prim.index_start,
+                            index_count: prim.index_count,
+                            instance: i as u32,
+                        }
+                    })
             })
             .collect();
 
-        let draw_buffer_size = (draw_commands.len() * mem::size_of::<DrawCommand>()) as u64;
+        let draw_count = DrawCount {
+            // Filled out in cull shader.
+            command_count: 10,
+            primitive_count: primitives.len() as u32,
+        };
+
+        let primitive_buffer_size = (primitives.len() * mem::size_of::<Primitive>()) as u64;
+        let draw_buffer_size = (primitives.len() * mem::size_of::<DrawCommand>()) as u64;
+        let draw_count_buffer_size = mem::size_of::<DrawCount>() as u64;
+
         let instance_buffer_size = (instance_data.len() * mem::size_of::<InstanceData>()) as u64;
         let vertex_buffer_size = (scene.vertices.len() * mem::size_of::<asset::Vertex>()) as u64;
         let index_buffer_size = scene.indices.len() as u64;
 
         let staging = {
-            let reqs = [
+            let reqs = vec![
                 BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: vertex_buffer_size },
                 BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: index_buffer_size },
                 BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: instance_buffer_size },
-                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: draw_buffer_size },
+                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: primitive_buffer_size },
             ];
 
             let memory_flags =
@@ -146,23 +201,26 @@ impl Scene {
 
             let mapped = MappedMemory::new(block.clone())?;
 
-            let vertex_data: &[u8] = bytemuck::cast_slice(scene.vertices.as_slice());
-            let instance_data: &[u8] = bytemuck::cast_slice(instance_data.as_slice());
-            let draw_data: &[u8] = bytemuck::cast_slice(draw_commands.as_slice());
-            let index_data = scene.indices.as_slice();
+            let mut data = vec![
+                bytemuck::cast_slice(scene.vertices.as_slice()),
+                bytemuck::cast_slice(scene.indices.as_slice()),
+                bytemuck::cast_slice(instance_data.as_slice()),
+                bytemuck::cast_slice(primitives.as_slice()),
+            ];
 
-            for (data, buffer) in [vertex_data, index_data, instance_data, draw_data]
-                .iter()
-                .zip(buffers.iter())
-            {
-                mapped.get_buffer_data(buffer).copy_from_slice(&data);
+            for _ in 0..FRAMES_IN_FLIGHT {
+                data.push(bytemuck::bytes_of(&draw_count))
+            }
+
+            for (src, dst) in data.iter().zip(buffers.iter()) {
+                mapped.get_buffer_data(dst).copy_from_slice(&src);
             }
 
             buffers
         };
 
         let buffers = {
-            let reqs = [
+            let mut reqs = vec![
                 BufferReq {
                     usage: vk::BufferUsageFlags::VERTEX_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_DST,
@@ -173,18 +231,37 @@ impl Scene {
                         | vk::BufferUsageFlags::TRANSFER_DST,
                     size: index_buffer_size,
                 },
+                // Instance buffer.
                 BufferReq {
                     usage: vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_DST,
                     size: instance_buffer_size, 
                 },
+                // Primitive buffer.
                 BufferReq {
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    size: primitive_buffer_size, 
+                },
+            ];
+
+            for _ in 0..FRAMES_IN_FLIGHT {
+                reqs.push(BufferReq {
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST
+                        | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                    size: draw_count_buffer_size, 
+                });
+            }
+            
+            for _ in 0..FRAMES_IN_FLIGHT {
+                reqs.push(BufferReq {
                     usage: vk::BufferUsageFlags::STORAGE_BUFFER
                         | vk::BufferUsageFlags::TRANSFER_DST
                         | vk::BufferUsageFlags::INDIRECT_BUFFER,
                     size: draw_buffer_size, 
-                },
-            ];
+                });
+            }
 
             let (buffers, _) = resource::create_buffers(
                 &renderer,
@@ -198,15 +275,20 @@ impl Scene {
         };
 
         renderer.device.transfer_with(|recorder| {
-            for (src, dst) in staging.iter().zip(buffers.iter()) {
+            for (src, dst) in staging[0..4].iter().zip(buffers.iter()) {
                 recorder.copy_buffers(src, dst);
             }
         })?;
 
-        let vertex_buffer = buffers[0].clone();
-        let index_buffer = buffers[1].clone();
-        let instance_buffer = buffers[2].clone();
-        let draw_buffer = buffers[3].clone();
+        let mut buffers = buffers.into_iter();
+
+        let vertex_buffer = buffers.next().unwrap();
+        let index_buffer = buffers.next().unwrap();
+        let instance_buffer = buffers.next().unwrap();
+        let primitive_buffer = buffers.next().unwrap();
+
+        let draw_count_buffers: [_; 2] = array::from_fn(|_| buffers.next().unwrap());
+        let draw_buffers: [_; 2] = array::from_fn(|_| buffers.next().unwrap());
 
         let staging = {
             let create_infos: Vec<_> = scene.textures
@@ -359,10 +441,9 @@ impl Scene {
                 instance_buffer.clone(),
                 instance_buffer.clone(),
             ]),
-            DescriptorBinding::Buffer([
-                draw_buffer.clone(),
-                draw_buffer.clone(),
-            ]),
+            DescriptorBinding::Buffer(
+                draw_buffers.clone(),
+            ),
             DescriptorBinding::Image(sampler.clone(), [
                 skybox.cube_map.image.clone(),
                 skybox.cube_map.image.clone(),
@@ -432,19 +513,76 @@ impl Scene {
             pipeline
         };
 
+        let descriptor_layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+        ])?);
+
+        let cull_descriptor = DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
+            DescriptorBinding::Buffer(draw_count_buffers.clone()),
+            DescriptorBinding::Buffer(draw_buffers.clone()),
+            DescriptorBinding::Buffer([
+                primitive_buffer.clone(),
+                primitive_buffer.clone(),
+            ]),
+            DescriptorBinding::Buffer([
+                instance_buffer.clone(),
+                instance_buffer.clone(),
+            ]),
+        ])?;
+
+        let cull_pipeline = {
+            let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
+
+            let shader = ShaderModule::new(&renderer, "main", code)?;
+
+            let push_consts = [vk::PushConstantRange::builder()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .size(mem::size_of::<FrustrumInfo>() as u32)
+                .offset(0)
+                .build()];
+
+            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
+                descriptor_layout.clone(),
+            ])?);
+
+            ComputePipeline::new(&renderer, layout, &shader)?
+        };
+
         let index_format = scene.index_format;
-        let draw_count = draw_commands.len() as u32;
+        let primitive_count = primitives.len() as u32;
 
         Ok(Self {
+            cull_descriptor,
+            cull_pipeline,
+            primitive_count,
             light_descriptor,
             descriptor,
             render_pipeline,
             vertex_buffer,
             index_buffer,
-            draw_buffer,
-            draw_count,
+            draw_buffers,
+            draw_count_buffers,
+            primitive_buffer,
             instance_buffer,
-            instances,
             index_format,
         })
     }
