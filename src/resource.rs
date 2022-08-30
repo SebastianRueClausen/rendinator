@@ -84,23 +84,16 @@ impl MappedMemory {
 pub struct MemoryBlock {
     handle: vk::DeviceMemory,
 
-    #[allow(dead_code)]
-    properties: vk::MemoryPropertyFlags,
-
     size: vk::DeviceSize,
 
     device: Res<Device>,
 }
 
 impl MemoryBlock {
-    fn new(
-        device: Res<Device>,
-        properties: vk::MemoryPropertyFlags,
-        info: &vk::MemoryAllocateInfo,
-    ) -> Result<Self> {
+    fn new(device: Res<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
         let handle = unsafe { device.handle.allocate_memory(info, None)? };
         let size = info.allocation_size;
-        Ok(Self { device: device.clone(), handle, properties, size })
+        Ok(Self { device: device.clone(), handle, size })
     }
 
     #[allow(dead_code)]
@@ -186,7 +179,7 @@ impl Buffer {
             alloc_info = alloc_info.push_next(&mut alloc_flags);
         }
 
-        let block = pool.alloc(MemoryBlock::new(device.clone(), memory_flags, &alloc_info)?);
+        let block = pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?);
         unsafe { device.handle.bind_buffer_memory(handle, block.handle, 0)?; }
 
         Ok(pool.alloc(Self { handle, range: 0..info.size, block }))
@@ -269,7 +262,7 @@ pub fn create_buffers_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
         alloc_info = alloc_info.push_next(&mut flags)
     }
 
-    let block = pool.alloc(MemoryBlock::new(device.clone(), memory_flags, &alloc_info)?);
+    let block = pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?);
 
     let buffers: Vec<_> = buffers
         .into_iter()
@@ -407,7 +400,7 @@ impl Image {
             let alloc_info = vk::MemoryAllocateInfo::builder()
                 .allocation_size(requirements.size)
                 .memory_type_index(memory_type);
-            pool.alloc(MemoryBlock::new(device.clone(), memory_flags, &alloc_info)?)
+            pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?)
         };
 
         unsafe { device.handle.bind_image_memory(handle, block.handle, 0)?; }
@@ -512,7 +505,7 @@ where
         let alloc_info = vk::MemoryAllocateInfo::builder()
             .allocation_size(current_size)
             .memory_type_index(memory_type);
-        pool.alloc(MemoryBlock::new(device.clone(), memory_flags, &alloc_info)?)
+        pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?)
     };
 
     let images: Result<Vec<_>> = images
