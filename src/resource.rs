@@ -840,26 +840,31 @@ impl ResourcePool {
     #[inline]
     pub fn alloc<T>(&self, val: T) -> Res<T> {
         let ptr = self.shared.blocks.alloc::<ResState<T>>(ResState {
-            val, ref_count: Cell::new(1),
+            ref_count: Cell::new(1),
+            pool: self.clone(),
+            val,
         });
 
-        Res { ptr, pool: self.clone() } 
+        Res { ptr } 
     }
 }
 
 struct ResState<T> {
     /// The number of references to the item.
     ref_count: Cell<u32>,
+    pool: ResourcePool,  
 
     /// The resource value.
     val: T,
 }
 
+/// A reference to a resource allocated from a [`ResourcePool`].
+///
+/// The resource is guarenteed to be alive as long as a reference exists. Drop will be called for
+/// the resource as soon as the last reference goes out of scope. However, the memory may not be
+/// immediately reclaimed.
 pub struct Res<T> {
     ptr: NonNull<ResState<T>>,
-
-    #[allow(dead_code)]
-    pool: ResourcePool,
 }
 
 impl<T> Res<T> {
@@ -878,19 +883,22 @@ impl<T> Clone for Res<T> {
             }
         }
 
-        Self { ptr: self.ptr, pool: self.pool.clone() }
+        Self { ptr: self.ptr }
     }
 }
 
 impl<T> Drop for Res<T> {
     fn drop(&mut self) {
-        if mem::needs_drop::<T>() {
-            unsafe {
-                if self.ptr.as_ref().ref_count.get() == 1 {
+        unsafe {
+            if self.ptr.as_ref().ref_count.get() == 1 {
+                if mem::needs_drop::<T>() {
                     self.drop_in_place();
-                } else {
-                    self.ptr.as_ref().ref_count.set(self.ptr.as_ref().ref_count.get() - 1);
                 }
+
+                let rc = self.ptr.as_mut().pool.shared.clone();
+                Rc::decrement_strong_count(Rc::into_raw(rc));
+            } else {
+                self.ptr.as_ref().ref_count.set(self.ptr.as_ref().ref_count.get() - 1);
             }
         }
     }
