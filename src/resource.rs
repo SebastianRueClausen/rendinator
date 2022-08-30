@@ -5,7 +5,7 @@ use ash::vk;
 
 use std::{ops, slice, alloc, mem};
 use std::rc::Rc;
-use std::cell::{RefCell, Cell};
+use std::cell::{UnsafeCell, Cell};
 use std::ptr::{self, NonNull};
 use std::hash::{Hash, Hasher};
 
@@ -666,7 +666,7 @@ impl CubeMap {
 }
 
 #[repr(C)]
-struct BumpBlock {
+struct CpuBlock {
     /// The first byte of the block.
     base: NonNull<u8>,
 
@@ -677,7 +677,7 @@ struct BumpBlock {
     layout: alloc::Layout,
 }
 
-impl BumpBlock {
+impl CpuBlock {
     fn new(size: usize) -> Self {
         let (base, layout) = unsafe {
             let layout = alloc::Layout::from_size_align_unchecked(size, 1);
@@ -711,90 +711,66 @@ impl BumpBlock {
     }
 }
 
-impl Drop for BumpBlock {
+impl Drop for CpuBlock {
     fn drop(&mut self) {
         unsafe { alloc::dealloc(self.base.as_ptr(), self.layout) }
     }
 }
 
-struct BumpBlocks {
-    /// The current block used to allocate new objects.
-    ///
-    /// This block is never in `full_blocks`, and once it's pushed into `full_blocks` it never
-    /// leaves.
-    current_block: Cell<Option<BumpBlock>>,
-
-    /// Blocks that are "full".
-    ///
-    /// A block counts as full if it's too small to allocate a single object. This is ofcourse not
-    /// memory effecient, but guarentees constants time allocations.
-    full_blocks: RefCell<Vec<BumpBlock>>,
-
+struct CpuBlocks {
+    block: Rc<CpuBlock>,
     block_size: usize,
 }
 
 const DEFAULT_BLOCK_SIZE: usize = 1024;
 
-impl Default for BumpBlocks {
-    fn default() -> Self {
-        Self {
-            current_block: Cell::new(None),
-            full_blocks: RefCell::new(Vec::new()),
-            block_size: DEFAULT_BLOCK_SIZE,
-        }
-    }
-}
-
-impl BumpBlocks {
-    fn with_block_size(block_size: usize) -> Self {
-        Self { block_size, ..Self::default() }
+impl CpuBlocks {
+    fn new(block_size: usize) -> Self {
+        Self { block: Rc::new(CpuBlock::new(block_size)), block_size }
     }
 
-    fn alloc<T>(&self, val: T) -> NonNull<T> {
-        let mut size = mem::size_of::<T>();
+    fn alloc<T>(&mut self, val: T) -> NonNull<ResState<T>> {
+        let mut size = mem::size_of::<ResState<T>>();
 
         let (block, ptr) = loop {
-            let block = self.current_block
-                .replace(None)
-                .unwrap_or_else(|| {
-                    let mut block_size = self.block_size;
-                    while size > block_size {
-                        block_size *= 2;
-                    }
-
-                    // Rare (impossible?) case where the allocation fails even if the block size is
-                    // the the same size as the allocation because of aligment offsets.
-                    size = block_size + 1;
-
-                    BumpBlock::new(block_size)            
-                });
-
-            let Some(ptr) = block.alloc::<T>() else {
-                self.full_blocks.borrow_mut().push(block);
-
-                continue;
+            if let Some(ptr) = self.block.alloc::<ResState<T>>() {
+                break (self.block.clone(), ptr);
             };
 
-            break (block, ptr);
+            // At this point we know that the current block is too small.
+            
+            let mut block_size = self.block_size;
+            while size > block_size {
+                block_size *= 2;
+            }
+
+            // Rare (impossible?) case where the allocation fails even if the block size is
+            // the the same size as the allocation because of aligment offsets.
+            size = block_size + 1;
+
+            self.block = Rc::new(CpuBlock::new(block_size));
         };
 
-        unsafe { ptr.as_ptr().write(val); }
-       
-        self.current_block.set(Some(block));
+        unsafe {
+            ptr.as_ptr().write(ResState {
+                ref_count: Cell::new(1),
+                block, 
+                val
+            });
+        }
        
         ptr
     }
 }
 
-#[derive(Default)]
 struct SharedResources {
     /// The memory blocks where all the CPU resources are allocated.
-    blocks: BumpBlocks,
+    cpu_blocks: UnsafeCell<CpuBlocks>,
 }
 
 impl SharedResources {
-    fn with_block_size(block_size: usize) -> Self {
-        Self { blocks: BumpBlocks::with_block_size(block_size) }
+    fn new(cpu_block_size: usize) -> Self {
+        Self { cpu_blocks: UnsafeCell::new(CpuBlocks::new(cpu_block_size)) }
     }
 }
 
@@ -808,7 +784,7 @@ impl SharedResources {
 ///
 /// If `T` implements `Drop`, then drop will be called for each [`Res`] once the last copy goes out
 /// of scope.
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct ResourcePool {
     shared: Rc<SharedResources>,
 }
@@ -829,30 +805,26 @@ impl Hash for ResourcePool {
 
 impl ResourcePool {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_block_size(DEFAULT_BLOCK_SIZE)
     }
 
     pub fn with_block_size(block_size: usize) -> Self {
-        Self { shared: Rc::new(SharedResources::with_block_size(block_size)) }
+        Self { shared: Rc::new(SharedResources::new(block_size)) }
     }
 
-    #[must_use]
     #[inline]
+    #[must_use]
     pub fn alloc<T>(&self, val: T) -> Res<T> {
-        let ptr = self.shared.blocks.alloc::<ResState<T>>(ResState {
-            ref_count: Cell::new(1),
-            pool: self.clone(),
-            val,
-        });
-
-        Res { ptr } 
+        // SAFETY: `cpu_blocks` is only used here, and is therefore never borrowed.
+        let ptr = unsafe { (*self.shared.cpu_blocks.get()).alloc::<T>(val) };
+        Res { ptr }
     }
 }
 
 struct ResState<T> {
     /// The number of references to the item.
     ref_count: Cell<u32>,
-    pool: ResourcePool,  
+    block: Rc<CpuBlock>,  
 
     /// The resource value.
     val: T,
@@ -895,7 +867,7 @@ impl<T> Drop for Res<T> {
                     self.drop_in_place();
                 }
 
-                let rc = self.ptr.as_mut().pool.shared.clone();
+                let rc = self.ptr.as_mut().block.clone();
                 Rc::decrement_strong_count(Rc::into_raw(rc));
             } else {
                 self.ptr.as_ref().ref_count.set(self.ptr.as_ref().ref_count.get() - 1);
