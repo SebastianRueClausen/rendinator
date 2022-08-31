@@ -161,7 +161,7 @@ impl Buffer {
         let req = unsafe { device.handle.get_buffer_memory_requirements(handle) };
 
         let memory_type = memory_type_index(
-            &device.memory_properties,
+            &device.physical.memory_properties,
             memory_flags,
             req.memory_type_bits,
         )
@@ -244,7 +244,7 @@ pub fn create_buffers_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
     let buffers = buffers?;
 
     let memory_type =
-        memory_type_index(&device.memory_properties, memory_flags, memory_type_bits)
+        memory_type_index(&device.physical.memory_properties, memory_flags, memory_type_bits)
             .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
     let mut alloc_info = vk::MemoryAllocateInfo::builder()
@@ -389,7 +389,7 @@ impl Image {
         let requirements = unsafe { device.handle.get_image_memory_requirements(handle) };
 
         let Some(memory_type) = memory_type_index(
-            &device.memory_properties,
+            &device.physical.memory_properties,
             memory_flags,
             requirements.memory_type_bits,
         ) else {
@@ -498,7 +498,7 @@ where
     let mut images = images?;
 
     let memory_type =
-        memory_type_index(&device.memory_properties, memory_flags, memory_type_bits)
+        memory_type_index(&device.physical.memory_properties, memory_flags, memory_type_bits)
             .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
     let block = {
@@ -549,7 +549,7 @@ impl TextureSampler {
             .address_mode_v(vk::SamplerAddressMode::REPEAT)
             .address_mode_w(vk::SamplerAddressMode::REPEAT)
             .anisotropy_enable(true)
-            .max_anisotropy(device.device_properties.limits.max_sampler_anisotropy)
+            .max_anisotropy(device.physical.properties.limits.max_sampler_anisotropy)
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .unnormalized_coordinates(false)
             .compare_enable(false)
@@ -671,6 +671,8 @@ struct CpuBlock {
 }
 
 impl CpuBlock {
+    const DEFAULT_BLOCK_SIZE: usize = 1024;
+
     fn new(size: usize) -> Self {
         let (base, layout) = unsafe {
             let layout = alloc::Layout::from_size_align_unchecked(size, 1);
@@ -715,8 +717,6 @@ struct CpuBlocks {
     block_size: usize,
 }
 
-const DEFAULT_BLOCK_SIZE: usize = 1024;
-
 impl CpuBlocks {
     fn new(block_size: usize) -> Self {
         Self { block: Rc::new(CpuBlock::new(block_size)), block_size }
@@ -744,6 +744,7 @@ impl CpuBlocks {
             self.block = Rc::new(CpuBlock::new(block_size));
         };
 
+        // SAFETY: `ptr` has just been allocated and is therefore valid.
         unsafe {
             ptr.as_ptr().write(ResState {
                 ref_count: Cell::new(1),
@@ -756,14 +757,97 @@ impl CpuBlocks {
     }
 }
 
+struct GpuBlock {
+    block: Rc<MemoryBlock>,
+    offset: vk::DeviceSize,
+}
+
+impl GpuBlock {
+    const DEFAULT_BLOCK_SIZE: vk::DeviceSize = 6 * 1024 * 1024;
+
+    fn new(block: MemoryBlock) -> Self {
+        Self { block: Rc::new(block), offset: 0 }
+    }
+
+    fn alloc(&mut self, size: vk::DeviceSize, alignment: vk::DeviceSize) -> Option<MemoryRange> {
+        let start = align_up_to(self.offset, alignment);
+        let end = start + size;
+
+        if end > self.block.size() {
+            return None; 
+        }
+
+        self.offset = end;
+
+        Some(start..end)
+    }
+}
+
+struct GpuBlocks {
+    block_size: vk::DeviceSize,
+    blocks: Vec<(u32, GpuBlock)>, 
+}
+
+impl GpuBlocks {
+    fn new(block_size: vk::DeviceSize) -> Self {
+        Self { block_size, blocks: Vec::new() }
+    }
+
+    fn alloc(
+        &mut self,
+        device: Res<Device>,
+        memory_type: u32,
+        size: vk::DeviceSize,
+        aligment: vk::DeviceSize,
+    ) -> Result<(Rc<MemoryBlock>, MemoryRange)> {
+        let index = self.blocks.iter().position(|(type_index, _)| *type_index == memory_type);
+
+        let create_new_block = || -> Result<GpuBlock> {
+            let mut block_size = self.block_size;
+
+            while block_size < size {
+                block_size += GpuBlock::DEFAULT_BLOCK_SIZE; 
+            }
+
+            let alloc_info = vk::MemoryAllocateInfo::builder()
+                .allocation_size(block_size)
+                .memory_type_index(memory_type);
+
+            Ok(GpuBlock::new(MemoryBlock::new(device.clone(), &alloc_info)?))
+        };
+       
+        let (_, block) = if let Some(index) = index {
+            &mut self.blocks[index]
+        } else {
+            self.blocks.push((memory_type, create_new_block()?));
+            self.blocks.last_mut().unwrap()
+        };
+
+        let range = loop {
+            if let Some(range) = block.alloc(size, aligment) {
+                break range;
+            }
+
+            *block = create_new_block()?;
+        };
+
+        Ok((block.block.clone(), range))
+    }
+
+}
+
 struct SharedResources {
     /// The memory blocks where all the CPU resources are allocated.
     cpu_blocks: UnsafeCell<CpuBlocks>,
+    gpu_blocks: UnsafeCell<GpuBlocks>,
 }
 
 impl SharedResources {
-    fn new(cpu_block_size: usize) -> Self {
-        Self { cpu_blocks: UnsafeCell::new(CpuBlocks::new(cpu_block_size)) }
+    fn new(cpu_block_size: usize, gpu_block_size: vk::DeviceSize) -> Self {
+        Self {
+            cpu_blocks: UnsafeCell::new(CpuBlocks::new(cpu_block_size)),
+            gpu_blocks: UnsafeCell::new(GpuBlocks::new(gpu_block_size)),
+        }
     }
 }
 
@@ -797,12 +881,26 @@ impl Hash for ResourcePool {
 }
 
 impl ResourcePool {
+    #[inline]
+    #[must_use]
     pub fn new() -> Self {
-        Self::with_block_size(DEFAULT_BLOCK_SIZE)
+        Self::with_block_size(CpuBlock::DEFAULT_BLOCK_SIZE, GpuBlock::DEFAULT_BLOCK_SIZE)
     }
 
-    pub fn with_block_size(block_size: usize) -> Self {
-        Self { shared: Rc::new(SharedResources::new(block_size)) }
+    #[inline]
+    #[must_use]
+    pub fn with_block_size(cpu_block_size: usize, gpu_block_size: vk::DeviceSize) -> Self {
+        Self { shared: Rc::new(SharedResources::new(cpu_block_size, gpu_block_size)) }
+    }
+
+    fn gpu_alloc(
+        &self,
+        device: Res<Device>,
+        memory_type: u32,
+        size: vk::DeviceSize,
+        alignment: vk::DeviceSize,
+    ) -> Result<(Rc<MemoryBlock>, MemoryRange)> {
+        unsafe { (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment) } 
     }
 
     #[inline]
@@ -963,7 +1061,7 @@ fn test_gcd() {
 }
 
 #[test]
-fn simple_alloc() {
+fn res_simple_alloc() {
     let p1 = ResourcePool::new();
 
     let nums: Vec<_> = (0..2048)
@@ -976,7 +1074,7 @@ fn simple_alloc() {
 }
 
 #[test]
-fn big_alloc() {
+fn res_big_alloc() {
     let p1 = ResourcePool::new();
 
     let _ = p1.alloc([0_u32; 1024]);
@@ -984,7 +1082,7 @@ fn big_alloc() {
 }
 
 #[test]
-fn destroy() {
+fn res_drop() {
     static mut COUNT: usize = 0;
 
     struct Test(usize);
@@ -1005,7 +1103,7 @@ fn destroy() {
 }
 
 #[test]
-fn self_ref() {
+fn res_with_inter_block_ref() {
     static mut COUNT: usize = 0;
 
     struct Test {

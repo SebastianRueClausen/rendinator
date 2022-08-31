@@ -193,7 +193,8 @@ impl CameraUniforms {
 
         let alignment = renderer
             .device
-            .device_properties
+            .physical
+            .properties
             .limits
             .non_coherent_atom_size;
 

@@ -1,5 +1,6 @@
 use anyhow::Result;
-use ash::extensions::{ext, khr}; use ash::vk;
+use ash::extensions::{ext, khr};
+use ash::vk;
 use glam::UVec3;
 use smallvec::{SmallVec, smallvec};
 use arrayvec::ArrayVec;
@@ -21,15 +22,20 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(window: &winit::window::Window) -> Result<Self> {
-        let pool = ResourcePool::with_block_size(256);
+        let pool = ResourcePool::with_block_size(256, 1024 * 1024);
 
-        let device = pool.alloc(Device::new(window)?);
+        let instance = pool.alloc(Instance::new()?);
+        let physical = PhysicalDevice::select(&instance)?;
+
+        let surface = pool.alloc(Surface::new(instance.clone(), window)?);
+
+        let device = pool.alloc(Device::new(instance, physical, &surface)?);
         let window_extent = vk::Extent2D {
             width: window.inner_size().width,
             height: window.inner_size().height,
         };
 
-        let swapchain = Swapchain::new(device.clone(), window_extent)?;
+        let swapchain = Swapchain::new(device.clone(), surface.clone(), window_extent)?;
         let render_targets = RenderTargets::new(device.clone(), &pool, &swapchain)?;
         let render_pass = RenderPass::new(device.clone(), &swapchain, &render_targets)?;
         let frame_queue = FrameQueue::new(device.clone())?;
@@ -218,44 +224,15 @@ impl Drop for Renderer {
     }
 }
 
-/// The device and data connected to the device used for rendering. This struct data is static
-/// after creation and doesn't depend on external factors such as display size.
-pub struct Device {
-    /// Name of `physical`, for instance "GTX 770".
-    #[allow(dead_code)]
-    name: String,
-
-    pub handle: ash::Device,
-
-    #[allow(unused)]
+struct Instance {
     entry: ash::Entry,
-
-    instance: ash::Instance,
-    physical: vk::PhysicalDevice,
-
-    pub memory_properties: vk::PhysicalDeviceMemoryProperties,
-    pub device_properties: vk::PhysicalDeviceProperties,
-
-    surface: Surface,
-
-    #[allow(dead_code)]
+    handle: ash::Instance,
     messenger: DebugMessenger,
-
-    /// Queue used to submit render commands.
-    graphics_queue: Queue,
-
-    /// Queue used to submut transfer commands, may be the same as `graphics_queue`.
-    transfer_queue: Queue,
-
-    /// Graphics pool fore recording render commands.
-    graphics_pool: vk::CommandPool,
-
-    /// Command pool for recording transfer commands. Not used for any rendering.
-    transfer_pool: vk::CommandPool,
+    layers: Vec<CString>,
 }
 
-impl Device {
-    pub fn new(window: &winit::window::Window) -> Result<Self> {
+impl Instance {
+    fn new() -> Result<Self> {
         let entry = unsafe { ash::Entry::load()? };
 
         let mut debug_info = {
@@ -270,12 +247,12 @@ impl Device {
                 .pfn_user_callback(Some(debug_callback))
         };
 
-        let validation_layer = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
-        let layer_names = [validation_layer.as_ptr()];
+        let layers = vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
+        let layer_names: Vec<_> = layers.iter().map(|layer| layer.as_ptr()).collect();
 
         let version = vk::make_api_version(0, 1, 2, 0);
 
-        let instance = unsafe {
+        let handle = unsafe {
             let engine_name = CString::new("spillemotor").unwrap();
             let app_name = CString::new("spillemotor").unwrap();
 
@@ -318,15 +295,9 @@ impl Device {
                 vk::InstanceCreateFlags::default()
             };
 
-            /*
-            let mut validation_features = vk::ValidationFeaturesEXT::builder()
-                .enabled_validation_features(&[vk::ValidationFeatureEnableEXT::DEBUG_PRINTF]);
-            */
-
             let info = vk::InstanceCreateInfo::builder()
                 .flags(flags)
                 .push_next(&mut debug_info)
-                // .push_next(&mut validation_features)
                 .application_info(&app_info)
                 .enabled_layer_names(&layer_names)
                 .enabled_extension_names(&ext_names);
@@ -334,16 +305,37 @@ impl Device {
             entry.create_instance(&info, None)?
         };
 
-        let surface = Surface::new(&instance, &entry, &window)?;
-        let messenger = DebugMessenger::new(&entry, &instance, &debug_info)?;
+        let messenger = DebugMessenger::new(&entry, &handle, &debug_info)?;
+        
+        Ok(Self { entry, handle, messenger, layers })
+    }
+}
 
-        // Select a physical device from heuristics. TODO: Improve this.
-        let physical = unsafe {
+impl Drop for Instance {
+    fn drop(&mut self) {
+        unsafe {
+            self.messenger.loader.destroy_debug_utils_messenger(self.messenger.handle, None);
+            self.handle.destroy_instance(None);
+        }
+    }
+}
+
+pub struct PhysicalDevice {
+    handle: vk::PhysicalDevice,
+    pub properties: vk::PhysicalDeviceProperties,
+    pub memory_properties: vk::PhysicalDeviceMemoryProperties,
+    pub queue_properties: Vec<vk::QueueFamilyProperties>,
+}
+
+impl PhysicalDevice {
+    fn select(instance: &Instance) -> Result<Self> {
+        let handle = unsafe {
             instance
+                .handle
                 .enumerate_physical_devices()?
                 .into_iter()
                 .max_by_key(|dev| {
-                    let properties = instance.get_physical_device_properties(*dev);
+                    let properties = instance.handle.get_physical_device_properties(*dev);
 
                     let name = CStr::from_ptr(properties.device_name.as_ptr())
                         .to_str()
@@ -371,21 +363,44 @@ impl Device {
                 .ok_or_else(|| anyhow!("no physical devices presented"))?
         };
 
-        let memory_properties = unsafe { instance.get_physical_device_memory_properties(physical) };
-        let device_properties = unsafe { instance.get_physical_device_properties(physical) };
+        let memory_properties = unsafe { instance.handle.get_physical_device_memory_properties(handle) };
+        let properties = unsafe { instance.handle.get_physical_device_properties(handle) };
+        let queue_properties = unsafe { instance.handle.get_physical_device_queue_family_properties(handle) };
 
-        let name = unsafe {
-            CStr::from_ptr(device_properties.device_name.as_ptr())
-                .to_str()
-                .unwrap_or("invalid")
-                .to_string()
-        };
+        Ok(Self { handle, memory_properties, properties, queue_properties })
+    }
+}
 
-        trace!("using device: {name}");
 
-        let queue_props = unsafe { instance.get_physical_device_queue_family_properties(physical) };
+/// The device and data connected to the device used for rendering. This struct data is static
+/// after creation and doesn't depend on external factors such as display size.
+pub struct Device {
+    pub handle: ash::Device,
 
-        let graphics_index = queue_props
+    instance: Res<Instance>,
+
+    pub physical: PhysicalDevice,
+
+    /// Queue used to submit render commands.
+    graphics_queue: Queue,
+
+    /// Queue used to submut transfer commands, may be the same as `graphics_queue`.
+    transfer_queue: Queue,
+
+    /// Graphics pool fore recording render commands.
+    graphics_pool: vk::CommandPool,
+
+    /// Command pool for recording transfer commands. Not used for any rendering.
+    transfer_pool: vk::CommandPool,
+}
+
+impl Device {
+    fn new(
+        instance: Res<Instance>,
+        physical: PhysicalDevice,
+        surface: &Surface,
+    ) -> Result<Self> {
+        let graphics_index = physical.queue_properties
             .iter()
             .enumerate()
             .position(|(i, p)| {
@@ -393,14 +408,14 @@ impl Device {
                     && unsafe {
                         surface
                             .loader
-                            .get_physical_device_surface_support(physical, i as u32, surface.handle)
+                            .get_physical_device_surface_support(physical.handle, i as u32, surface.handle)
                             .unwrap_or(false)
                     }
             })
             .map(|index| index as u32)
             .ok_or_else(|| anyhow!("device has no graphics queue"))?;
 
-        let transfer_index = queue_props
+        let transfer_index = physical.queue_properties
             .iter()
             .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
             .map(|index| index as u32)
@@ -421,7 +436,7 @@ impl Device {
 
         let extensions = [
             khr::Swapchain::name().as_ptr(),
-            // vk::KhrShaderNonSemanticInfoFn::name().as_ptr(),
+
             #[cfg(target_os = "macos")]
             vk::KhrPortabilitySubsetFn::name().as_ptr(),
         ];
@@ -450,6 +465,8 @@ impl Device {
             &queue_infos[1..]
         };
 
+        let layer_names: Vec<_> = instance.layers.iter().map(|layer| layer.as_ptr()).collect();
+
         let device_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(queue_create_infos)
             .enabled_extension_names(&extensions)
@@ -458,7 +475,7 @@ impl Device {
             .push_next(&mut vk11_features)
             .push_next(&mut vk12_features);
 
-        let handle = unsafe { instance.create_device(physical, &device_info, None)? };
+        let handle = unsafe { instance.handle.create_device(physical.handle, &device_info, None)? };
 
         let graphics_queue = Queue::new(&handle, graphics_index);
         let transfer_queue = Queue::new(&handle, transfer_index);
@@ -480,15 +497,9 @@ impl Device {
         };
 
         Ok(Self {
-            name,
-            entry,
             instance,
             physical,
             handle,
-            memory_properties,
-            device_properties,
-            surface,
-            messenger,
             graphics_queue,
             transfer_queue,
             transfer_pool,
@@ -538,7 +549,8 @@ impl Device {
     /// supports, but below 8 samples.
     fn sample_count(&self) -> vk::SampleCountFlags {
         let counts = self
-            .device_properties
+            .physical
+            .properties
             .limits
             .framebuffer_depth_sample_counts;
 
@@ -571,14 +583,6 @@ impl Drop for Device {
             self.handle.destroy_command_pool(self.graphics_pool, None);
             self.handle.destroy_command_pool(self.transfer_pool, None);
             self.handle.destroy_device(None);
-
-            // These are here because the "drop-glue" code, for some reasson isn't called or called
-            // after this code when dropping in place, and they *need* to be called before
-            // destroying the instance, or else the program seg faults when closed.
-            self.messenger.loader.destroy_debug_utils_messenger(self.messenger.handle, None);
-            self.surface.loader.destroy_surface(self.surface.handle, None);
-
-            self.instance.destroy_instance(None);
         }
     }
 }
@@ -878,18 +882,30 @@ impl Drop for FrameQueue {
 }
 
 /// TODO: Make this handle more display servers besides Wayland.
-struct Surface {
+pub struct Surface {
     handle: vk::SurfaceKHR,
     loader: khr::Surface,
+
+    #[allow(dead_code)]
+    instance: Res<Instance>,
 }
 
+
+
 impl Surface {
-    fn new(
-        instance: &ash::Instance,
-        entry: &ash::Entry,
-        window: &winit::window::Window,
-    ) -> Result<Self> {
-        let loader = khr::Surface::new(&entry, &instance);
+    #[allow(dead_code)]
+    fn new_headless(instance: Res<Instance>) -> Result<Self> {
+        let loader = khr::Surface::new(&instance.entry, &instance.handle);
+        let headless = ext::HeadlessSurface::new(&instance.entry, &instance.handle);
+
+        let create_info = vk::HeadlessSurfaceCreateInfoEXT::default();
+        let handle = unsafe { headless.create_headless_surface(&create_info, None)? };
+
+        Ok(Self { handle, loader, instance })
+    }
+
+    fn new(instance: Res<Instance>, window: &winit::window::Window) -> Result<Self> {
+        let loader = khr::Surface::new(&instance.entry, &instance.handle);
 
         use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
         let handle = match window.raw_window_handle() {
@@ -898,7 +914,7 @@ impl Surface {
                 let info = vk::Win32SurfaceCreateInfoKHR::default()
                     .hinstance(handle.hinstance)
                     .hwnd(handle.hwnd);
-                let loader = khr::Win32Surface::new(entry, instance);
+                let loader = khr::Win32Surface::new(&instance.entry, &instance.handle);
                 unsafe { loader.create_win32_surface(&info, None) }
             }
 
@@ -907,7 +923,7 @@ impl Surface {
                 let info = vk::WaylandSurfaceCreateInfoKHR::builder()
                     .display(handle.display)
                     .surface(handle.surface);
-                let loader = khr::WaylandSurface::new(entry, instance);
+                let loader = khr::WaylandSurface::new(&instance.entry, &instance.handle);
                 unsafe { loader.create_wayland_surface(&info, None) }
             }
 
@@ -916,7 +932,7 @@ impl Surface {
                 let info = vk::XlibSurfaceCreateInfoKHR::builder()
                     .dpy(handle.display as *mut _)
                     .window(handle.window);
-                let loader = khr::XlibSurface::new(entry, instance);
+                let loader = khr::XlibSurface::new(&instance.entry, &instance.handle);
                 unsafe { loader.create_xlib_surface(&info, None) }
             }
 
@@ -925,7 +941,7 @@ impl Surface {
                 let info = vk::XcbSurfaceCreateInfoKHR::builder()
                     .connection(handle.connection)
                     .window(handle.window);
-                let loader = khr::XcbSurface::new(entry, instance);
+                let loader = khr::XcbSurface::new(&instance.entry, &instance.handle);
                 unsafe { loader.create_xcb_surface(&info, None) }
             }
 
@@ -942,7 +958,7 @@ impl Surface {
                 };
 
                 let info = vk::MetalSurfaceCreateInfoEXT::builder().layer(&*layer);
-                let loader = ext::MetalSurface::new(entry, instance);
+                let loader = ext::MetalSurface::new(&instance.entry, &instance.handle);
 
                 loader.create_metal_surface(&info, None)
             },
@@ -950,7 +966,13 @@ impl Surface {
                 return Err(anyhow!("unsupported platform"));
             }
         };
-        Ok(Self { handle: handle?, loader })
+        Ok(Self { handle: handle?, loader, instance })
+    }
+}
+
+impl Drop for Surface {
+    fn drop(&mut self) {
+        unsafe { self.loader.destroy_surface(self.handle, None) }
     }
 }
 
@@ -1098,6 +1120,7 @@ pub struct Swapchain {
     images: Vec<SwapchainImage>,
 
     device: Res<Device>,
+    surface: Res<Surface>,
 }
 
 enum NextSwapchainImage {
@@ -1108,28 +1131,25 @@ enum NextSwapchainImage {
 impl Swapchain {
     /// Create a new swapchain. `extent` is used to determine the size of the swapchain images only
     /// if it aren't able to determine it from `surface`.
-    pub fn new(device: Res<Device>, extent: vk::Extent2D) -> Result<Self> {
+    pub fn new(device: Res<Device>, surface: Res<Surface>, extent: vk::Extent2D) -> Result<Self> {
         let (surface_formats, _present_modes, surface_caps) = unsafe {
-            let format = device
-                .surface
+            let format = surface
                 .loader
                 .get_physical_device_surface_formats(
-                    device.physical,
-                    device.surface.handle,
+                    device.physical.handle,
+                    surface.handle,
                 )?;
-            let modes = device
-                .surface
+            let modes = surface
                 .loader
                 .get_physical_device_surface_present_modes(
-                    device.physical,
-                    device.surface.handle,
+                    device.physical.handle,
+                    surface.handle,
                 )?;
-            let caps = device
-                .surface
+            let caps = surface
                 .loader
                 .get_physical_device_surface_capabilities(
-                    device.physical,
-                    device.surface.handle,
+                    device.physical.handle,
+                    surface.handle,
                 )?;
             (format, modes, caps)
         };
@@ -1171,7 +1191,7 @@ impl Swapchain {
             .unwrap_or(vk::PresentModeKHR::FIFO);
 
         let swapchain_info = vk::SwapchainCreateInfoKHR::builder()
-            .surface(device.surface.handle)
+            .surface(surface.handle)
             .min_image_count(min_image_count)
             .image_format(surface_format.format)
             .image_color_space(surface_format.color_space)
@@ -1183,7 +1203,7 @@ impl Swapchain {
             .present_mode(present_mode)
             .image_extent(extent)
             .image_array_layers(1);
-        let loader = khr::Swapchain::new(&device.instance, &device.handle);
+        let loader = khr::Swapchain::new(&device.instance.handle, &device.handle);
         
         let handle = unsafe { loader.create_swapchain(&swapchain_info, None)? };
         let images = unsafe { loader.get_swapchain_images(handle)? };
@@ -1196,6 +1216,7 @@ impl Swapchain {
             .collect();
 
         Ok(Self {
+            surface,
             device: device.clone(),
             surface_format,
             images: images?,
@@ -1217,9 +1238,9 @@ impl Swapchain {
         }
 
         let surface_caps = unsafe {
-            self.device.surface.loader.get_physical_device_surface_capabilities(
-                self.device.physical,
-                self.device.surface.handle,
+            self.surface.loader.get_physical_device_surface_capabilities(
+                self.device.physical.handle,
+                self.surface.handle,
             )?
         };
 
@@ -1228,7 +1249,7 @@ impl Swapchain {
 
         let swapchain_info = vk::SwapchainCreateInfoKHR::builder()
             .old_swapchain(self.handle)
-            .surface(self.device.surface.handle)
+            .surface(self.surface.handle)
             .min_image_count(min_image_count)
             .image_format(self.surface_format.format)
             .image_color_space(self.surface_format.color_space)
