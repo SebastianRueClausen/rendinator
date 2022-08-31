@@ -89,7 +89,7 @@ impl TextPass {
             Image::new(&renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, req)?
         };
 
-        renderer.device.transfer_with(|recorder| {
+        renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(&mut glyph_atlas, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             recorder.copy_buffer_to_image(&staging, &glyph_atlas);
             recorder.transition_image_layout(&mut glyph_atlas, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);

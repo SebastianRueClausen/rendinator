@@ -274,7 +274,7 @@ impl Scene {
             buffers
         };
 
-        renderer.device.transfer_with(|recorder| {
+        renderer.transfer_with(|recorder| {
             for (src, dst) in staging[0..4].iter().zip(buffers.iter()) {
                 recorder.copy_buffers(src, dst);
             }
@@ -347,7 +347,7 @@ impl Scene {
             images
         };
 
-        renderer.device.transfer_with(|recorder| {
+        renderer.transfer_with(|recorder| {
             for image in images.iter_mut() {
                 recorder.transition_image_layout(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             }

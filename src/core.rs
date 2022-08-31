@@ -14,9 +14,16 @@ use crate::resource::{self, Image, Buffer, TextureSampler, ResourcePool, Res};
 pub struct Renderer {
     pub device: Res<Device>,
     pub swapchain: Swapchain,
+
     render_pass: RenderPass,
+
     frame_queue: FrameQueue,
+
     render_targets: RenderTargets,
+
+    graphics_queue: Res<Queue>,
+    transfer_queue: Res<Queue>,
+
     pool: ResourcePool,
 }
 
@@ -26,23 +33,57 @@ impl Renderer {
 
         let instance = pool.alloc(Instance::new()?);
         let physical = PhysicalDevice::select(&instance)?;
-
         let surface = pool.alloc(Surface::new(instance.clone(), window)?);
 
-        let device = pool.alloc(Device::new(instance, physical, &surface)?);
+        let graphics_queue_req = physical
+            .get_queue_req(QueueReqKind::Graphics(surface.clone()))
+            .ok_or_else(|| anyhow!("can't find valid graphics queue"))?;
+        let transfer_queue_req = physical
+            .get_queue_req(QueueReqKind::Transfer)
+            .ok_or_else(|| anyhow!("can't find valid transfer queue"))?;
+
+        let device = pool.alloc(Device::new(instance, physical, &[
+            &graphics_queue_req,
+            &transfer_queue_req,
+        ])?);
+
+        let graphics_queue = pool.alloc(Queue::new(device.clone(), &graphics_queue_req)?);
+        let transfer_queue = pool.alloc(Queue::new(device.clone(), &transfer_queue_req)?);
+
         let window_extent = vk::Extent2D {
             width: window.inner_size().width,
             height: window.inner_size().height,
         };
 
-        let swapchain = Swapchain::new(device.clone(), surface.clone(), window_extent)?;
-        let render_targets = RenderTargets::new(device.clone(), &pool, &swapchain)?;
+        let swapchain = Swapchain::new(
+            device.clone(),
+            surface.clone(),
+            graphics_queue.clone(),
+            window_extent,
+        )?;
+
+        let render_targets = RenderTargets::new(
+            device.clone(),
+            graphics_queue.clone(),
+            &pool,
+            &swapchain,
+        )?;
+
         let render_pass = RenderPass::new(device.clone(), &swapchain, &render_targets)?;
-        let frame_queue = FrameQueue::new(device.clone())?;
+        let frame_queue = FrameQueue::new(device.clone(), graphics_queue.clone())?;
 
         device.wait_until_idle();
 
-        Ok(Self { device, swapchain, render_pass, frame_queue, render_targets, pool })
+        Ok(Self {
+            device,
+            swapchain,
+            render_pass,
+            frame_queue,
+            render_targets,
+            graphics_queue,
+            transfer_queue,
+            pool,
+        })
     }
 
     pub fn draw<P, R>(&self, pre: P, render: R) -> Result<()>
@@ -146,7 +187,7 @@ impl Renderer {
                     .build()];
 
                 self.device.handle.queue_submit(
-                    self.device.graphics_queue.handle,
+                    self.graphics_queue.handle,
                     &submit_info,
                     frame.ready_to_draw,
                 )?;
@@ -164,7 +205,7 @@ impl Renderer {
                     .image_indices(&indices);
 
                 let res = self.swapchain.loader
-                    .queue_present(self.device.transfer_queue.handle, &present_info)
+                    .queue_present(self.transfer_queue.handle, &present_info)
                     .unwrap_or_else(|err| {
                         if let vk::Result::ERROR_OUT_OF_DATE_KHR = err {
                             warn!("out of data swapchain during present");
@@ -186,6 +227,44 @@ impl Renderer {
         Ok(())
     }
 
+    /// Record and submut a command seqeunce to `Self::transfer_queue`. This will be performed
+    /// immediately, meaning that the transfer will be done before this function returns.
+    pub fn transfer_with<F, R>(&self, func: F) -> Result<R>
+    where
+        F: FnOnce(&CommandRecorder) -> R
+    {
+        // TODO: Avoid creating a new command buffer each time.
+        let buffers = unsafe {
+            let info = vk::CommandBufferAllocateInfo::builder()
+                .level(vk::CommandBufferLevel::PRIMARY)
+                .command_pool(self.transfer_queue.pool)
+                .command_buffer_count(1);
+            self.device.handle.allocate_command_buffers(&info)?
+        };
+
+        let recorder = CommandRecorder::new(self.device.handle.clone(), 0, buffers[0])?;
+        let ret = func(&recorder);
+
+        let buffers = [recorder.buffer];
+        let submit_infos = [vk::SubmitInfo::builder()
+            .command_buffers(&buffers)
+            .build()];
+
+        unsafe {
+            self.device.handle.end_command_buffer(recorder.buffer)?;
+            self.device.handle.queue_submit(
+                self.transfer_queue.handle,
+                &submit_infos,
+                vk::Fence::null(),
+            )?;
+
+            self.device.handle.queue_wait_idle(self.transfer_queue.handle)?;
+            self.device.handle.free_command_buffers(self.transfer_queue.pool, &buffers);
+        }
+
+        Ok(ret)
+    }
+
     /// Handle window resize. The extent of the swapchain and framebuffers will we match that of
     /// `window`.
     pub fn resize(&mut self, window: &winit::window::Window) -> Result<()> {
@@ -202,6 +281,7 @@ impl Renderer {
 
         self.render_targets = RenderTargets::new(
             self.device.clone(),
+            self.graphics_queue.clone(),
             &self.pool,
             &self.swapchain,
         )?;
@@ -369,6 +449,43 @@ impl PhysicalDevice {
 
         Ok(Self { handle, memory_properties, properties, queue_properties })
     }
+
+    pub fn get_queue_req(&self, kind: QueueReqKind) -> Option<QueueReq> {
+        let required_flag = match &kind {
+            QueueReqKind::Graphics(_) => vk::QueueFlags::GRAPHICS,
+            QueueReqKind::Transfer => vk::QueueFlags::TRANSFER,
+            QueueReqKind::Compute => vk::QueueFlags::COMPUTE,
+        };
+
+        let index = match &kind {
+            QueueReqKind::Graphics(surface) => {
+                self.queue_properties
+                    .iter()
+                    .enumerate()
+                    .position(|(i, p)| {
+                        p.queue_flags.contains(required_flag)
+                            && unsafe {
+                                surface
+                                    .loader
+                                    .get_physical_device_surface_support(
+                                        self.handle, i as u32, surface.handle,
+                                    )
+                                    .unwrap_or(false)
+                            }
+                    })
+            }
+            QueueReqKind::Transfer | QueueReqKind::Compute => {
+                self.queue_properties
+                    .iter()
+                    .position(|p| p.queue_flags.contains(required_flag))
+            }
+        };
+
+        index.map(|family_index| {
+            let flags = self.queue_properties[family_index].queue_flags;
+            QueueReq { flags, family_index: family_index as u32 }
+        })
+    }
 }
 
 
@@ -376,63 +493,30 @@ impl PhysicalDevice {
 /// after creation and doesn't depend on external factors such as display size.
 pub struct Device {
     pub handle: ash::Device,
-
-    instance: Res<Instance>,
-
     pub physical: PhysicalDevice,
 
-    /// Queue used to submit render commands.
-    graphics_queue: Queue,
-
-    /// Queue used to submut transfer commands, may be the same as `graphics_queue`.
-    transfer_queue: Queue,
-
-    /// Graphics pool fore recording render commands.
-    graphics_pool: vk::CommandPool,
-
-    /// Command pool for recording transfer commands. Not used for any rendering.
-    transfer_pool: vk::CommandPool,
+    instance: Res<Instance>,
 }
 
 impl Device {
     pub fn new(
         instance: Res<Instance>,
         physical: PhysicalDevice,
-        surface: &Surface,
+        queue_reqs: &[&QueueReq],
     ) -> Result<Self> {
-        let graphics_index = physical.queue_properties
-            .iter()
-            .enumerate()
-            .position(|(i, p)| {
-                p.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-                    && unsafe {
-                        surface
-                            .loader
-                            .get_physical_device_surface_support(physical.handle, i as u32, surface.handle)
-                            .unwrap_or(false)
-                    }
-            })
-            .map(|index| index as u32)
-            .ok_or_else(|| anyhow!("device has no graphics queue"))?;
-
-        let transfer_index = physical.queue_properties
-            .iter()
-            .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
-            .map(|index| index as u32)
-            .unwrap_or(graphics_index);
-
         let priorities = [1.0_f32];
 
-        let queue_infos = [
-            vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(graphics_index)
-                .queue_priorities(&priorities)
-                .build(),
-            vk::DeviceQueueCreateInfo::builder()
-                .queue_family_index(transfer_index)
-                .queue_priorities(&priorities)
-                .build(),
-        ];
+        let mut queue_infos: Vec<_> = queue_reqs
+            .iter()
+            .map(|req| {
+                vk::DeviceQueueCreateInfo::builder()
+                    .queue_family_index(req.family_index)
+                    .queue_priorities(&priorities)
+                    .build()
+            })
+            .collect();
+
+        queue_infos.dedup_by_key(|info| info.queue_family_index);
 
         let extensions = [
             khr::Swapchain::name().as_ptr(),
@@ -459,16 +543,13 @@ impl Device {
             .descriptor_indexing(true)
             .build();
 
-        let queue_create_infos = if transfer_index != graphics_index {
-            &queue_infos
-        } else {
-            &queue_infos[1..]
-        };
-
-        let layer_names: Vec<_> = instance.layers.iter().map(|layer| layer.as_ptr()).collect();
+        let layer_names: Vec<_> = instance.layers
+            .iter()
+            .map(|layer| layer.as_ptr())
+            .collect();
 
         let device_info = vk::DeviceCreateInfo::builder()
-            .queue_create_infos(queue_create_infos)
+            .queue_create_infos(&queue_infos)
             .enabled_extension_names(&extensions)
             .enabled_layer_names(&layer_names)
             .enabled_features(&enabled_features)
@@ -477,72 +558,7 @@ impl Device {
 
         let handle = unsafe { instance.handle.create_device(physical.handle, &device_info, None)? };
 
-        let graphics_queue = Queue::new(&handle, graphics_index);
-        let transfer_queue = Queue::new(&handle, transfer_index);
-
-        let graphics_pool = unsafe {
-            let info = vk::CommandPoolCreateInfo::builder()
-                .queue_family_index(graphics_queue.family_index)
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-
-            handle.create_command_pool(&info, None)?
-        };
-
-        let transfer_pool = unsafe {
-            let info = vk::CommandPoolCreateInfo::builder()
-                .queue_family_index(transfer_queue.family_index)
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
-
-            handle.create_command_pool(&info, None)?
-        };
-
-        Ok(Self {
-            instance,
-            physical,
-            handle,
-            graphics_queue,
-            transfer_queue,
-            transfer_pool,
-            graphics_pool,
-        })
-    }
-
-    /// Record and submut a command seqeunce to `Self::transfer_queue`. This will be performed
-    /// immediately, meaning that the transfer will be done before this function returns.
-    pub fn transfer_with<F, R>(&self, func: F) -> Result<R>
-    where
-        F: FnOnce(&CommandRecorder) -> R
-    {
-        // TODO: Avoid creating a new command buffer each time.
-        let buffers = unsafe {
-            let info = vk::CommandBufferAllocateInfo::builder()
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_pool(self.transfer_pool)
-                .command_buffer_count(1);
-            self.handle.allocate_command_buffers(&info)?
-        };
-
-        let recorder = CommandRecorder::new(self.handle.clone(), 0, buffers[0])?;
-        let ret = func(&recorder);
-
-        let buffers = [recorder.buffer];
-        let submit_infos = [vk::SubmitInfo::builder()
-            .command_buffers(&buffers)
-            .build()];
-
-        unsafe {
-            self.handle.end_command_buffer(recorder.buffer)?;
-            self.handle.queue_submit(
-                self.transfer_queue.handle,
-                &submit_infos,
-                vk::Fence::null(),
-            )?;
-
-            self.handle.queue_wait_idle(self.transfer_queue.handle)?;
-            self.handle.free_command_buffers(self.transfer_pool, &buffers);
-        }
-
-        Ok(ret)
+        Ok(Self { instance, physical, handle })
     }
 
     /// Get the sample count for msaa. For now it just the highest sample count the device
@@ -579,11 +595,7 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        unsafe {
-            self.handle.destroy_command_pool(self.graphics_pool, None);
-            self.handle.destroy_command_pool(self.transfer_pool, None);
-            self.handle.destroy_device(None);
-        }
+        unsafe { self.handle.destroy_device(None); }
     }
 }
 
@@ -777,18 +789,51 @@ impl Drop for RenderPass {
     }
 }
 
-/// A vulkan queue and it's family index.
-struct Queue {
-    handle: vk::Queue,
+#[derive(Clone)]
+pub enum QueueReqKind {
+    Graphics(Res<Surface>),
+    Transfer,
+    Compute,
+}
+
+#[derive(Clone, Copy)]
+pub struct QueueReq {
+    flags: vk::QueueFlags,
     family_index: u32,
 }
 
+/// A vulkan queue and it's family index.
+pub struct Queue {
+    handle: vk::Queue,
+    pool: vk::CommandPool,
+
+    #[allow(dead_code)]
+    flags: vk::QueueFlags,
+
+    family_index: u32,
+
+    device: Res<Device>,
+}
+
 impl Queue {
-    fn new(device: &ash::Device, family_index: u32) -> Self {
-        Self {
-            handle: unsafe { device.get_device_queue(family_index, 0) },
-            family_index,
-        }
+    pub fn new(device: Res<Device>, req: &QueueReq) -> Result<Self> {
+        let pool = unsafe {
+            let info = vk::CommandPoolCreateInfo::builder()
+                .queue_family_index(req.family_index)
+                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+
+            device.handle.create_command_pool(&info, None)?
+        };
+
+        let handle = unsafe { device.handle.get_device_queue(req.family_index, 0) };
+
+        Ok(Self { handle, flags: req.flags, family_index: req.family_index, device, pool })
+    }
+}
+
+impl Drop for Queue {
+    fn drop(&mut self) {
+        unsafe { self.device.handle.destroy_command_pool(self.pool, None); }
     }
 }
 
@@ -832,23 +877,27 @@ struct FrameQueue {
     frame_index: Cell<usize>,
 
     device: Res<Device>,
+    graphics_queue: Res<Queue>,
 }
 
 impl FrameQueue {
-    pub fn new(device: Res<Device>) -> Result<Self> {
+    pub fn new(device: Res<Device>, graphics_queue: Res<Queue>) -> Result<Self> {
         let command_buffers = unsafe {
             let command_buffer_info = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(device.graphics_pool)
+                .command_pool(graphics_queue.pool)
                 .command_buffer_count(FRAMES_IN_FLIGHT as u32);
             device.handle.allocate_command_buffers(&command_buffer_info)?
         };
+
         let frames: Result<Vec<_>> = command_buffers
             .into_iter()
             .enumerate()
             .map(|(i, buffer)| Frame::new(&device, i, buffer))
             .collect();
+
         let frame_index = Cell::new(0_usize);
-        Ok(Self { frames: frames?, frame_index, device: device.clone() })
+
+        Ok(Self { frames: frames?, frame_index, device: device.clone(), graphics_queue })
     }
 
     pub fn next_frame(&self) {
@@ -877,7 +926,7 @@ impl Drop for FrameQueue {
                     frame.command_buffer
                 })
                 .collect();
-            self.device.handle.free_command_buffers(self.device.graphics_pool, &command_buffers);
+            self.device.handle.free_command_buffers(self.graphics_queue.pool, &command_buffers);
         }
     }
 }
@@ -1010,11 +1059,19 @@ struct RenderTargets {
     ///
     images: Vec<Res<Image>>,
     sample_count: vk::SampleCountFlags,
+
+    #[allow(dead_code)]
+    graphics_queue: Res<Queue>,
 }
 
 impl RenderTargets {
-    fn new(device: Res<Device>, pool: &ResourcePool, swapchain: &Swapchain) -> Result<Self> {
-        let queue_families = [device.graphics_queue.family_index];
+    fn new(
+        device: Res<Device>,
+        graphics_queue: Res<Queue>,
+        pool: &ResourcePool,
+        swapchain: &Swapchain,
+    ) -> Result<Self> {
+        let queue_families = [graphics_queue.family_index];
 
         let extent = vk::Extent3D {
             width: swapchain.extent.width,
@@ -1090,7 +1147,7 @@ impl RenderTargets {
             &view_infos,
         )?;
 
-        Ok(Self { images, sample_count })
+        Ok(Self { images, sample_count, graphics_queue })
     }
 
     /// Iterator over each render target.
@@ -1111,6 +1168,7 @@ pub struct Swapchain {
 
     device: Res<Device>,
     surface: Res<Surface>,
+    graphics_queue: Res<Queue>,
 }
 
 enum NextSwapchainImage {
@@ -1121,7 +1179,12 @@ enum NextSwapchainImage {
 impl Swapchain {
     /// Create a new swapchain. `extent` is used to determine the size of the swapchain images only
     /// if it aren't able to determine it from `surface`.
-    pub fn new(device: Res<Device>, surface: Res<Surface>, extent: vk::Extent2D) -> Result<Self> {
+    pub fn new(
+        device: Res<Device>,
+        surface: Res<Surface>,
+        graphics_queue: Res<Queue>,
+        extent: vk::Extent2D,
+    ) -> Result<Self> {
         let (surface_formats, _present_modes, surface_caps) = unsafe {
             let format = surface
                 .loader
@@ -1144,7 +1207,7 @@ impl Swapchain {
             (format, modes, caps)
         };
 
-        let queue_families = [device.graphics_queue.family_index];
+        let queue_families = [graphics_queue.family_index];
         let min_image_count = 2.max(surface_caps.min_image_count);
 
         let surface_format = surface_formats
@@ -1207,6 +1270,7 @@ impl Swapchain {
 
         Ok(Self {
             surface,
+            graphics_queue,
             device: device.clone(),
             surface_format,
             images: images?,
@@ -1234,7 +1298,7 @@ impl Swapchain {
             )?
         };
 
-        let queue_families = [self.device.graphics_queue.family_index];
+        let queue_families = [self.graphics_queue.family_index];
         let min_image_count = (FRAMES_IN_FLIGHT as u32).max(surface_caps.min_image_count);
 
         let swapchain_info = vk::SwapchainCreateInfoKHR::builder()

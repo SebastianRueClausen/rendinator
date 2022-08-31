@@ -48,7 +48,7 @@ impl Skybox {
             buffer
         };
 
-        renderer.device.transfer_with(|recorder| {
+        renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(&image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             recorder.copy_buffer_to_image(&staging, &image);
             recorder.transition_image_layout(&image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);

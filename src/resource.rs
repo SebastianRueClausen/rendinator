@@ -650,7 +650,7 @@ impl CubeMap {
             Buffer::new(renderer, pool, &req, memory_flags)?
         };
 
-        renderer.device.transfer_with(|recorder|
+        renderer.transfer_with(|recorder|
             recorder.copy_buffers(&staging, &vertex_buffer)
         )?;
 

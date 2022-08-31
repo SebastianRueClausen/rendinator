@@ -312,7 +312,7 @@ impl Lights {
             buffer
         };
 
-        renderer.device.transfer_with(|recorder| {
+        renderer.transfer_with(|recorder| {
             recorder.copy_buffers(&light_staging, &lights_buf)
         })?;
 
@@ -456,7 +456,7 @@ impl Lights {
     }
 
     fn build_clusters(&self, renderer: &Renderer) -> Result<()> {
-        renderer.device.transfer_with(|recorder| {
+        renderer.transfer_with(|recorder| {
             recorder.bind_descriptor_sets(
                 vk::PipelineBindPoint::COMPUTE,
                 self.cluster_build.pipeline.layout(),
