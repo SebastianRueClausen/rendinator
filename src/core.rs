@@ -86,19 +86,18 @@ impl Renderer {
         })
     }
 
-    pub fn draw<P, R>(&self, pre: P, render: R) -> Result<()>
+    pub fn draw<P, R>(&mut self, pre: P, render: R) -> Result<()>
     where
-        P: FnOnce(&CommandRecorder),
-        R: FnOnce(&CommandRecorder),
+        P: FnOnce(&CommandRecorder, usize),
+        R: FnOnce(&CommandRecorder, usize),
     {
         self.frame_queue.next_frame();
 
         let frame = self.frame_queue.current_frame();
-        unsafe {
-            let reset_flags = vk::CommandBufferResetFlags::empty();
 
+        unsafe {
             self.device.handle.wait_for_fences(&[frame.ready_to_draw], true, u64::MAX)?;
-            self.device.handle.reset_command_buffer(frame.command_buffer, reset_flags)?;
+            frame.command_buffer.reset()?;
         }
 
         loop {
@@ -111,87 +110,68 @@ impl Renderer {
 
             unsafe { self.device.handle.reset_fences(&[frame.ready_to_draw])?; }
 
-            let recorder = CommandRecorder::new(
-                self.device.handle.clone(),
-                frame.index,
-                frame.command_buffer.clone(),
-            )?;
+            frame.command_buffer.record(|recorder| {
+                pre(recorder, frame.index);
 
-            pre(&recorder);
+                let framebuffer =
+                    self.render_pass.get_framebuffer(&self.swapchain, frame.index, image_index);
 
-            let framebuffer =
-                self.render_pass.get_framebuffer(&self.swapchain, frame.index, image_index);
-
-            let clear_values = [
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.2, 0.2, 0.2, 1.0],
+                let clear_values = [
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.2, 0.2, 0.2, 1.0],
+                        },
                     },
-                },
-                vk::ClearValue {
-                    depth_stencil: vk::ClearDepthStencilValue {
-                        depth: 1.0,
-                        stencil: 0,
+                    vk::ClearValue {
+                        depth_stencil: vk::ClearDepthStencilValue {
+                            depth: 1.0,
+                            stencil: 0,
+                        },
                     },
-                },
-                vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.00, 0.00, 0.00, 1.0],
+                    vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.00, 0.00, 0.00, 1.0],
+                        },
                     },
-                },
-            ];
+                ];
 
-            let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-                .render_pass(self.render_pass.handle)
-                .framebuffer(framebuffer)
-                .render_area(vk::Rect2D {
-                    offset: vk::Offset2D { x: 0, y: 0 },
-                    extent: self.swapchain.extent,
-                })
-                .clear_values(&clear_values);
+                let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
+                    .render_pass(self.render_pass.handle)
+                    .framebuffer(framebuffer)
+                    .render_area(vk::Rect2D {
+                        offset: vk::Offset2D { x: 0, y: 0 },
+                        extent: self.swapchain.extent,
+                    })
+                    .clear_values(&clear_values);
 
-            unsafe {
-                self.device.handle.cmd_begin_render_pass(
-                    recorder.buffer,
-                    &render_pass_begin_info,
-                    vk::SubpassContents::INLINE,
-                );
+                unsafe {
+                    self.device.handle.cmd_begin_render_pass(
+                        recorder.buffer.handle,
+                        &render_pass_begin_info,
+                        vk::SubpassContents::INLINE,
+                    );
 
-                let viewports = self.swapchain.viewports();
-                let scissors = self.swapchain.scissors();
+                    let viewports = self.swapchain.viewports();
+                    let scissors = self.swapchain.scissors();
 
-                self.device.handle.cmd_set_viewport(recorder.buffer, 0, &viewports);
-                self.device.handle.cmd_set_scissor(recorder.buffer, 0, &scissors);
-            }
+                    self.device.handle.cmd_set_viewport(recorder.buffer.handle, 0, &viewports);
+                    self.device.handle.cmd_set_scissor(recorder.buffer.handle, 0, &scissors);
+                }
 
-            render(&recorder);
+                render(&recorder, frame.index);
 
-            unsafe { self.device.handle.cmd_end_render_pass(recorder.buffer) };
-
-            let command_buffer = recorder.end()?;
+                unsafe { self.device.handle.cmd_end_render_pass(recorder.buffer.handle) };
+            })?;
 
             // Submit command buffer to be rendered. Wait for semaphore `frame.presented` first and
             // signals `frame.rendered´ and `frame.ready_to_draw` when all commands have been
             // executed.
-            unsafe {
-                let wait = [frame.presented];
-                let signals = [frame.rendered];
-                let command_buffers = [command_buffer];
-                let stages = [vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT];
-
-                let submit_info = [vk::SubmitInfo::builder()
-                    .wait_dst_stage_mask(&stages)
-                    .wait_semaphores(&wait)
-                    .command_buffers(&command_buffers)
-                    .signal_semaphores(&signals)
-                    .build()];
-
-                self.device.handle.queue_submit(
-                    self.graphics_queue.handle,
-                    &submit_info,
-                    frame.ready_to_draw,
-                )?;
-            }
+            frame.command_buffer.submit_wait(SubmitWaitReq {
+                wait_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                fence: frame.ready_to_draw,
+                signal: frame.rendered,
+                wait: frame.presented,
+            })?;
 
             // Wait for the frame to be rendered before presenting it to the surface.
             unsafe {
@@ -233,35 +213,9 @@ impl Renderer {
     where
         F: FnOnce(&CommandRecorder) -> R
     {
-        // TODO: Avoid creating a new command buffer each time.
-        let buffers = unsafe {
-            let info = vk::CommandBufferAllocateInfo::builder()
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_pool(self.transfer_queue.pool)
-                .command_buffer_count(1);
-            self.device.handle.allocate_command_buffers(&info)?
-        };
-
-        let recorder = CommandRecorder::new(self.device.handle.clone(), 0, buffers[0])?;
-        let ret = func(&recorder);
-
-        let buffers = [recorder.buffer];
-        let submit_infos = [vk::SubmitInfo::builder()
-            .command_buffers(&buffers)
-            .build()];
-
-        unsafe {
-            self.device.handle.end_command_buffer(recorder.buffer)?;
-            self.device.handle.queue_submit(
-                self.transfer_queue.handle,
-                &submit_infos,
-                vk::Fence::null(),
-            )?;
-
-            self.device.handle.queue_wait_idle(self.transfer_queue.handle)?;
-            self.device.handle.free_command_buffers(self.transfer_queue.pool, &buffers);
-        }
-
+        let buffer = CommandBuffer::new(self.device.clone(), self.transfer_queue.clone())?;
+        let ret = buffer.record(func)?;
+        buffer.submit_wait_idle()?;
         Ok(ret)
     }
 
@@ -829,6 +783,10 @@ impl Queue {
 
         Ok(Self { handle, flags: req.flags, family_index: req.family_index, device, pool })
     }
+
+    pub fn wait_idle(&self) -> Result<()> {
+        Ok(unsafe { self.device.handle.queue_wait_idle(self.handle)? })
+    }
 }
 
 impl Drop for Queue {
@@ -851,13 +809,13 @@ struct Frame {
 
     /// Command buffer to for drawing and transfers. This has to be re-recorded before each frame,
     /// since the amount of frames (most likely) doesn't match the number if swapchain images.
-    pub command_buffer: vk::CommandBuffer,
+    pub command_buffer: CommandBuffer,
 
     pub index: usize,
 }
 
 impl Frame {
-    fn new(device: &Device, index: usize, command_buffer: vk::CommandBuffer) -> Result<Self> {
+    fn new(device: &Device, index: usize, command_buffer: CommandBuffer) -> Result<Self> {
         let semaphore_info = vk::SemaphoreCreateInfo::builder();
         let presented = unsafe { device.handle.create_semaphore(&semaphore_info, None)? };
         let rendered = unsafe { device.handle.create_semaphore(&semaphore_info, None)? };
@@ -882,17 +840,11 @@ struct FrameQueue {
 
 impl FrameQueue {
     pub fn new(device: Res<Device>, graphics_queue: Res<Queue>) -> Result<Self> {
-        let command_buffers = unsafe {
-            let command_buffer_info = vk::CommandBufferAllocateInfo::builder()
-                .command_pool(graphics_queue.pool)
-                .command_buffer_count(FRAMES_IN_FLIGHT as u32);
-            device.handle.allocate_command_buffers(&command_buffer_info)?
-        };
-
-        let frames: Result<Vec<_>> = command_buffers
-            .into_iter()
-            .enumerate()
-            .map(|(i, buffer)| Frame::new(&device, i, buffer))
+        let frames: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT)
+            .map(|i| {
+                let buffer = CommandBuffer::new(device.clone(), graphics_queue.clone())?;
+                Frame::new(&device, i, buffer)
+            })
             .collect();
 
         let frame_index = Cell::new(0_usize);
@@ -916,17 +868,11 @@ impl FrameQueue {
 impl Drop for FrameQueue {
     fn drop(&mut self) {
         unsafe {
-            let command_buffers: Vec<_> = self.frames
-                .iter()
-                .map(|frame| {
-                    self.device.handle.destroy_semaphore(frame.rendered, None);
-                    self.device.handle.destroy_semaphore(frame.presented, None);
-                    self.device.handle.destroy_fence(frame.ready_to_draw, None);
-
-                    frame.command_buffer
-                })
-                .collect();
-            self.device.handle.free_command_buffers(self.graphics_queue.pool, &command_buffers);
+            for frame in &self.frames {
+                self.device.handle.destroy_semaphore(frame.rendered, None);
+                self.device.handle.destroy_semaphore(frame.presented, None);
+                self.device.handle.destroy_fence(frame.ready_to_draw, None);
+            }
         }
     }
 }
@@ -1945,32 +1891,113 @@ pub struct IndexedDrawCall {
     pub vertex_offset: i32,
 }
 
-pub struct CommandRecorder {
-    pub buffer: vk::CommandBuffer,
-    frame_index: usize,
+pub struct CommandBuffer {
+    handle: vk::CommandBuffer,     
 
-    // TODO: Make this `Res<Device>` when we do some refactoring.
-    device: ash::Device,
+    queue: Res<Queue>,
+    device: Res<Device>,
 }
 
-impl CommandRecorder {
-    fn new(device: ash::Device, frame_index: usize, buffer: vk::CommandBuffer) -> Result<Self> {
+pub struct SubmitWaitReq {
+    signal: vk::Semaphore,
+    wait: vk::Semaphore,
+    wait_stage: vk::PipelineStageFlags,
+    fence: vk::Fence,
+}
+
+impl CommandBuffer {
+    pub fn new(device: Res<Device>, queue: Res<Queue>) -> Result<Self> {
+        let info = vk::CommandBufferAllocateInfo::builder()
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_pool(queue.pool)
+            .command_buffer_count(1);
+        let handles = unsafe { device.handle.allocate_command_buffers(&info)? };
+        Ok(Self { handle: *handles.first().unwrap(), queue, device })
+    }
+
+    pub fn reset(&self) -> Result<()> {
+        unsafe {
+            let flags = vk::CommandBufferResetFlags::empty();
+            self.device.handle.reset_command_buffer(self.handle, flags)?;
+        }
+        
+        Ok(())
+    }
+
+    pub fn record<F, R>(&self, func: F) -> Result<R>
+    where
+        F: FnOnce(&CommandRecorder) -> R
+    {
         unsafe {
             let begin_info = vk::CommandBufferBeginInfo::builder()
                 .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
-            device.begin_command_buffer(buffer, &begin_info)?;
+            self.device.handle.begin_command_buffer(self.handle, &begin_info)?;
         }
 
-        Ok(Self { buffer, frame_index, device: device.clone() })
+        let recorder = CommandRecorder { buffer: &self };
+        let ret = func(&recorder);
+
+        unsafe { self.device.handle.end_command_buffer(self.handle)?; }
+
+        Ok(ret)
     }
 
-    fn end(self) -> Result<vk::CommandBuffer> {
-        unsafe { self.device.end_command_buffer(self.buffer)?; }
-        Ok(self.buffer)
+    pub fn submit_wait(&self, req: SubmitWaitReq) -> Result<()> {
+        let wait = [req.wait];
+        let signals = [req.signal];
+        let command_buffers = [self.handle];
+        let stages = [req.wait_stage];
+
+        let submit_info = [vk::SubmitInfo::builder()
+            .wait_dst_stage_mask(&stages)
+            .wait_semaphores(&wait)
+            .command_buffers(&command_buffers)
+            .signal_semaphores(&signals)
+            .build()];
+
+        unsafe {
+            self.device.handle.queue_submit(
+                self.queue.handle,
+                &submit_info,
+                req.fence,
+            )?;
+        }
+
+        Ok(())
     }
 
-    pub fn frame_index(&self) -> usize {
-        self.frame_index
+    pub fn submit_wait_idle(&self) -> Result<()> {
+        let buffers = [self.handle];
+        let submit_infos = [vk::SubmitInfo::builder()
+            .command_buffers(&buffers)
+            .build()];
+
+        unsafe {
+            self.device.handle.queue_submit(
+                self.queue.handle,
+                &submit_infos,
+                vk::Fence::null(),
+            )?;
+        }
+
+        self.queue.wait_idle()
+    }
+}
+
+impl Drop for CommandBuffer {
+    fn drop(&mut self) {
+        self.queue.wait_idle().expect("failed to wait for idle queue");
+        unsafe { self.device.handle.free_command_buffers(self.queue.pool, &[self.handle]) }
+    }
+}
+
+pub struct CommandRecorder<'a> {
+    buffer: &'a CommandBuffer,
+}
+
+impl<'a> CommandRecorder<'a> {
+    fn device(&self) -> &Device {
+        &self.buffer.device
     }
 
     pub fn copy_buffers(&self, src: &Buffer, dst: &Buffer) {
@@ -1980,7 +2007,11 @@ impl CommandRecorder {
             .dst_offset(0)
             .size(size)
             .build()];
-        unsafe { self.device.cmd_copy_buffer(self.buffer, src.handle, dst.handle, &regions); }
+        unsafe { 
+            self.device()
+                .handle
+                .cmd_copy_buffer(self.buffer.handle, src.handle, dst.handle, &regions);
+        }
     }
 
     pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Image) {
@@ -1998,8 +2029,8 @@ impl CommandRecorder {
             .image_subresource(subresource)
             .build()];
         unsafe {
-            self.device.cmd_copy_buffer_to_image(
-                self.buffer,
+            self.device().handle.cmd_copy_buffer_to_image(
+                self.buffer.handle,
                 src.handle,
                 dst.handle,
                 dst.layout(),
@@ -2066,8 +2097,8 @@ impl CommandRecorder {
 
         unsafe {
             let barriers = [barrier.build()];
-            self.device.cmd_pipeline_barrier(
-                self.buffer,
+            self.device().handle.cmd_pipeline_barrier(
+                self.buffer.handle,
                 src_stage,
                 dst_stage,
                 vk::DependencyFlags::empty(),
@@ -2081,24 +2112,25 @@ impl CommandRecorder {
     pub fn dispatch(&self, pipeline: &ComputePipeline, group_count: UVec3) {
         let bind_point = vk::PipelineBindPoint::COMPUTE;
         unsafe {
-            self.device.cmd_bind_pipeline( self.buffer, bind_point, pipeline.handle);
-            self.device.cmd_dispatch(self.buffer, group_count.x, group_count.y, group_count.z);
+            self.device().handle.cmd_bind_pipeline(self.buffer.handle, bind_point, pipeline.handle);
+            self.device().handle.cmd_dispatch(self.buffer.handle, group_count.x, group_count.y, group_count.z);
         }
     }
 
     pub fn bind_descriptor_sets(
         &self,
+        frame_index: usize,
         bind_point: vk::PipelineBindPoint,
         layout: &PipelineLayout,
         descriptors: &[&DescriptorSet],
     ) {
         let descs: SmallVec<[_; 12]> = descriptors
             .iter()
-            .map(|desc| desc[self.frame_index])
+            .map(|desc| desc[frame_index])
             .collect();
         unsafe {
-            self.device.cmd_bind_descriptor_sets(
-                self.buffer,
+            self.device().handle.cmd_bind_descriptor_sets(
+                self.buffer.handle,
                 bind_point,
                 layout.handle,
                 0,
@@ -2109,11 +2141,25 @@ impl CommandRecorder {
     }
 
     pub fn bind_vertex_buffer(&self, buffer: &Buffer) {
-        unsafe { self.device.cmd_bind_vertex_buffers(self.buffer, 0, &[buffer.handle], &[0]); }
+        unsafe {
+            self.device().handle.cmd_bind_vertex_buffers(
+                self.buffer.handle,
+                0,
+                &[buffer.handle],
+                &[0],
+            );
+        }
     }
 
     pub fn bind_index_buffer(&self, buffer: &Buffer, index_type: vk::IndexType) {
-        unsafe { self.device.cmd_bind_index_buffer(self.buffer, buffer.handle, 0, index_type); }
+        unsafe {
+            self.device().handle.cmd_bind_index_buffer(
+                self.buffer.handle,
+                buffer.handle,
+                0,
+                index_type,
+            );
+        }
     }
 
     pub fn push_constants<T: bytemuck::NoUninit>(
@@ -2125,25 +2171,43 @@ impl CommandRecorder {
     ) {
         let bytes = bytemuck::bytes_of(val);
         unsafe {
-            self.device.cmd_push_constants( self.buffer, layout.handle, stage, offset, bytes);
+            self.device().handle.cmd_push_constants(
+                self.buffer.handle,
+                layout.handle,
+                stage,
+                offset,
+                bytes,
+            );
         }
     }
 
     pub fn bind_graphics_pipeline(&self, pipeline: &GraphicsPipeline) {
         let bind_point = vk::PipelineBindPoint::GRAPHICS;
-        unsafe { self.device.cmd_bind_pipeline(self.buffer, bind_point, pipeline.handle); }
+        unsafe {
+            self.device().handle.cmd_bind_pipeline(
+                self.buffer.handle,
+                bind_point,
+                pipeline.handle,
+            );
+        }
     }
     
     pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
         unsafe {
-            self.device.cmd_draw(self.buffer, vertex_count, 1, vertex_start, 0);
+            self.device().handle.cmd_draw(
+                self.buffer.handle,
+                vertex_count,
+                1,
+                vertex_start,
+                0,
+            );
         }
     }
 
     pub fn draw_indexed(&self, call: IndexedDrawCall) {
         unsafe {
-            self.device.cmd_draw_indexed(
-                self.buffer,
+            self.device().handle.cmd_draw_indexed(
+                self.buffer.handle,
                 call.index_count,
                 1,
                 call.index_start,
@@ -2161,7 +2225,12 @@ impl CommandRecorder {
         );
 
         unsafe {
-            self.device.cmd_update_buffer(self.buffer, buffer.handle, 0, bytemuck::bytes_of(val));
+            self.device().handle.cmd_update_buffer(
+                self.buffer.handle,
+                buffer.handle,
+                0,
+                bytemuck::bytes_of(val),
+            );
         }
     }
 
@@ -2175,8 +2244,8 @@ impl CommandRecorder {
         max_draw_count: u32,
     ) {
         unsafe {
-            self.device.cmd_draw_indexed_indirect_count(
-                self.buffer,
+            self.device().handle.cmd_draw_indexed_indirect_count(
+                self.buffer.handle,
                 buffer.handle,
                 offset,
                 count_buffer.handle,
@@ -2206,8 +2275,8 @@ impl CommandRecorder {
             .size(buffer.size())
             .build()];
         unsafe {
-            self.device.cmd_pipeline_barrier(
-                self.buffer,
+            self.device().handle.cmd_pipeline_barrier(
+                self.buffer.handle,
                 src_stage,
                 dst_stage,
                 vk::DependencyFlags::empty(),

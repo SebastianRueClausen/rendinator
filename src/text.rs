@@ -166,7 +166,7 @@ impl TextPass {
         self.proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
     }
 
-    pub fn draw_text<F>(&mut self, recorder: &CommandRecorder, mut func: F)
+    pub fn draw_text<F>(&mut self, recorder: &CommandRecorder, frame_index: usize, mut func: F)
     where
         F: FnMut(&mut TextObjects),
     {
@@ -174,8 +174,6 @@ impl TextPass {
 
         func(&mut self.text_objects);
 
-        let frame_index = recorder.frame_index();
-    
         let index_data = bytemuck::cast_slice(self.text_objects.indices.as_slice());
         let vertex_data = bytemuck::cast_slice(self.text_objects.vertices.as_slice());
 
@@ -192,6 +190,7 @@ impl TextPass {
 
         recorder.bind_graphics_pipeline(&self.pipeline);
         recorder.bind_descriptor_sets(
+            frame_index,
             vk::PipelineBindPoint::GRAPHICS,
             self.pipeline.layout(),
             &[&self.descriptor],

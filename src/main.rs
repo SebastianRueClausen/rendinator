@@ -114,10 +114,11 @@ fn main() -> Result<()> {
                 last_draw = Instant::now();
 
                 let res = renderer.draw(
-                    |recorder| {
-                        camera_uniforms.update_view(recorder.frame_index(), &camera);
+                    |recorder, frame_index| {
+                        camera_uniforms.update_view(frame_index, &camera);
 
                         recorder.bind_descriptor_sets(
+                            frame_index,
                             vk::PipelineBindPoint::COMPUTE,
                             lights.light_update.pipeline.layout(),
                             &[&lights.light_update.descriptor],
@@ -127,7 +128,7 @@ fn main() -> Result<()> {
                         recorder.dispatch(&lights.light_update.pipeline, group_count);
                
                         recorder.buffer_barrier(
-                            &lights.light_pos_bufs[recorder.frame_index()],
+                            &lights.light_pos_bufs[frame_index],
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::SHADER_READ,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -135,6 +136,7 @@ fn main() -> Result<()> {
                         );
 
                         recorder.bind_descriptor_sets(
+                            frame_index,
                             vk::PipelineBindPoint::COMPUTE,
                             lights.cluster_update.pipeline.layout(),
                             &[&lights.cluster_update.descriptor],
@@ -144,7 +146,7 @@ fn main() -> Result<()> {
                         recorder.dispatch(&lights.cluster_update.pipeline, group_count);
                
                         recorder.buffer_barrier(
-                            &lights.light_mask_bufs[recorder.frame_index()],
+                            &lights.light_mask_bufs[frame_index],
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::SHADER_READ,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -157,7 +159,7 @@ fn main() -> Result<()> {
                         //
 
                         recorder.update_buffer(
-                            &scene.draw_count_buffers[recorder.frame_index()],
+                            &scene.draw_count_buffers[frame_index],
                             &scene::DrawCount {
                                 command_count: 0,
                                 primitive_count: scene.primitive_count,
@@ -165,7 +167,7 @@ fn main() -> Result<()> {
                         );
 
                         recorder.buffer_barrier(
-                            &scene.draw_count_buffers[recorder.frame_index()],
+                            &scene.draw_count_buffers[frame_index],
                             vk::AccessFlags::TRANSFER_WRITE,
                             vk::AccessFlags::SHADER_WRITE,
                             vk::PipelineStageFlags::TRANSFER,
@@ -173,6 +175,7 @@ fn main() -> Result<()> {
                         );
 
                         recorder.bind_descriptor_sets(
+                            frame_index,
                             vk::PipelineBindPoint::COMPUTE,
                             scene.cull_pipeline.layout(),
                             &[&scene.cull_descriptor],
@@ -208,14 +211,14 @@ fn main() -> Result<()> {
                         recorder.dispatch(&scene.cull_pipeline, group_count);
 
                         recorder.buffer_barrier(
-                            &lights.light_mask_bufs[recorder.frame_index()],
+                            &lights.light_mask_bufs[frame_index],
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::INDIRECT_COMMAND_READ,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
                             vk::PipelineStageFlags::DRAW_INDIRECT,
                         );
                     },
-                    |recorder| {
+                    |recorder, frame_index| {
                         let index_type: vk::IndexType = scene.index_format.into();
 
                         recorder.bind_index_buffer(&scene.index_buffer, index_type);
@@ -224,16 +227,17 @@ fn main() -> Result<()> {
                         recorder.bind_graphics_pipeline(&scene.render_pipeline);
 
                         recorder.bind_descriptor_sets(
+                            frame_index,
                             vk::PipelineBindPoint::GRAPHICS,
                             scene.render_pipeline.layout(),
                             &[&scene.descriptor, &scene.light_descriptor],
                         );
                                
                         recorder.draw_indexed_indirect_count(
-                            &scene.draw_buffers[recorder.frame_index()],
+                            &scene.draw_buffers[frame_index],
                             0,
                             mem::size_of::<scene::DrawCommand>(),
-                            &scene.draw_count_buffers[recorder.frame_index()],
+                            &scene.draw_count_buffers[frame_index],
                             0,
                             scene.primitive_count,
                         );
@@ -242,6 +246,7 @@ fn main() -> Result<()> {
                         recorder.bind_graphics_pipeline(&skybox.pipeline);
 
                         recorder.bind_descriptor_sets(
+                            frame_index,
                             vk::PipelineBindPoint::GRAPHICS,
                             skybox.pipeline.layout(),
                             &[&skybox.descriptor],
@@ -259,7 +264,7 @@ fn main() -> Result<()> {
 
                         recorder.draw(36, 0);
                 
-                        text_pass.draw_text(recorder, |texts| {
+                        text_pass.draw_text(recorder, frame_index, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
                             texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
 

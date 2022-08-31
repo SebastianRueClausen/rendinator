@@ -209,7 +209,7 @@ struct LightMask {
 ///
 /// This buffer has a copy for each frame in flight and is updated before drawing each frame by
 /// the `cluster_update` compute shader.
-//
+///
 /// This is one of two main ways of doing this. Another way would be to have some kind of light
 /// list where each cluster get's it's own slice of light indices. This would work as well, but
 /// would take up more a lot more memory unless you start doing heuristics about how many lights
@@ -458,6 +458,7 @@ impl Lights {
     fn build_clusters(&self, renderer: &Renderer) -> Result<()> {
         renderer.transfer_with(|recorder| {
             recorder.bind_descriptor_sets(
+                0,
                 vk::PipelineBindPoint::COMPUTE,
                 self.cluster_build.pipeline.layout(),
                 &[&self.cluster_build.descriptor],
