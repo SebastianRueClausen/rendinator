@@ -9,7 +9,7 @@ use std::cell::{UnsafeCell, Cell};
 use std::ptr::{self, NonNull};
 use std::hash::{Hash, Hasher};
 
-use crate::core::{Renderer, Device};
+use crate::core::*;
 
 type MemoryRange = ops::Range<vk::DeviceSize>;
 

@@ -224,7 +224,7 @@ impl Drop for Renderer {
     }
 }
 
-struct Instance {
+pub struct Instance {
     entry: ash::Entry,
     handle: ash::Instance,
     messenger: DebugMessenger,
@@ -232,7 +232,7 @@ struct Instance {
 }
 
 impl Instance {
-    fn new() -> Result<Self> {
+    pub fn new() -> Result<Self> {
         let entry = unsafe { ash::Entry::load()? };
 
         let mut debug_info = {
@@ -328,7 +328,7 @@ pub struct PhysicalDevice {
 }
 
 impl PhysicalDevice {
-    fn select(instance: &Instance) -> Result<Self> {
+    pub fn select(instance: &Instance) -> Result<Self> {
         let handle = unsafe {
             instance
                 .handle
@@ -395,7 +395,7 @@ pub struct Device {
 }
 
 impl Device {
-    fn new(
+    pub fn new(
         instance: Res<Instance>,
         physical: PhysicalDevice,
         surface: &Surface,
@@ -826,6 +826,7 @@ impl Frame {
 
 struct FrameQueue {
     frames: Vec<Frame>,
+
     /// The index of the frame currently being rendered or presented. It changes just before
     /// rendering of the next image begins.
     frame_index: Cell<usize>,
@@ -893,17 +894,6 @@ pub struct Surface {
 
 
 impl Surface {
-    #[allow(dead_code)]
-    fn new_headless(instance: Res<Instance>) -> Result<Self> {
-        let loader = khr::Surface::new(&instance.entry, &instance.handle);
-        let headless = ext::HeadlessSurface::new(&instance.entry, &instance.handle);
-
-        let create_info = vk::HeadlessSurfaceCreateInfoEXT::default();
-        let handle = unsafe { headless.create_headless_surface(&create_info, None)? };
-
-        Ok(Self { handle, loader, instance })
-    }
-
     fn new(instance: Res<Instance>, window: &winit::window::Window) -> Result<Self> {
         let loader = khr::Surface::new(&instance.entry, &instance.handle);
 
