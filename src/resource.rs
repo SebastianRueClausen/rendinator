@@ -144,6 +144,8 @@ impl MemoryBlock {
 
 impl Drop for MemoryBlock {
     fn drop(&mut self) {
+        trace!("deallocating GPU memory block of {} bytes", self.size());
+
         unsafe { self.device.handle.free_memory(self.handle, None); }
     }
 }
@@ -664,6 +666,8 @@ impl GpuBlocks {
                 block_size += GpuBlock::DEFAULT_BLOCK_SIZE; 
             }
 
+            trace!("allocating a new {block_size} byte GPU block");
+
             let alloc_info = vk::MemoryAllocateInfo::builder()
                 .allocation_size(block_size)
                 .memory_type_index(memory_type);
@@ -755,6 +759,8 @@ impl ResourcePool {
         size: vk::DeviceSize,
         alignment: vk::DeviceSize,
     ) -> Result<(Rc<MemoryBlock>, MemoryRange)> {
+        trace!("allocating {size} bytes on the GPU");
+
         unsafe { (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment) }
     }
 
