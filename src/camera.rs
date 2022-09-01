@@ -1,15 +1,14 @@
 use ash::vk;
 use glam::{Mat4, Vec2, Vec3, Vec4};
-use smallvec::SmallVec;
 use winit::event::VirtualKeyCode;
 use anyhow::Result;
 
-use std::{mem, iter};
+use std::{mem, array};
 use std::time::Duration;
 
 use crate::core::*;
 use crate::InputState;
-use crate::resource::{self, MappedMemory, Buffer, BufferReq, ResourcePool, Res};
+use crate::resource::{Buffer, BufferReq, ResourcePool, Res};
 
 pub struct Camera {
     pub pos: Vec3,
@@ -156,87 +155,49 @@ impl ProjUniform {
 }
 
 /// Uniform buffers containing camera information.
-///
-/// [`ProjUniform`] is only updated when the window is resized or some camera settings are changed
-/// such as fov. It has therefore only a single copy.
-///
-/// [`ViewUniform`] is updated before every frame is rendered. It has therefore a copy for every
-/// frame in flight.
-///
-/// The buffers are laid in `buffers` as follows:
-///
-/// | Frame | Uniform |
-/// |-------|---------|
-/// |       | proj    |
-/// | 0     | view    |
-/// | 1     | view    |
-///
 pub struct CameraUniforms {
-    buffers: Vec<Res<Buffer>>,
-    mapped: MappedMemory,
+    pub view_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub proj_buffer: Res<Buffer>,
 }
 
 impl CameraUniforms {
     pub fn new(renderer: &Renderer, pool: &ResourcePool, camera: &Camera) -> Result<Self> {
-        let proj_req = BufferReq {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            size: mem::size_of::<ProjUniform>() as u64,
-        };
-        let view_req = BufferReq {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            size: mem::size_of::<ViewUniform>() as u64,
-        };
-        let reqs: SmallVec<[_; 3]> = iter::repeat(proj_req)
-            .take(1)
-            .chain(iter::repeat(view_req).take(FRAMES_IN_FLIGHT))
-            .collect();
-
-        let alignment = renderer
-            .device
-            .physical
-            .properties
-            .limits
-            .non_coherent_atom_size;
-
         let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
             | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let (buffers, block) = resource::create_buffers(
-            &renderer,
-            &pool,
-            &reqs,
-            memory_flags,
-            alignment,
-        )?;
+        let view_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+                size: mem::size_of::<ViewUniform>() as u64,
+            })
+        })?;
 
-        let mapped = MappedMemory::new(block.clone())?;
-        let uniforms = Self { buffers, mapped };
+        let proj_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ProjUniform>() as u64,
+        })?;
 
-        uniforms.update_proj(renderer, camera);
+        let uniforms = Self { view_buffers, proj_buffer };
+
+        uniforms.update_proj(renderer, camera)?;
 
         Ok(uniforms)
     }
 
     /// Update view uniform for frame with index `frame_index`.
-    pub fn update_view(&self, frame_index: usize, camera: &Camera) {
-        let view = ViewUniform::new(camera);
-        self.mapped
-            .get_buffer_data(self.view_uniform(frame_index))
-            .copy_from_slice(bytemuck::bytes_of(&view));
+    pub fn update_view(&self, frame_index: usize, camera: &Camera) -> Result<()> {
+        self.view_buffers[frame_index]
+            .get_mapped()?
+            .fill(bytemuck::bytes_of(&ViewUniform::new(camera)));
+
+        Ok(())
     }
 
-    pub fn update_proj(&self, renderer: &Renderer, camera: &Camera) {
-        let proj = ProjUniform::new(renderer, camera);
-        self.mapped
-            .get_buffer_data(self.proj_uniform())
-            .copy_from_slice(bytemuck::bytes_of(&proj));
-    }
+    pub fn update_proj(&self, renderer: &Renderer, camera: &Camera) -> Result<()> {
+        self.proj_buffer
+            .get_mapped()?
+            .fill(bytemuck::bytes_of(&ProjUniform::new(renderer, camera)));
 
-    pub fn proj_uniform(&self) -> &Res<Buffer> {
-        &self.buffers[0]
-    }
-
-    pub fn view_uniform(&self, frame: usize) -> &Res<Buffer> {
-        &self.buffers[1 + frame]
+        Ok(())
     }
 }

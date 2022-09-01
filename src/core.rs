@@ -6,10 +6,11 @@ use smallvec::{SmallVec, smallvec};
 use arrayvec::ArrayVec;
 
 use std::ffi::{self, CStr, CString};
-use std::{iter, mem, ops, slice};
+use std::{iter, mem, ops, slice, env};
 use std::cell::Cell;
+use std::str::FromStr;
 
-use crate::resource::{self, Image, Buffer, TextureSampler, ResourcePool, Res};
+use crate::resource::{Image, Buffer, TextureSampler, ResourcePool, Res};
 
 pub struct Renderer {
     pub device: Res<Device>,
@@ -31,7 +32,12 @@ impl Renderer {
     pub fn new(window: &winit::window::Window) -> Result<Self> {
         let pool = ResourcePool::with_block_size(256, 1024 * 1024);
 
-        let instance = pool.alloc(Instance::new()?);
+        let validate = env::var("RENDINATOR_VALIDATE")
+            .as_ref()
+            .map(|var| bool::from_str(var).unwrap_or(false))
+            .unwrap_or(false);
+
+        let instance = pool.alloc(Instance::new(validate)?);
         let physical = PhysicalDevice::select(&instance)?;
         let surface = pool.alloc(Surface::new(instance.clone(), window)?);
 
@@ -266,7 +272,7 @@ pub struct Instance {
 }
 
 impl Instance {
-    pub fn new() -> Result<Self> {
+    pub fn new(enable_validation_layers: bool) -> Result<Self> {
         let entry = unsafe { ash::Entry::load()? };
 
         let mut debug_info = {
@@ -281,9 +287,13 @@ impl Instance {
                 .pfn_user_callback(Some(debug_callback))
         };
 
-        let layers = vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()];
-        let layer_names: Vec<_> = layers.iter().map(|layer| layer.as_ptr()).collect();
+        let layers = if enable_validation_layers {
+            vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()]
+        } else {
+            vec![]
+        };
 
+        let layer_names: Vec<_> = layers.iter().map(|layer| layer.as_ptr()).collect();
         let version = vk::make_api_version(0, 1, 2, 0);
 
         let handle = unsafe {
@@ -440,6 +450,23 @@ impl PhysicalDevice {
             QueueReq { flags, family_index: family_index as u32 }
         })
     }
+    
+    pub fn get_memory_type_index(
+        &self,
+        type_bits: u32,
+        flags: vk::MemoryPropertyFlags,
+    ) -> Option<u32> {
+        let props = &self.memory_properties;
+
+        props.memory_types[0..(props.memory_type_count as usize)]
+            .iter()
+            .enumerate()
+            .map(|(i, memory_type)| (i as u32, memory_type))
+            .position(|(i, memory_type)| {
+                type_bits & (1 << i) != 0 && (memory_type.property_flags & flags) == flags
+            })
+            .map(|i| i as u32)
+    }
 }
 
 
@@ -517,7 +544,7 @@ impl Device {
 
     /// Get the sample count for msaa. For now it just the highest sample count the device
     /// supports, but below 8 samples.
-    fn sample_count(&self) -> vk::SampleCountFlags {
+    pub fn sample_count(&self) -> vk::SampleCountFlags {
         let counts = self
             .physical
             .properties
@@ -694,7 +721,7 @@ impl RenderPass {
             device.handle.create_render_pass(&info, None)?
         };
 
-        let framebuffers: Result<Vec<_>> = render_targets
+        let framebuffers: Result<Vec<_>> = render_targets.targets
             .iter()
             .flat_map(|t| iter::repeat(t).take(swapchain.image_count() as usize))
             .zip(swapchain.images.iter().cycle())
@@ -771,15 +798,16 @@ pub struct Queue {
 
 impl Queue {
     pub fn new(device: Res<Device>, req: &QueueReq) -> Result<Self> {
-        let pool = unsafe {
+        let (pool, handle) = unsafe {
             let info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(req.family_index)
                 .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
 
-            device.handle.create_command_pool(&info, None)?
-        };
+            let pool = device.handle.create_command_pool(&info, None)?;
+            let handle = device.handle.get_device_queue(req.family_index, 0);
 
-        let handle = unsafe { device.handle.get_device_queue(req.family_index, 0) };
+            (pool, handle)
+        };
 
         Ok(Self { handle, flags: req.flags, family_index: req.family_index, device, pool })
     }
@@ -835,6 +863,8 @@ struct FrameQueue {
     frame_index: Cell<usize>,
 
     device: Res<Device>,
+
+    #[allow(dead_code)]
     graphics_queue: Res<Queue>,
 }
 
@@ -988,22 +1018,13 @@ impl SwapchainImage {
 }
 
 #[derive(Clone)]
-struct RenderTarget<'a> {
-    msaa: &'a Image,
-    depth: &'a Image,
+struct RenderTarget {
+    msaa: Res<Image>,
+    depth: Res<Image>,
 }
 
 struct RenderTargets {
-    /// One depth and MSAA image per frame.
-    ///
-    /// | Frame | Image |
-    /// |-------|-------|
-    /// | 0     | depth |
-    /// | 0     | msaa  |
-    /// | 1     | depth |
-    /// | 1     | msaa  |
-    ///
-    images: Vec<Res<Image>>,
+    targets: Vec<RenderTarget>,
     sample_count: vk::SampleCountFlags,
 
     #[allow(dead_code)]
@@ -1037,7 +1058,8 @@ impl RenderTargets {
             .extent(extent)
             .mip_levels(1)
             .array_layers(1)
-            .samples(sample_count);
+            .samples(sample_count)
+            .build();
         let depth_subresource_info = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::DEPTH)
             .base_mip_level(0)
@@ -1048,7 +1070,8 @@ impl RenderTargets {
         let depth_view_info = vk::ImageViewCreateInfo::builder()
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(DEPTH_IMAGE_FORMAT)
-            .subresource_range(depth_subresource_info);
+            .subresource_range(depth_subresource_info)
+            .build();
         let msaa_image_info = vk::ImageCreateInfo::builder()
             .image_type(vk::ImageType::TYPE_2D)
             .usage(
@@ -1061,7 +1084,8 @@ impl RenderTargets {
             .extent(extent)
             .mip_levels(1)
             .array_layers(1)
-            .samples(sample_count);
+            .samples(sample_count)
+            .build();
         let msaa_subresource_info = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
@@ -1072,33 +1096,31 @@ impl RenderTargets {
         let msaa_view_info = vk::ImageViewCreateInfo::builder()
             .view_type(vk::ImageViewType::TYPE_2D)
             .format(swapchain.surface_format.format)
-            .subresource_range(msaa_subresource_info);
-        let image_infos: Vec<_> = [depth_image_info.build(), msaa_image_info.build()]
-            .iter()
-            .cycle()
-            .map(|info| *info)
-            .take(FRAMES_IN_FLIGHT * 2)
+            .subresource_range(msaa_subresource_info)
+            .build();
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let targets: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT)
+            .map(|_| Ok(RenderTarget {
+                depth: Image::from_raw(
+                    device.clone(),
+                    pool,
+                    memory_flags,
+                    &depth_image_info,
+                    &depth_view_info,
+                )?,
+                msaa: Image::from_raw(
+                    device.clone(),
+                    pool,
+                    memory_flags,
+                    &msaa_image_info,
+                    &msaa_view_info,
+                )?,
+            }))
             .collect();
-        let view_infos: Vec<_> = [depth_view_info.build(), msaa_view_info.build()]
-            .iter()
-            .cycle()
-            .map(|info| *info)
-            .take(FRAMES_IN_FLIGHT * 2)
-            .collect();
-        let (images, _) = resource::create_images_raw(
-            device.clone(),
-            pool,
-            vk::MemoryPropertyFlags::DEVICE_LOCAL,
-            &image_infos,
-            &view_infos,
-        )?;
 
-        Ok(Self { images, sample_count, graphics_queue })
-    }
+        let targets = targets?;
 
-    /// Iterator over each render target.
-    fn iter(&self) -> impl Iterator<Item = RenderTarget> {
-        self.images.chunks(2).map(|images| RenderTarget { depth: &images[0], msaa: &images[1] })
+        Ok(Self { targets, sample_count, graphics_queue })
     }
 }
 

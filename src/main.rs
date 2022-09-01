@@ -1,4 +1,4 @@
-#![feature(let_else, int_roundings)]
+#![feature(let_else, int_roundings, array_try_from_fn)]
 
 #[macro_use]
 extern crate log;
@@ -99,10 +99,17 @@ fn main() -> Result<()> {
             } else {
                 minimized = false;
                 renderer.resize(&window).expect("failed to resize window");
+
                 text_pass.handle_resize(&renderer);
                 camera.update_proj(renderer.swapchain.aspect_ratio());
-                camera_uniforms.update_proj(&renderer, &camera);
-                lights.handle_resize(&renderer, &camera).expect("failed to resize lights");
+
+                camera_uniforms
+                    .update_proj(&renderer, &camera)
+                    .expect("failed to update projection");
+
+                lights
+                    .handle_resize(&renderer, &camera)
+                    .expect("failed to resize lights");
             }
         }
         Event::MainEventsCleared => {
@@ -115,7 +122,9 @@ fn main() -> Result<()> {
 
                 let res = renderer.draw(
                     |recorder, frame_index| {
-                        camera_uniforms.update_view(frame_index, &camera);
+                        camera_uniforms
+                            .update_view(frame_index, &camera)
+                            .expect("failed to update view");
 
                         recorder.bind_descriptor_sets(
                             frame_index,
@@ -128,7 +137,7 @@ fn main() -> Result<()> {
                         recorder.dispatch(&lights.light_update.pipeline, group_count);
                
                         recorder.buffer_barrier(
-                            &lights.light_pos_bufs[frame_index],
+                            &lights.light_pos_buffers[frame_index],
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::SHADER_READ,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -146,7 +155,7 @@ fn main() -> Result<()> {
                         recorder.dispatch(&lights.cluster_update.pipeline, group_count);
                
                         recorder.buffer_barrier(
-                            &lights.light_mask_bufs[frame_index],
+                            &lights.light_mask_buffers[frame_index],
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::SHADER_READ,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -211,7 +220,7 @@ fn main() -> Result<()> {
                         recorder.dispatch(&scene.cull_pipeline, group_count);
 
                         recorder.buffer_barrier(
-                            &lights.light_mask_bufs[frame_index],
+                            &lights.light_mask_buffers[frame_index],
                             vk::AccessFlags::SHADER_WRITE,
                             vk::AccessFlags::INDIRECT_COMMAND_READ,
                             vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -270,7 +279,8 @@ fn main() -> Result<()> {
 
                             let pos = format!("position: ({}, {}, {})", camera.pos.x, camera.pos.y, camera.pos.z);
                             texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);
-                        });
+                        })
+                        .expect("failed do draw text");
                     },
                 );
 

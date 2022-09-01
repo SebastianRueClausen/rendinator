@@ -1,5 +1,4 @@
 use anyhow::Result;
-use smallvec::SmallVec;
 use glam::Vec3;
 use ash::vk;
 
@@ -19,24 +18,61 @@ fn range_length(range: &MemoryRange) -> vk::DeviceSize {
 
 /// A wrapper around a raw ptr into a mapped memory block.
 pub struct MappedMemory {
-    ptr: *mut u8,
-    block: Res<MemoryBlock>,
+    ptr: NonNull<u8>,
+    size: vk::DeviceSize,
+
+    block: Rc<MemoryBlock>,
 }
 
 impl MappedMemory {
-    pub fn new(block: Res<MemoryBlock>) -> Result<Self> {
+    pub fn new(block: Rc<MemoryBlock>, range: MemoryRange) -> Result<Self> {
         let ptr = unsafe {
-            block.device.handle
-                .map_memory(block.handle, 0, block.size, vk::MemoryMapFlags::empty())
-                .map(|ptr| ptr as *mut u8)?
+            NonNull::new_unchecked(
+                block.get_mapped()?.as_ptr().offset(range.start as isize)
+            )
         };
-        Ok(Self { ptr, block })
+
+        let size = range_length(&range);
+
+        Ok(MappedMemory { size, block, ptr, })
+
     }
 
-    unsafe fn get_range_unchecked(&self, range: MemoryRange) -> &mut [u8] {
-        let start = self.ptr.offset(range.start as isize);
+    unsafe fn as_slice_range_unchecked(&self, range: MemoryRange) -> &mut [u8] {
+        let start = self.ptr.as_ptr().offset(range.start as isize);
         let len = range_length(&range);
+
         slice::from_raw_parts_mut(start, len as usize)
+    }
+
+    unsafe fn as_slice(&self) -> &mut [u8] {
+        slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size as usize)
+    }
+
+    /// Fill memory with the memory of `bytes`.
+    ///
+    /// # Panics
+    ///
+    /// * If the length of `bytes` isn't the same as the size of mapped memory.
+    ///
+    pub fn fill(&self, bytes: &[u8]) {
+        if self.size != bytes.len() as vk::DeviceSize {
+            panic!("bytes is not the same size as the mapped memory range");
+        }
+    
+        unsafe { self.as_slice().copy_from_slice(bytes) };
+    }
+
+    pub fn fill_from_start(&self, bytes: &[u8]) {
+        if self.size < bytes.len() as vk::DeviceSize {
+            panic!("bytes is longer than the mapped memory range");
+        }
+
+        let slice = unsafe { self.as_slice() };
+
+        for (src, dst) in bytes.iter().zip(slice.iter_mut()) {
+            *dst = *src;
+        }
     }
 
     /// Fill memory in `range` with the memory of `bytes`.
@@ -56,26 +92,9 @@ impl MappedMemory {
             panic!("range goes past the end of the mapped memory");
         }
 
-        let dst = unsafe { self.get_range_unchecked(range) };
+        let dst = unsafe { self.as_slice_range_unchecked(range) };
 
         dst.copy_from_slice(bytes);
-    }
-
-    /// Get the mapped data of a buffer.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the underlying memory block of the buffer isn't the same as the
-    /// underlying block of `self`.
-    ///
-    /// TODO: Make this `fill_buffer` for better safety.
-    pub fn get_buffer_data(&self, buffer: &Buffer) -> &mut [u8] {
-        if *buffer.block != *self.block {
-            panic!("block of buffer isn't same as mapped memory");
-        }
-        // Safety: At this point we know that the buffer uses the same memory block, and the buffer
-        // will always be in the range of the memory block.
-        unsafe { self.get_range_unchecked(buffer.range.clone()) }
     }
 }
 
@@ -83,8 +102,11 @@ impl MappedMemory {
 #[derive(Clone)]
 pub struct MemoryBlock {
     handle: vk::DeviceMemory,
-
     size: vk::DeviceSize,
+
+    /// Holds pointer to start of the block if mapped, and the number of [`MappedMemory`] mapped to
+    /// this buffer.
+    mapped: Cell<Option<NonNull<u8>>>,
 
     device: Res<Device>,
 }
@@ -93,7 +115,25 @@ impl MemoryBlock {
     fn new(device: Res<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
         let handle = unsafe { device.handle.allocate_memory(info, None)? };
         let size = info.allocation_size;
-        Ok(Self { device: device.clone(), handle, size })
+        let mapped = Cell::new(None);
+
+        Ok(Self { device, mapped, handle, size })
+    }
+
+    fn get_mapped(&self) -> Result<NonNull<u8>> {
+        let ptr = if let Some(mapped) = self.mapped.replace(None) {
+            mapped
+        } else {
+            unsafe {
+                self.device.handle
+                    .map_memory(self.handle, 0, self.size, vk::MemoryMapFlags::empty())
+                    .map(|ptr| NonNull::new_unchecked(ptr as *mut u8))?
+            }
+        };
+
+        self.mapped.set(Some(ptr));
+
+        Ok(ptr)
     }
 
     #[allow(dead_code)]
@@ -135,153 +175,69 @@ impl Into<vk::BufferCreateInfo> for BufferReq {
 #[derive(Clone)]
 pub struct Buffer {
     pub handle: vk::Buffer,
-    pub block: Res<MemoryBlock>,
+    pub block: Rc<MemoryBlock>,
     pub range: MemoryRange,
+
+    device: Res<Device>,
 }
 
 impl Buffer {
     pub fn new(
         renderer: &Renderer,
         pool: &ResourcePool,
-        info: &BufferReq,
         memory_flags: vk::MemoryPropertyFlags,
+        info: &BufferReq,
     ) -> Result<Res<Self>> {
-        Self::from_raw(renderer.device.clone(), pool, info, memory_flags)
+        Self::from_raw(renderer.device.clone(), pool,  memory_flags, info)
     }
 
     pub fn from_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
         device: Res<Device>,
         pool: &ResourcePool,
-        req: &T,
         memory_flags: vk::MemoryPropertyFlags,
+        req: &T,
     ) -> Result<Res<Self>> {
         let info = (*req).into();
 
-        let handle = unsafe { device.handle.create_buffer(&info, None)? };
-        let req = unsafe { device.handle.get_buffer_memory_requirements(handle) };
+        let pool = unsafe {
+            let handle = device.handle.create_buffer(&info, None)?;
+            let req = device.handle.get_buffer_memory_requirements(handle);
 
-        let memory_type = memory_type_index(
-            &device.physical.memory_properties,
-            memory_flags,
-            req.memory_type_bits,
-        )
-        .ok_or_else(|| anyhow!("no compatible memory type"))?;
+            let memory_type = device.physical
+                .get_memory_type_index(req.memory_type_bits, memory_flags)
+                .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
-        let mut alloc_info = vk::MemoryAllocateInfo::builder()
-            .allocation_size(req.size)
-            .memory_type_index(memory_type);
-        let mut alloc_flags = vk::MemoryAllocateFlagsInfo::builder();
+            let (block, range) = pool.gpu_alloc(
+                device.clone(),
+                memory_type,
+                req.size,
+                req.alignment,
+            )?;
 
-        if info.usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) {
-            alloc_flags = alloc_flags
-                .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS_KHR)
-                .device_mask(1);
-            alloc_info = alloc_info.push_next(&mut alloc_flags);
-        }
+            let range = range.start..range.start + info.size;
 
-        let block = pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?);
-        unsafe { device.handle.bind_buffer_memory(handle, block.handle, 0)?; }
+            device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
 
-        Ok(pool.alloc(Self { handle, range: 0..info.size, block }))
+            pool.alloc(Self { handle, range, block, device })
+        };
+
+        Ok(pool)
     }
 
     pub fn size(&self) -> vk::DeviceSize {
-        self.range.end - self.range.start
+        range_length(&self.range)
+    }
+
+    pub fn get_mapped(&self) -> Result<MappedMemory> {
+        MappedMemory::new(self.block.clone(), self.range.clone())
     }
 }
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        unsafe { self.block.device.handle.destroy_buffer(self.handle, None); }
+        unsafe { self.device.handle.destroy_buffer(self.handle, None); }
     }
 }
-
-pub fn create_buffers(
-    renderer: &Renderer,
-    pool: &ResourcePool,
-    reqs: &[BufferReq],
-    memory_flags: vk::MemoryPropertyFlags,
-    alignment: vk::DeviceSize,
-) -> Result<(Vec<Res<Buffer>>, Res<MemoryBlock>)> {
-    create_buffers_raw(renderer.device.clone(), pool, reqs, memory_flags, alignment)
-}
-
-pub fn create_buffers_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
-    device: Res<Device>,
-    pool: &ResourcePool,
-    create_infos: &[T],
-    memory_flags: vk::MemoryPropertyFlags,
-    alignment: vk::DeviceSize,
-) -> Result<(Vec<Res<Buffer>>, Res<MemoryBlock>)> {
-    let mut memory_type_bits = u32::MAX;
-    let mut current_size = 0;
-
-    let buffers: Result<SmallVec<[_; 12]>> = create_infos
-        .iter()
-        .map(|info| unsafe {
-            let info = (*info).into();
-
-            let handle = device.handle.create_buffer(&info, None)?;
-            let requirements = device.handle.get_buffer_memory_requirements(handle);
-
-            memory_type_bits &= requirements.memory_type_bits;
-
-            // Find an aligment that fits both that of `alignemnt` and the alignment required
-            // by the buffer.
-            let alignment = lcm(alignment, requirements.alignment);
-
-            // Round `current_size` up to the next integer which has the alignment of
-            // `alignment`.
-            let start = align_up_to(current_size, alignment);
-            let end = start + info.size;
-
-            current_size = start + requirements.size;
-
-            Ok((handle, start..end))
-        })
-        .collect();
-
-    let buffers = buffers?;
-
-    let memory_type =
-        memory_type_index(&device.physical.memory_properties, memory_flags, memory_type_bits)
-            .ok_or_else(|| anyhow!("no compatible memory type"))?;
-
-    let mut alloc_info = vk::MemoryAllocateInfo::builder()
-        .allocation_size(current_size)
-        .memory_type_index(memory_type);
-
-    let mut flags = vk::MemoryAllocateFlagsInfo::builder();
-    if create_infos.iter().any(|info| {
-        let info: vk::BufferCreateInfo = (*info).into();
-        info.usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS)
-    }) {
-        flags = flags
-            .flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS_KHR)
-            .device_mask(1);
-        alloc_info = alloc_info.push_next(&mut flags)
-    }
-
-    let block = pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?);
-
-    let buffers: Vec<_> = buffers
-        .into_iter()
-        .map(|(handle, range)| pool.alloc(Buffer {
-            block: block.clone(),
-            handle,
-            range,
-        }))
-        .collect();
-
-    for buffer in &buffers {
-        unsafe {
-            device.handle.bind_buffer_memory(buffer.handle, block.handle, buffer.range.start)?;
-        }
-    }
-
-    Ok((buffers, block))
-}
-
 
 #[derive(Clone, Copy)]
 pub enum ImageKind {
@@ -351,7 +307,7 @@ pub struct Image {
     pub layout: Cell<vk::ImageLayout>,
 
     pub range: MemoryRange,
-    pub block: Res<MemoryBlock>,
+    pub block: Rc<MemoryBlock>,
 }
 
 impl Image {
@@ -364,9 +320,9 @@ impl Image {
         renderer: &Renderer,
         pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
-        req: ImageReq,
+        req: &ImageReq,
     ) -> Result<Res<Self>> {
-        Self::from_raw(renderer.device.clone(), pool, memory_flags, &req, &req)
+        Self::from_raw(renderer.device.clone(), pool, memory_flags, req, req)
     }
 
     /// Create image from raw [`vk::ImageCreateInfo`] and [`vk::ImageViewCreateInfo`].
@@ -385,36 +341,39 @@ impl Image {
 
         let image_info: vk::ImageCreateInfo = (*image_info).into();
 
-        let handle = unsafe { device.handle.create_image(&image_info, None)? };
-        let requirements = unsafe { device.handle.get_image_memory_requirements(handle) };
+        let (handle, req) = unsafe {
+            let handle = device.handle.create_image(&image_info, None)?;
+            let req = device.handle.get_image_memory_requirements(handle);
 
-        let Some(memory_type) = memory_type_index(
-            &device.physical.memory_properties,
-            memory_flags,
-            requirements.memory_type_bits,
-        ) else {
-            return Err(anyhow!("no compatible memory type"));
+            (handle, req)
         };
 
-        let block = {
-            let alloc_info = vk::MemoryAllocateInfo::builder()
-                .allocation_size(requirements.size)
-                .memory_type_index(memory_type);
-            pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?)
+        let memory_type = device.physical.get_memory_type_index(req.memory_type_bits, memory_flags)
+            .ok_or_else(|| anyhow!("no compatible memory type"))?;
+
+        let (block, range) = pool.gpu_alloc(
+            device.clone(),
+            memory_type,
+            req.size,
+            req.alignment,
+        )?;
+
+        unsafe {
+            device.handle.bind_image_memory(handle, block.handle, range.start)?;
+        }
+       
+        let view = unsafe {
+            let mut view_info: vk::ImageViewCreateInfo = (*view_info).into();
+            view_info.image = handle;
+
+            device.handle.create_image_view(&view_info, None)?
         };
-
-        unsafe { device.handle.bind_image_memory(handle, block.handle, 0)?; }
-        
-        let mut view_info: vk::ImageViewCreateInfo = (*view_info).into();
-        view_info.image = handle;
-
-        let view = unsafe { device.handle.create_image_view(&view_info, None)? };
 
         Ok(pool.alloc(Image {
             layout: Cell::new(image_info.initial_layout),
             extent: image_info.extent,
             format: image_info.format,
-            range: 0..requirements.size,
+            range: 0..req.size,
             array_layers: image_info.array_layers,
             handle,
             view,
@@ -434,105 +393,6 @@ impl Drop for Image {
             self.block.device.handle.destroy_image_view(self.view, None);
         }
     }
-}
-
-pub fn create_images(
-    renderer: &Renderer,
-    pool: &ResourcePool,
-    memory_flags: vk::MemoryPropertyFlags,
-    reqs: &[ImageReq],
-) -> Result<(Vec<Res<Image>>, Res<MemoryBlock>)> {
-    create_images_raw(renderer.device.clone(), pool, memory_flags, reqs, reqs)
-}
-
-pub fn create_images_raw<I, V>(
-    device: Res<Device>,
-    pool: &ResourcePool,
-    memory_flags: vk::MemoryPropertyFlags,
-    image_infos: &[I],
-    view_infos: &[V],
-) -> Result<(Vec<Res<Image>>, Res<MemoryBlock>)>
-where
-    I: Into<vk::ImageCreateInfo> + Clone + Copy,
-    V: Into<vk::ImageViewCreateInfo> + Clone + Copy,
-{
-    let device = device.clone();
-
-    let mut memory_type_bits = u32::MAX;
-    let mut current_size = 0;
-
-    struct TempImage {
-        handle: vk::Image,
-        layout: vk::ImageLayout,
-        format: vk::Format,
-        extent: vk::Extent3D,
-        array_layers: u32,
-        range: MemoryRange,
-    }
-
-    let images: Result<SmallVec<[_; 8]>> = image_infos
-        .iter()
-        .map(|info| {
-            let image_info: vk::ImageCreateInfo = (*info).into();
-
-            let handle = unsafe { device.handle.create_image(&image_info, None)? };
-            let requirements = unsafe { device.handle.get_image_memory_requirements(handle) };
-
-            let start = align_up_to(current_size, requirements.alignment);
-            let end = start + requirements.size;
-
-            memory_type_bits &= requirements.memory_type_bits;
-            current_size = end;
-
-            Ok(TempImage {
-                handle,
-                array_layers: image_info.array_layers,
-                extent: image_info.extent,
-                layout: image_info.initial_layout,
-                format: image_info.format,
-                range: start..end,
-            })
-        })
-        .collect();
-
-    let mut images = images?;
-
-    let memory_type =
-        memory_type_index(&device.physical.memory_properties, memory_flags, memory_type_bits)
-            .ok_or_else(|| anyhow!("no compatible memory type"))?;
-
-    let block = {
-        let alloc_info = vk::MemoryAllocateInfo::builder()
-            .allocation_size(current_size)
-            .memory_type_index(memory_type);
-        pool.alloc(MemoryBlock::new(device.clone(), &alloc_info)?)
-    };
-
-    let images: Result<Vec<_>> = images
-        .iter_mut()
-        .zip(view_infos.iter())
-        .map(|(image, info)| unsafe {
-            device.handle.bind_image_memory(image.handle, block.handle, image.range.start)?;  
-
-            let mut info: vk::ImageViewCreateInfo = (*info).into();
-            info.image = image.handle;
-
-            let view = device.handle.create_image_view(&info, None)?;
-
-            Ok(pool.alloc(Image {
-                handle: image.handle,
-                array_layers: image.array_layers,
-                layout: Cell::new(image.layout),
-                format: image.format,
-                extent: image.extent,
-                range: image.range.clone(),
-                block: block.clone(),
-                view,
-            }))
-        })
-        .collect();
-
-    Ok((images?, block))
 }
 
 #[derive(Clone)]
@@ -623,31 +483,26 @@ impl CubeMap {
         let vertex_data: &[u8] = bytemuck::cast_slice(&CUBE_VERTICES);
 
         let staging = {
-            let req = BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                size: vertex_data.len() as u64
-            };
-
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let buffer = Buffer::new(renderer, pool, &req, memory_flags)?;
-            let mapped = MappedMemory::new(buffer.block.clone())?;
+            let buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: vertex_data.len() as u64
+            })?;
 
-            mapped.get_buffer_data(&buffer ).copy_from_slice(vertex_data);
+            buffer.get_mapped()?.fill(vertex_data);
 
             buffer
         };
 
         let vertex_buffer = {
-            let req = BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-                size: vertex_data.len() as u64
-            };
-
             let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-            Buffer::new(renderer, pool, &req, memory_flags)?
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
+                size: vertex_data.len() as u64
+            })?
         };
 
         renderer.transfer_with(|recorder|
@@ -900,7 +755,7 @@ impl ResourcePool {
         size: vk::DeviceSize,
         alignment: vk::DeviceSize,
     ) -> Result<(Rc<MemoryBlock>, MemoryRange)> {
-        unsafe { (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment) } 
+        unsafe { (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment) }
     }
 
     #[inline]
@@ -984,80 +839,10 @@ impl<T> ops::Deref for Res<T> {
     }
 }
 
-/// Find a memory type index fitting `props`, `flags` and `memory_type_bits`.
-///
-/// Returns `None` if there is no memory type fits the three parameters.
-#[inline]
-fn memory_type_index(
-    props: &vk::PhysicalDeviceMemoryProperties,
-    flags: vk::MemoryPropertyFlags,
-    memory_type_bits: u32,
-) -> Option<u32> {
-    props.memory_types[0..(props.memory_type_count as usize)]
-        .iter()
-        .enumerate()
-        .position(|(i, memory_type)| {
-            let i = i as u32;
-            memory_type_bits & (1 << i) != 0 && (memory_type.property_flags & flags) == flags
-        })
-        .map(|index| index as u32)
-}
-
-/// Kernighans algorithm.
-#[inline]
-fn is_pow2(a: u64) -> bool {
-    a != 0 && (a & (a - 1)) == 0
-}
-
-/// Calculate least common multiple for two powers of 2.
-#[inline]
-pub fn lcm(a: u64, b: u64) -> u64 {
-    if is_pow2(a) && is_pow2(b) {
-        a.max(b)
-    } else {
-        a * (b / gcd(a, b))
-    }
-}
-
-/// Calculate greatest common divisor.
-#[inline]
-pub fn gcd(mut a: u64, mut b: u64) -> u64 {
-    // Optimize if `a` and `b` are both powers of 2.
-    if is_pow2(a) && is_pow2(b) {
-        a.min(b)
-    } else {
-        while b != 0 {
-            let t = b;
-            b = a % b;
-            a = t;
-        }
-        a
-    }
-}
-
 /// Round `a` up to next integer with aligned to `aligment`.
 #[inline]
 pub fn align_up_to(a: u64, alignment: u64) -> u64 {
     ((a + alignment - 1) / alignment) * alignment
-}
-
-#[test]
-fn test_lcm() {
-    assert_eq!(lcm(5, 12), 60);
-    assert_eq!(lcm(4, 64), 64);
-    assert_eq!(lcm(2, 5), 10);
-    assert_eq!(lcm(3, 4), 12);
-    assert_eq!(lcm(2, 4), 4);
-}
-
-#[test]
-fn test_gcd() {
-    assert_eq!(gcd(5, 12), 1);
-    assert_eq!(gcd(4, 64), 4);
-    assert_eq!(gcd(2, 5), 1);
-    assert_eq!(gcd(3, 4), 1);
-    assert_eq!(gcd(2, 4), 2);
-    assert_eq!(gcd(10, 12), 2);
 }
 
 #[test]

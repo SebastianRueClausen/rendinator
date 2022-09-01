@@ -6,7 +6,7 @@ use std::{array, mem};
 
 use crate::light::Lights;
 use crate::core::*;
-use crate::resource::{self, *};
+use crate::resource::*;
 use crate::camera::CameraUniforms;
 use crate::skybox::Skybox;
 
@@ -168,187 +168,159 @@ impl Scene {
 
         let draw_count = DrawCount {
             // Filled out in cull shader.
-            command_count: 10,
+            command_count: 0,
             primitive_count: primitives.len() as u32,
         };
 
-        let primitive_buffer_size = (primitives.len() * mem::size_of::<Primitive>()) as u64;
-        let draw_buffer_size = (primitives.len() * mem::size_of::<DrawCommand>()) as u64;
-        let draw_count_buffer_size = mem::size_of::<DrawCount>() as u64;
+        //
+        // Create staging buffers.
+        //
 
-        let instance_buffer_size = (instance_data.len() * mem::size_of::<InstanceData>()) as u64;
-        let vertex_buffer_size = (scene.vertices.len() * mem::size_of::<asset::Vertex>()) as u64;
-        let index_buffer_size = scene.indices.len() as u64;
+        let vertex_data = bytemuck::cast_slice(scene.vertices.as_slice());
+        let index_data = bytemuck::cast_slice(scene.indices.as_slice());
+        let instance_data = bytemuck::cast_slice(instance_data.as_slice());
+        let primitive_data = bytemuck::cast_slice(primitives.as_slice());
+        let draw_count_data = bytemuck::bytes_of(&draw_count);
 
-        let staging = {
-            let reqs = vec![
-                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: vertex_buffer_size },
-                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: index_buffer_size },
-                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: instance_buffer_size },
-                BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: primitive_buffer_size },
-            ];
+        let staging_pool = ResourcePool::new();
 
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let memory_flags =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let (buffers, block) = resource::create_buffers(
-                &renderer,
-                &pool,
-                &reqs,
-                memory_flags,
-                4,
-            )?;
+        let primitive_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            size: primitive_data.len() as vk::DeviceSize,
+        })?;
 
-            let mapped = MappedMemory::new(block.clone())?;
+        let instance_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            size: instance_data.len() as vk::DeviceSize,
+        })?;
 
-            let mut data = vec![
-                bytemuck::cast_slice(scene.vertices.as_slice()),
-                bytemuck::cast_slice(scene.indices.as_slice()),
-                bytemuck::cast_slice(instance_data.as_slice()),
-                bytemuck::cast_slice(primitives.as_slice()),
-            ];
+        let vertex_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            size: vertex_data.len() as vk::DeviceSize,
+        })?;
 
-            for _ in 0..FRAMES_IN_FLIGHT {
-                data.push(bytemuck::bytes_of(&draw_count))
-            }
+        let index_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            size: index_data.len() as vk::DeviceSize,
+        })?;
 
-            for (src, dst) in data.iter().zip(buffers.iter()) {
-                mapped.get_buffer_data(dst).copy_from_slice(&src);
-            }
+        let draw_count_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            size: draw_count_data.len() as vk::DeviceSize,
+        })?;
 
-            buffers
-        };
+        primitive_staging.get_mapped()?.fill(primitive_data);
+        instance_staging.get_mapped()?.fill(instance_data);
+        vertex_staging.get_mapped()?.fill(vertex_data);
+        index_staging.get_mapped()?.fill(index_data);
+        draw_count_staging.get_mapped()?.fill(draw_count_data);
 
-        let buffers = {
-            let mut reqs = vec![
-                BufferReq {
-                    usage: vk::BufferUsageFlags::VERTEX_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_DST,
-                    size: vertex_buffer_size,
-                },
-                BufferReq {
-                    usage: vk::BufferUsageFlags::INDEX_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_DST,
-                    size: index_buffer_size,
-                },
-                // Instance buffer.
-                BufferReq {
-                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_DST,
-                    size: instance_buffer_size, 
-                },
-                // Primitive buffer.
-                BufferReq {
-                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_DST,
-                    size: primitive_buffer_size, 
-                },
-            ];
+        //
+        // Create device buffers and copy staging buffers.
+        //
 
-            for _ in 0..FRAMES_IN_FLIGHT {
-                reqs.push(BufferReq {
-                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_DST
-                        | vk::BufferUsageFlags::INDIRECT_BUFFER,
-                    size: draw_count_buffer_size, 
-                });
-            }
-            
-            for _ in 0..FRAMES_IN_FLIGHT {
-                reqs.push(BufferReq {
-                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                        | vk::BufferUsageFlags::TRANSFER_DST
-                        | vk::BufferUsageFlags::INDIRECT_BUFFER,
-                    size: draw_buffer_size, 
-                });
-            }
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-            let (buffers, _) = resource::create_buffers(
-                &renderer,
-                &pool,
-                &reqs,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                4,
-            )?;
+        let instance_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            size: instance_data.len() as vk::DeviceSize,
+        })?;
 
-            buffers
-        };
+        let primitive_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            size: primitive_data.len() as vk::DeviceSize,
+        })?;
+
+        let vertex_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::VERTEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            size: vertex_data.len() as vk::DeviceSize,
+        })?;
+
+        let index_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::INDEX_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST,
+            size: index_data.len() as vk::DeviceSize,
+        })?;
+
+        let draw_count_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+            })
+        })?;
 
         renderer.transfer_with(|recorder| {
-            for (src, dst) in staging[0..4].iter().zip(buffers.iter()) {
-                recorder.copy_buffers(src, dst);
+            recorder.copy_buffers(&instance_staging, &instance_buffer);
+            recorder.copy_buffers(&primitive_staging, &primitive_buffer);
+            recorder.copy_buffers(&vertex_staging, &vertex_buffer);
+            recorder.copy_buffers(&index_staging, &index_buffer);
+
+            for buffer in &draw_count_buffers {
+                recorder.copy_buffers(&draw_count_staging, &buffer);
             }
         })?;
 
-        let mut buffers = buffers.into_iter();
+        let draw_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                size: (primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
+            })
+        })?;
 
-        let vertex_buffer = buffers.next().unwrap();
-        let index_buffer = buffers.next().unwrap();
-        let instance_buffer = buffers.next().unwrap();
-        let primitive_buffer = buffers.next().unwrap();
+        //
+        // Create staging buffer for textures and upload the raw texture data.
+        //
 
-        let draw_count_buffers: [_; 2] = array::from_fn(|_| buffers.next().unwrap());
-        let draw_buffers: [_; 2] = array::from_fn(|_| buffers.next().unwrap());
+        let memory_flags =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let staging = {
-            let create_infos: Vec<_> = scene.textures
-                .iter()
-                .map(|tex| BufferReq {
+        let staging: Result<Vec<_>> = scene.textures
+            .iter()
+            .map(|texture| {
+                let buffer = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
                     usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                    size: tex.data.len() as u64,
-                })
-                .collect();
+                    size: texture.data.len() as vk::DeviceSize,
+                })?;
 
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+                buffer.get_mapped()?.fill(&texture.data);
 
-            let (staging, block) = resource::create_buffers(
-                &renderer,
-                &pool,
-                &create_infos,
-                memory_flags,
-                4,
-            )?;
+                Ok(buffer)
+            })
+            .collect();
 
-            let mapped = MappedMemory::new(block.clone())?;
-           
-            scene.textures
-                .iter()
-                .map(|tex| tex.data.as_slice())
-                .zip(staging.iter())
-                .for_each(|(data, buffer)| {
-                    mapped.get_buffer_data(buffer).copy_from_slice(&data);
-                });
+        let staging = staging?;
 
-            staging
-        };
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let mut images = {
-            let image_reqs: Vec<_> = scene.textures
-                .iter()
-                .map(|tex| ImageReq {
-                    format: tex.format.into(),
+        let images: Result<Vec<_>> = scene.textures
+            .iter()
+            .map(|texture| {
+                Image::new(renderer, pool, memory_flags, &ImageReq {
+                    format: texture.format.into(),
                     kind: ImageKind::Texture,
                     extent: vk::Extent3D {
-                        width: tex.width,
-                        height: tex.height,
+                        width: texture.width,
+                        height: texture.height,
                         depth: 1,
                     },
                 })
-                .collect();
+            })
+            .collect();
 
-            let (images, _) = resource::create_images(
-                &renderer,
-                &pool,
-                vk::MemoryPropertyFlags::DEVICE_LOCAL,
-                &image_reqs,
-            )?;
-
-            images
-        };
+        let images = images?;
 
         renderer.transfer_with(|recorder| {
-            for image in images.iter_mut() {
+            for image in images.iter() {
                 recorder.transition_image_layout(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             }
 
@@ -356,7 +328,7 @@ impl Scene {
                 recorder.copy_buffer_to_image(src, dst);
             }
 
-            for image in images.iter_mut() {
+            for image in images.iter() {
                 recorder.transition_image_layout(image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
             }
         })?;
@@ -385,11 +357,11 @@ impl Scene {
                 lights.cluster_info.buffer.clone(), 
             ]),
             DescriptorBinding::Buffer([
-                lights.lights_buf.clone(),
-                lights.lights_buf.clone(),
+                lights.light_buffer.clone(),
+                lights.light_buffer.clone(),
             ]),
             DescriptorBinding::Buffer(
-                lights.light_mask_bufs.clone()
+                lights.light_mask_buffers.clone()
             ),
         ])?;
 
@@ -429,13 +401,10 @@ impl Scene {
         ])?);
 
         let descriptor = DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
+            DescriptorBinding::Buffer(camera_uniforms.view_buffers.clone()),
             DescriptorBinding::Buffer([
-                camera_uniforms.view_uniform(0).clone(),
-                camera_uniforms.view_uniform(1).clone(),
-            ]),
-            DescriptorBinding::Buffer([
-                camera_uniforms.proj_uniform().clone(),
-                camera_uniforms.proj_uniform().clone(),
+                camera_uniforms.proj_buffer.clone(),
+                camera_uniforms.proj_buffer.clone(),
             ]),
             DescriptorBinding::Buffer([
                 instance_buffer.clone(),

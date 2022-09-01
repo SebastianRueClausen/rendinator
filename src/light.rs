@@ -2,10 +2,10 @@ use glam::{Vec4, UVec3, Vec3, Vec2, UVec4, UVec2};
 use ash::vk;
 use anyhow::Result;
 
-use std::{iter, mem, array};
+use std::{mem, array};
 
 use crate::camera::{Camera, CameraUniforms};
-use crate::resource::{self, MappedMemory, Buffer, BufferReq, ResourcePool, Res};
+use crate::resource::{MappedMemory, Buffer, BufferReq, ResourcePool, Res};
 use crate::core::*;
 
 #[repr(C)]
@@ -131,28 +131,25 @@ pub struct ClusterInfoBuffer {
 
 impl ClusterInfoBuffer {
     fn new(renderer: &Renderer, pool: &ResourcePool, camera: &Camera) -> Result<Self> {
-        let req = BufferReq {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            size: mem::size_of::<ClusterInfo>() as u64,
-        };
-
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let buffer = Buffer::new(&renderer, pool, &req, memory_flags)?;
-        let mapped = MappedMemory::new(buffer.block.clone())?;
-        let info = ClusterInfo::new(&renderer.swapchain, camera);
+        let buffer = Buffer::new(&renderer, pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ClusterInfo>() as u64,
+        })?;
 
-        mapped.get_buffer_data(&buffer).copy_from_slice(bytemuck::bytes_of(&info));
+        let info = ClusterInfo::new(&renderer.swapchain, camera);
+        let mapped = buffer.get_mapped()?;
+
+        mapped.fill(bytemuck::bytes_of(&info));
 
         Ok(Self { buffer, mapped, info })
     }
 
     fn handle_resize(&mut self, camera: &Camera, swapchain: &Swapchain) {
         self.info = ClusterInfo::new(swapchain, camera);
-        self.mapped
-            .get_buffer_data(&self.buffer)
-            .copy_from_slice(bytemuck::bytes_of(&self.info));
+        self.mapped.fill(bytemuck::bytes_of(&self.info));
     }
 }
 
@@ -223,10 +220,10 @@ struct LightMask {
 /// of lights and `k` the number of clusters, this will hopefully speed things up.
 ///
 pub struct Lights {
-    pub lights_buf: Res<Buffer>,
-    pub cluster_aabbs_buf: Res<Buffer>,
-    pub light_pos_bufs: [Res<Buffer>; FRAMES_IN_FLIGHT],
-    pub light_mask_bufs: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub light_buffer: Res<Buffer>,
+    pub cluster_aabb_buffer: Res<Buffer>,
+    pub light_pos_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub light_mask_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
 
     pub light_count: u32,
 
@@ -247,73 +244,47 @@ impl Lights {
         let cluster_info = ClusterInfoBuffer::new(renderer, pool, camera)?;
         let cluster_count = cluster_info.info.cluster_count() as usize;
 
-        let light_req = BufferReq {
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        let light_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            size: mem::size_of::<LightBufferData>() as u64,
-        };
+            size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
+        })?;
 
-        let cluster_aabb_req = BufferReq {
+        let cluster_aabb_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-            size: (cluster_count * mem::size_of::<Aabb>()) as u64,
-        };
+            size: (cluster_count * mem::size_of::<Aabb>()) as vk::DeviceSize,
+        })?;
 
-        let light_mask_req = BufferReq {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-            size: (cluster_count * mem::size_of::<LightMask>()) as u64
-        };
+        let light_mask_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                size: (cluster_count * mem::size_of::<LightMask>()) as vk::DeviceSize,
+            })
+        })?;
 
-        let light_pos_req = BufferReq {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-            size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as u64,
-        };
+        let light_pos_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as vk::DeviceSize,
+            })
+        })?;
 
-        let buffers = {
-            let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-            let mut reqs = vec![light_req, cluster_aabb_req];
+        let staging_pool = ResourcePool::with_block_size(128, 1024);
 
-            for req in iter::repeat(light_mask_req).take(FRAMES_IN_FLIGHT) {
-                reqs.push(req); 
-            }
+        let memory_flags =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            for req in iter::repeat(light_pos_req).take(FRAMES_IN_FLIGHT) {
-                reqs.push(req); 
-            }
+        let light_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
+            size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
+        })?;
 
-            let (buffers, _) = resource::create_buffers(&renderer, pool, &reqs, memory_flags, 4)?;
-
-            buffers
-        };
-
-        let mut buffers = buffers.into_iter();
-
-        let (lights_buf, cluster_aabbs_buf) = (buffers.next().unwrap(), buffers.next().unwrap());
-
-        let light_mask_bufs = array::from_fn(|_| buffers.next().unwrap());
-        let light_pos_bufs = array::from_fn(|_| buffers.next().unwrap());
-
-        assert!(buffers.next().is_none());
-
-        let light_staging = {
-            let req = BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                size: mem::size_of::<LightBufferData>() as u64,
-            };
-
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-            let buffer = Buffer::new(&renderer, pool, &req, memory_flags)?;
-            let light_data = LightBufferData::new(lights); 
-
-            MappedMemory::new(buffer.block.clone())?
-                .get_buffer_data(&buffer)
-                .copy_from_slice(bytemuck::bytes_of(&light_data));
-
-            buffer
-        };
+        let light_data = LightBufferData::new(lights);
+        light_staging.get_mapped()?.fill(bytemuck::bytes_of(&light_data)); 
 
         renderer.transfer_with(|recorder| {
-            recorder.copy_buffers(&light_staging, &lights_buf)
+            recorder.copy_buffers(&light_staging, &light_buffer)
         })?;
 
         let cluster_build = {
@@ -337,8 +308,8 @@ impl Lights {
 
             let descriptor = DescriptorSet::new_single(&renderer, layout, &[
                 DescriptorBinding::Buffer([cluster_info.buffer.clone()]),
-                DescriptorBinding::Buffer([camera_uniforms.proj_uniform().clone()]),
-                DescriptorBinding::Buffer([cluster_aabbs_buf.clone()]),
+                DescriptorBinding::Buffer([camera_uniforms.proj_buffer.clone()]),
+                DescriptorBinding::Buffer([cluster_aabb_buffer.clone()]),
             ])?;
 
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_build.comp.spv");
@@ -373,12 +344,9 @@ impl Lights {
             ])?);
 
             let descriptor = DescriptorSet::new_per_frame(&renderer, layout, &[
-                DescriptorBinding::Buffer([
-                    camera_uniforms.view_uniform(0).clone(),
-                    camera_uniforms.view_uniform(1).clone(),
-                ]),
-                DescriptorBinding::Buffer([lights_buf.clone(), lights_buf.clone()]),
-                DescriptorBinding::Buffer(light_pos_bufs.clone()),
+                DescriptorBinding::Buffer(camera_uniforms.view_buffers.clone()),
+                DescriptorBinding::Buffer([light_buffer.clone(), light_buffer.clone()]),
+                DescriptorBinding::Buffer(light_pos_buffers.clone()),
             ])?;
 
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/light_update.comp.spv");
@@ -418,10 +386,10 @@ impl Lights {
             ])?);
 
             let descriptor = DescriptorSet::new_per_frame(&renderer, layout, &[
-                DescriptorBinding::Buffer([lights_buf.clone(), lights_buf.clone()]),
-                DescriptorBinding::Buffer(light_pos_bufs.clone()),
-                DescriptorBinding::Buffer([cluster_aabbs_buf.clone(), cluster_aabbs_buf.clone()]),
-                DescriptorBinding::Buffer(light_mask_bufs.clone()),
+                DescriptorBinding::Buffer([light_buffer.clone(), light_buffer.clone()]),
+                DescriptorBinding::Buffer(light_pos_buffers.clone()),
+                DescriptorBinding::Buffer([cluster_aabb_buffer.clone(), cluster_aabb_buffer.clone()]),
+                DescriptorBinding::Buffer(light_mask_buffers.clone()),
             ])?;
 
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_update.comp.spv");
@@ -439,10 +407,10 @@ impl Lights {
         let light_count = lights.len() as u32;
 
         let lights = Self {
-            lights_buf,
-            cluster_aabbs_buf,
-            light_pos_bufs,
-            light_mask_bufs,
+            light_buffer,
+            cluster_aabb_buffer,
+            light_pos_buffers,
+            light_mask_buffers,
             cluster_info,
             light_count,
             cluster_build,

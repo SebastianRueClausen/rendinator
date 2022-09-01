@@ -15,15 +15,11 @@ pub struct Skybox {
 
 impl Skybox {
     pub fn new(renderer: &Renderer, pool: &ResourcePool, skybox: &asset::Skybox) -> Result<Self> {
-        let image = {
-            let req = ImageReq {
-                kind: ImageKind::CubeMap,
-                format: vk::Format::R8G8B8A8_SRGB,
-                extent: vk::Extent3D { width: skybox.width(), height: skybox.height(), depth: 1 },
-            };
-
-            Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, req)?
-        };
+        let image = Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageReq {
+            extent: vk::Extent3D { width: skybox.width(), height: skybox.height(), depth: 1 },
+            format: vk::Format::R8G8B8A8_SRGB,
+            kind: ImageKind::CubeMap,
+        })?;
 
         let staging = {
             let size: usize = skybox.images
@@ -31,12 +27,15 @@ impl Skybox {
                 .map(|image| image.data.len())
                 .sum();
 
-            let req = BufferReq { usage: vk::BufferUsageFlags::TRANSFER_SRC, size: size as u64 };
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let buffer = Buffer::new(renderer, pool, &req, memory_flags)?;
-            let mapped = MappedMemory::new(buffer.block.clone())?;
+            let buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: size as u64
+            })?;
+
+            let mapped = buffer.get_mapped()?;
 
             skybox.images.iter().fold(0, |start, image| {
                 let end = start + image.data.len() as u64;

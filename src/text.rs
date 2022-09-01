@@ -1,14 +1,13 @@
 use anyhow::Result;
 use ash::vk;
 use glam::{Vec3, Quat, Vec2, Mat4};
-use smallvec::SmallVec;
 use nohash_hasher::NoHashHasher;
 
-use std::{array, mem, iter, hash};
+use std::{array, mem, hash};
 use std::collections::HashMap;
 
 use crate::core::*;
-use crate::resource::{self, *};
+use crate::resource::*;
 use asset::{Font, Glyph};
 
 #[repr(C)]
@@ -22,10 +21,8 @@ pub struct TextPass {
     pub pipeline: GraphicsPipeline,
     pub descriptor: DescriptorSet,
 
-    vertex_bufs: [Res<Buffer>; FRAMES_IN_FLIGHT],
-    index_bufs: [Res<Buffer>; FRAMES_IN_FLIGHT],
-
-    mapped: MappedMemory,
+    vertex_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    index_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
 
     /// The projection matrix used for rendering text.
     ///
@@ -39,60 +36,46 @@ impl TextPass {
     pub fn new(renderer: &Renderer, pool: &ResourcePool, font: &Font) -> Result<Self> {
         let text_objects = TextObjects::new(FontAtlas::new(font));
 
-        let (buffers, block) = {
-            let vertex_req = BufferReq {
+        let memory_flags =
+            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        let vertex_buffers = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::VERTEX_BUFFER,
-                size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as u64,
-            };
-            let index_req = BufferReq {
+                size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as vk::DeviceSize,
+            })
+        })?;
+
+        let index_buffers = array::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::INDEX_BUFFER,
-                size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as u64,
-            };
-            let reqs: SmallVec<[_; FRAMES_IN_FLIGHT]> = iter::repeat(vertex_req)
-                .take(FRAMES_IN_FLIGHT)
-                .chain(iter::repeat(index_req).take(FRAMES_IN_FLIGHT))
-                .collect();
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-            resource::create_buffers(&renderer, pool, &reqs, memory_flags, 4)?
-        };
+                size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as vk::DeviceSize,
+            })
+        })?;
 
-        let mut buffers = buffers.into_iter();
+        let staging_pool = ResourcePool::with_block_size(128, 1024);
 
-        let vertex_bufs = array::from_fn(|_| buffers.next().unwrap());
-        let index_bufs = array::from_fn(|_| buffers.next().unwrap());
+        let atlas_staging = Buffer::new(&renderer, &staging_pool, memory_flags, &BufferReq {
+            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+            size: font.atlas.data.len() as u64,
+        })?;
 
-        let mapped = MappedMemory::new(block.clone())?;
-
-        let staging = {
-            let req = BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                size: font.atlas.data.len() as u64,
-            };
-
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-            let staging = Buffer::new(&renderer, pool, &req, memory_flags)?;
-            let mapped = MappedMemory::new(staging.block.clone())?;
-
-            mapped.get_buffer_data(&staging).copy_from_slice(font.atlas.data.as_slice());
-
-            staging
-        };
+        atlas_staging.get_mapped()?.fill(font.atlas.data.as_slice());
 
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
         let sampler = pool.alloc(TextureSampler::new(&renderer)?);
-    
-        let mut glyph_atlas = {
-            let req = ImageReq { format: font.atlas.format.into(), kind: ImageKind::Texture, extent };
-            Image::new(&renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, req)?
-        };
+   
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        let glyph_atlas = Image::new(&renderer, pool, memory_flags, &ImageReq {
+            format: font.atlas.format.into(),
+            kind: ImageKind::Texture, extent,
+        })?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(&mut glyph_atlas, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            recorder.copy_buffer_to_image(&staging, &glyph_atlas);
-            recorder.transition_image_layout(&mut glyph_atlas, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+            recorder.copy_buffer_to_image(&atlas_staging, &glyph_atlas);
+            recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[LayoutBinding {
@@ -157,7 +140,7 @@ impl TextPass {
         let height = renderer.swapchain.extent.height as f32;
         let proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
 
-        Ok(Self { mapped, text_objects, proj, pipeline, descriptor, index_bufs, vertex_bufs })
+        Ok(Self { text_objects, proj, pipeline, descriptor, index_buffers, vertex_buffers })
     }
 
     pub fn handle_resize(&mut self, renderer: &Renderer) {
@@ -166,7 +149,12 @@ impl TextPass {
         self.proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
     }
 
-    pub fn draw_text<F>(&mut self, recorder: &CommandRecorder, frame_index: usize, mut func: F)
+    pub fn draw_text<F>(
+        &mut self,
+        recorder: &CommandRecorder,
+        frame_index: usize,
+        mut func: F,
+    ) -> Result<()>
     where
         F: FnMut(&mut TextObjects),
     {
@@ -177,16 +165,8 @@ impl TextPass {
         let index_data = bytemuck::cast_slice(self.text_objects.indices.as_slice());
         let vertex_data = bytemuck::cast_slice(self.text_objects.vertices.as_slice());
 
-        let index_buffer = self.mapped.get_buffer_data(&self.index_bufs[frame_index]);
-        let vertex_buffer = self.mapped.get_buffer_data(&self.vertex_bufs[frame_index]);
-
-        for (src, dst) in index_data.iter().zip(index_buffer.iter_mut()) {
-            *dst = *src; 
-        }
-
-        for (src, dst) in vertex_data.iter().zip(vertex_buffer.iter_mut()) {
-            *dst = *src; 
-        }
+        self.vertex_buffers[frame_index].get_mapped()?.fill_from_start(vertex_data);
+        self.index_buffers[frame_index].get_mapped()?.fill_from_start(index_data);
 
         recorder.bind_graphics_pipeline(&self.pipeline);
         recorder.bind_descriptor_sets(
@@ -196,8 +176,8 @@ impl TextPass {
             &[&self.descriptor],
         );
 
-        recorder.bind_index_buffer(&self.index_bufs[frame_index], vk::IndexType::UINT16);
-        recorder.bind_vertex_buffer(&self.vertex_bufs[frame_index]);
+        recorder.bind_index_buffer(&self.index_buffers[frame_index], vk::IndexType::UINT16);
+        recorder.bind_vertex_buffer(&self.vertex_buffers[frame_index]);
 
         for label in &self.text_objects.labels {
             let proj_transform = self.proj * Mat4::from_scale_rotation_translation(
@@ -220,6 +200,8 @@ impl TextPass {
                 instance: 0,
             });
         }
+
+        Ok(())
     }
 }
 
