@@ -202,7 +202,7 @@ impl Renderer {
                         false
                     });
 
-                if !res {
+                if res {
                     warn!("swapchain suboptimal for surface");
                 }
             }
