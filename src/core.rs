@@ -415,19 +415,17 @@ impl PhysicalDevice {
     }
 
     pub fn get_queue_req(&self, kind: QueueReqKind) -> Option<QueueReq> {
-        let required_flag = match &kind {
-            QueueReqKind::Graphics(_) => vk::QueueFlags::GRAPHICS,
-            QueueReqKind::Transfer => vk::QueueFlags::TRANSFER,
-            QueueReqKind::Compute => vk::QueueFlags::COMPUTE,
-        };
-
         let index = match &kind {
             QueueReqKind::Graphics(surface) => {
+                // This is technically not required to be exist, but it doesn't seem to be a
+                // problem in reallity.
+                let flags = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
+
                 self.queue_properties
                     .iter()
                     .enumerate()
                     .position(|(i, p)| {
-                        p.queue_flags.contains(required_flag)
+                        p.queue_flags.contains(flags)
                             && unsafe {
                                 surface
                                     .loader
@@ -438,10 +436,10 @@ impl PhysicalDevice {
                             }
                     })
             }
-            QueueReqKind::Transfer | QueueReqKind::Compute => {
+            QueueReqKind::Transfer => {
                 self.queue_properties
                     .iter()
-                    .position(|p| p.queue_flags.contains(required_flag))
+                    .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
             }
         };
 
@@ -774,7 +772,6 @@ impl Drop for RenderPass {
 pub enum QueueReqKind {
     Graphics(Res<Surface>),
     Transfer,
-    Compute,
 }
 
 #[derive(Clone, Copy)]
@@ -1203,7 +1200,7 @@ impl Swapchain {
             }
         };
 
-        let preferred_present_mode = vk::PresentModeKHR::IMMEDIATE;
+        let preferred_present_mode = vk::PresentModeKHR::FIFO;
 
         let present_mode = _present_modes
             .iter()
