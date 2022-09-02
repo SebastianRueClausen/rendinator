@@ -1203,7 +1203,7 @@ impl Swapchain {
             }
         };
 
-        let preferred_present_mode = vk::PresentModeKHR::MAILBOX;
+        let preferred_present_mode = vk::PresentModeKHR::IMMEDIATE;
 
         let present_mode = _present_modes
             .iter()
@@ -2036,18 +2036,21 @@ impl<'a> CommandRecorder<'a> {
         }
     }
 
-    pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Image) {
+    pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Image, mip_level: u32) {
         let subresource = vk::ImageSubresourceLayers::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .mip_level(0)
+            .mip_level(mip_level)
             .base_array_layer(0)
             .layer_count(dst.array_layers)
             .build();
+        
+        let extent = dst.extent(mip_level);
+
         let regions = [vk::BufferImageCopy::builder()
             .buffer_offset(0)
-            .buffer_row_length(0)
+            .buffer_row_length(extent.width)
             .buffer_image_height(0)
-            .image_extent(dst.extent)
+            .image_extent(extent)
             .image_subresource(subresource)
             .build()];
         unsafe {
@@ -2072,11 +2075,10 @@ impl<'a> CommandRecorder<'a> {
     ///
     /// The transition will fail if the transfer doesn't fit into the tabel.
     pub fn transition_image_layout(&self, image: &Image, new: vk::ImageLayout) {
-        // NOTE: Make sure this is updated when adding mip levels.
         let subresource = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
-            .level_count(1)
+            .level_count(image.mip_levels)
             .base_array_layer(0)
             .layer_count(image.array_layers)
             .build();

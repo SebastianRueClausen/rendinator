@@ -284,17 +284,22 @@ impl Scene {
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let staging: Result<Vec<_>> = scene.textures
+        let staging: Result<Vec<Vec<_>>> = scene.textures
             .iter()
             .map(|texture| {
-                let buffer = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
-                    usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                    size: texture.data.len() as vk::DeviceSize,
-                })?;
+                texture.mips
+                    .iter()
+                    .map(|data| {
+                        let buffer = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+                            usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                            size: data.len() as vk::DeviceSize,
+                        })?;
 
-                buffer.get_mapped()?.fill(&texture.data);
+                        buffer.get_mapped()?.fill(data);
 
-                Ok(buffer)
+                        Ok(buffer)
+                    })
+                    .collect()
             })
             .collect();
 
@@ -306,6 +311,7 @@ impl Scene {
             .iter()
             .map(|texture| {
                 Image::new(renderer, pool, memory_flags, &ImageReq {
+                    mip_levels: texture.mip_levels(),
                     format: texture.format.into(),
                     kind: ImageKind::Texture,
                     extent: vk::Extent3D {
@@ -324,8 +330,10 @@ impl Scene {
                 recorder.transition_image_layout(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             }
 
-            for (src, dst) in staging.iter().zip(images.iter()) {
-                recorder.copy_buffer_to_image(src, dst);
+            for (levels, dst) in staging.iter().zip(images.iter()) {
+                for (level, src) in levels.iter().enumerate() {
+                    recorder.copy_buffer_to_image(src, dst, level as u32);
+                }
             }
 
             for image in images.iter() {

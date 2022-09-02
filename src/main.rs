@@ -272,7 +272,7 @@ fn main() -> Result<()> {
                         );
 
                         recorder.draw(36, 0);
-                
+               
                         text_pass.draw_text(recorder, frame_index, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
                             texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 

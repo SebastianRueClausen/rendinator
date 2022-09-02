@@ -57,10 +57,10 @@ impl TextPass {
 
         let atlas_staging = Buffer::new(&renderer, &staging_pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: font.atlas.data.len() as u64,
+            size: font.atlas.base_image_data().len() as vk::DeviceSize,
         })?;
 
-        atlas_staging.get_mapped()?.fill(font.atlas.data.as_slice());
+        atlas_staging.get_mapped()?.fill(font.atlas.base_image_data());
 
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
         let sampler = pool.alloc(TextureSampler::new(&renderer)?);
@@ -68,13 +68,14 @@ impl TextPass {
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
         let glyph_atlas = Image::new(&renderer, pool, memory_flags, &ImageReq {
+            mip_levels: 1,
             format: font.atlas.format.into(),
             kind: ImageKind::Texture, extent,
         })?;
 
         renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            recorder.copy_buffer_to_image(&atlas_staging, &glyph_atlas);
+            recorder.copy_buffer_to_image(&atlas_staging, &glyph_atlas, 0);
             recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 

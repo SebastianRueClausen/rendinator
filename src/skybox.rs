@@ -16,6 +16,7 @@ pub struct Skybox {
 impl Skybox {
     pub fn new(renderer: &Renderer, pool: &ResourcePool, skybox: &asset::Skybox) -> Result<Self> {
         let image = Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageReq {
+            mip_levels: 1,
             extent: vk::Extent3D { width: skybox.width(), height: skybox.height(), depth: 1 },
             format: vk::Format::R8G8B8A8_SRGB,
             kind: ImageKind::CubeMap,
@@ -24,7 +25,7 @@ impl Skybox {
         let staging = {
             let size: usize = skybox.images
                 .iter()
-                .map(|image| image.data.len())
+                .map(|image| image.base_image_data().len())
                 .sum();
 
             let memory_flags =
@@ -32,14 +33,14 @@ impl Skybox {
 
             let buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                size: size as u64
+                size: size as vk::DeviceSize
             })?;
 
             let mapped = buffer.get_mapped()?;
 
             skybox.images.iter().fold(0, |start, image| {
-                let end = start + image.data.len() as u64;
-                mapped.fill_range(start..end, &image.data);
+                let end = start + image.base_image_data().len() as vk::DeviceSize;
+                mapped.fill_range(start..end, image.base_image_data());
 
                 end
             });
@@ -49,7 +50,7 @@ impl Skybox {
 
         renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(&image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            recorder.copy_buffer_to_image(&staging, &image);
+            recorder.copy_buffer_to_image(&staging, &image, 0);
             recorder.transition_image_layout(&image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 

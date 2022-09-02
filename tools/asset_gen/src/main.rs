@@ -3,6 +3,7 @@
 use anyhow::{anyhow, Result};
 use glam::{Vec2, Vec3, Vec4, Mat4};
 use intel_tex_2::{bc5, bc7};
+use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
 use std::{fs, io};
@@ -107,93 +108,142 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn create_image(image: image::DynamicImage, format: ImageFormat) -> Image {
+fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels: usize) -> Image {
     match format {
         ImageFormat::Bc(bc) => {
             use intel_tex_2::{RgbaSurface, divide_up_by_multiple};
 
-            let (width, height, stride) = (image.width(), image.height(), image.width() * 4);
-
-            let block_bytes = bc.block_size();
-            let block_count = divide_up_by_multiple(width * height, block_bytes as u32) as usize;
-
-            let mut image = image.into_rgba8();
-            let mut compressed = vec![0x0; block_bytes * block_count];
-
-            match bc {
-                BcFormat::Bc5Unorm => {
-                    // Swizzle.
-                    for px in image.pixels_mut() {
-                        px.0[0] = px.0[1];
-                        px.0[1] = px.0[2];
-                        px.0[2] = px.0[0];
-                    } 
-                
-                    let data = image.as_raw().to_vec();
-                    let surface = RgbaSurface { width, height, stride, data: &data };
-
-                    bc5::compress_blocks_into(&surface, &mut compressed);
-                }
-                BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => {
-                    let data = image.as_raw().to_vec();
-                    let surface = RgbaSurface { width, height, stride, data: &data };
-
-                    let settings = if image.pixels().any(|px| px.0[3] != u8::MAX) {
-                        bc7::alpha_basic_settings()
-                    } else {
-                        bc7::opaque_basic_settings()
+            let (width, height) = (image.width(), image.height());
+            let mips: Vec<Vec<u8>> = (0..mip_levels)
+                .map(|level| {
+                    let round_to_block = |val: u32| -> u32 {
+                        (((val + 3) / 4) * 4).max(4) 
                     };
 
-                    bc7::compress_blocks_into(&settings, &surface, &mut compressed);      
-                }
-            }
+                    image = if level == 0 {
+                        // Make sure the image dimensions are aligned to the right block size.
+                        image.resize_exact(
+                            round_to_block(image.width()),
+                            round_to_block(image.height()),
+                            FilterType::Lanczos3,
+                        )
+                    } else {
+                        image.resize_exact(
+                            round_to_block(image.width() / 2),
+                            round_to_block(image.height() / 2),
+                            FilterType::Lanczos3,
+                        )
+                    };
 
-            Image { width, height, format, data: compressed }
+                    // Not effecient at all!
+                    let mut mip = image.clone().into_rgba8();
+
+                    let block_bytes = bc.block_size();
+                    let (width, height, stride) = (
+                        mip.width(),
+                        mip.height(),
+                        mip.width() * 4,
+                    );
+
+                    let block_count =
+                        divide_up_by_multiple(width * height, block_bytes as u32) as usize;
+
+                    let mut compressed = vec![0x0; block_bytes * block_count];
+
+                    match bc {
+                        BcFormat::Bc5Unorm => {
+                            // Swizzle.
+                            for px in mip.pixels_mut() {
+                                px.0[0] = px.0[1];
+                                px.0[1] = px.0[2];
+                                px.0[2] = px.0[0];
+                            } 
+                      
+                            let data = mip.into_raw();
+                            let surface = RgbaSurface { width, height, stride, data: &data };
+
+                            bc5::compress_blocks_into(&surface, &mut compressed);
+                        }
+                        BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => {
+                            let settings = if mip.pixels().any(|px| px.0[3] != u8::MAX) {
+                                bc7::alpha_basic_settings()
+                            } else {
+                                bc7::opaque_basic_settings()
+                            };
+
+                            let data = mip.into_raw();
+                            let surface = RgbaSurface { width, height, stride, data: &data };
+
+                            bc7::compress_blocks_into(&settings, &surface, &mut compressed);      
+                        }
+                    }
+
+                    compressed
+                })
+                .collect();
+
+            Image { width, height, format, mips }
         }
-        ImageFormat::Raw(raw) => match raw {
-            RawFormat::Rgba8Unorm | RawFormat::Rgba8Srgb => {
-                let image = image.into_rgba8();
-                let data = image.as_raw().to_vec();
-                Image { width: image.width(), height: image.height(), format, data }
-            }
-            RawFormat::Rg8Unorm => {
-                let image = image.into_luma_alpha8();
-                let data = image.as_raw().to_vec();
-                Image { width: image.width(), height: image.height(), format, data }
-            }
-            RawFormat::R8Unorm => {
-                let image = image.into_luma8();
-                let data = image.as_raw().to_vec();
-                Image { width: image.width(), height: image.height(), format, data }
-            }
+        ImageFormat::Raw(raw) => {
+            // The width and height of mip level 0.
+            let (width, height) = (image.width(), image.height());
+
+            let mips: Vec<_> = (0..mip_levels)
+                .map(|level| level as u32)
+                .map(|level| {
+                    if level != 0 {
+                        image = image.resize_exact(
+                            image.width() / 2,
+                            image.height() / 2,
+                            FilterType::Lanczos3
+                        );
+                    }
+
+                    let mip = image.clone();
+
+                    match raw {
+                        RawFormat::Rgba8Unorm | RawFormat::Rgba8Srgb => mip
+                            .into_rgba8()
+                            .into_raw(),
+                        RawFormat::Rg8Unorm => mip
+                            .into_luma_alpha8()
+                            .into_raw(),
+                        RawFormat::R8Unorm => mip
+                            .into_luma8()
+                            .into_raw(),
+                    }
+                })
+                .collect();
+
+            Image { width, height, format, mips }
         }
     }
 }
 
 struct GltfImporter {
-    buffer_data: Vec<Box<[u8]>>,
-    parent_path: PathBuf,
-    gltf: gltf::Gltf,
+buffer_data: Vec<Box<[u8]>>,
+parent_path: PathBuf,
+gltf: gltf::Gltf,
 }
 
 impl GltfImporter {
-    fn new(path: &Path) -> Result<Self> {
-        let file = match fs::File::open(path) {
-            Ok(file) => file,
-            Err(err) => {
-                return Err(anyhow!("can't read file {path:?}: {err}"));
-            }
-        };
+fn new(path: &Path) -> Result<Self> {
+    let file = match fs::File::open(path) {
+        Ok(file) => file,
+        Err(err) => {
+            return Err(anyhow!("can't read file {path:?}: {err}"));
+        }
+    };
 
-        let reader = io::BufReader::new(file);
-        let gltf = gltf::Gltf::from_reader(reader)?;
+    let reader = io::BufReader::new(file);
+    let gltf = gltf::Gltf::from_reader(reader)?;
 
-        let parent_path = path
-            .parent()
-            .expect("`path` doesn't have a parent directory")
-            .to_path_buf();
+    let parent_path = path
+        .parent()
+        .expect("`path` doesn't have a parent directory")
+        .to_path_buf();
 
-        let buffer_data: Result<Vec<_>> = gltf
+    let buffer_data: Result<Vec<_>> = gltf
             .buffers()
             .map(|buffer| {
                 Ok(match buffer.source() {
@@ -225,7 +275,7 @@ impl GltfImporter {
         &self.buffer_data[view.buffer().index()][start..end]
     }
 
-    fn load_image_data(
+    fn load_image(
         &self,
         format: ImageFormat,
         source: &gltf::image::Source,
@@ -252,7 +302,9 @@ impl GltfImporter {
             }
         };
 
-        Ok(create_image(image, format))
+        let mip_levels = (image.width().max(image.height()) as f32).log2().floor() as usize;
+
+        Ok(create_image(image, format, mip_levels))
     }
 
     fn load_scene(self) -> Result<Scene> {
@@ -281,15 +333,15 @@ impl GltfImporter {
                 .source();
 
             textures.extend([
-                self.load_image_data(
+                self.load_image(
                     ImageFormat::Bc(BcFormat::Bc7Srgb),
                     &albedo_map,
                 )?,
-                self.load_image_data(
+                self.load_image(
                     ImageFormat::Bc(BcFormat::Bc5Unorm),
                     &specular_map,
                 )?,
-                self.load_image_data(
+                self.load_image(
                     ImageFormat::Bc(BcFormat::Bc7Unorm),
                     &normal_map,
                 )?,
@@ -515,15 +567,14 @@ fn load_skybox(images: [&Path; 6]) -> Result<Skybox> {
         .iter()
         .map(|path| {
             let image = image::open(path)?.into_rgba8();
-            let data = image.as_raw();
+
+            let width = image.width() as u32;
+            let height = image.height() as u32;
+
+            let data = image.into_raw();
             let format = ImageFormat::Raw(RawFormat::Rgba8Srgb);
 
-            Ok(Image {
-                width: image.width() as u32,
-                height: image.height() as u32,
-                data: data.clone(),
-                format,
-            })
+            Ok(Image { width, height, mips: vec![data], format, })
         })
         .collect();
 
@@ -633,7 +684,7 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
         .collect();
 
     let glyphs = glyphs?;
-    let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm));
+    let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm), 1);
 
     Ok(Font { size: font.info.size, atlas, glyphs })
 }

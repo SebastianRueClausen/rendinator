@@ -252,6 +252,7 @@ pub struct ImageReq {
     pub kind: ImageKind,
     pub format: vk::Format,
     pub extent: vk::Extent3D,
+    pub mip_levels: u32,
 }
 
 impl Into<vk::ImageCreateInfo> for ImageReq {
@@ -268,7 +269,7 @@ impl Into<vk::ImageCreateInfo> for ImageReq {
             .initial_layout(vk::ImageLayout::UNDEFINED)
             .sharing_mode(vk::SharingMode::EXCLUSIVE)
             .extent(self.extent)
-            .mip_levels(1)
+            .mip_levels(self.mip_levels)
             .samples(vk::SampleCountFlags::TYPE_1)
             .array_layers(array_layers)
             .flags(flags)
@@ -285,7 +286,7 @@ impl Into<vk::ImageViewCreateInfo> for ImageReq {
         let subresource_range = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
-            .level_count(1)
+            .level_count(self.mip_levels)
             .base_array_layer(0)
             .layer_count(layer_count);
         vk::ImageViewCreateInfo::builder()
@@ -304,6 +305,7 @@ pub struct Image {
     pub format: vk::Format,
 
     pub array_layers: u32,
+    pub mip_levels: u32,
 
     // Layout may change.
     pub layout: Cell<vk::ImageLayout>,
@@ -372,6 +374,7 @@ impl Image {
         };
 
         Ok(pool.alloc(Image {
+            mip_levels: image_info.mip_levels,
             layout: Cell::new(image_info.initial_layout),
             extent: image_info.extent,
             format: image_info.format,
@@ -385,6 +388,14 @@ impl Image {
 
     pub fn layout(&self) -> vk::ImageLayout {
         self.layout.get()
+    }
+
+    pub fn extent(&self, mip_level: u32) -> vk::Extent3D {
+        vk::Extent3D {
+            width: self.extent.width >> mip_level,
+            height: self.extent.height >> mip_level,
+            depth: self.extent.depth,
+        }
     }
 }
 
@@ -406,7 +417,9 @@ pub struct TextureSampler {
 impl TextureSampler {
     pub fn new(renderer: &Renderer) -> Result<Self> {
         let device = renderer.device.clone(); 
-        let create_info = vk::SamplerCreateInfo::builder() .mag_filter(vk::Filter::LINEAR) .min_filter(vk::Filter::LINEAR)
+        let create_info = vk::SamplerCreateInfo::builder()
+            .mag_filter(vk::Filter::LINEAR)
+            .min_filter(vk::Filter::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::REPEAT)
             .address_mode_v(vk::SamplerAddressMode::REPEAT)
             .address_mode_w(vk::SamplerAddressMode::REPEAT)
@@ -419,7 +432,7 @@ impl TextureSampler {
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
             .mip_lod_bias(0.0)
             .min_lod(0.0)
-            .max_lod(0.0);
+            .max_lod(vk::LOD_CLAMP_NONE);
         let handle = unsafe { device.handle.create_sampler(&create_info, None)? };
         Ok(Self { handle, device })
     }

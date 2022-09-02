@@ -68,7 +68,8 @@ impl Scene {
     }
 
     pub fn store(&self, path: &Path) -> Result<()> {
-        fs::write(path, bincode::serialize(self)?).map_err(|err| err.into())
+        fs::write(path, bincode::serialize(self)?)
+            .map_err(|err| anyhow::anyhow!("failed to load scene: {}", err))
     }
 }
 
@@ -125,7 +126,7 @@ impl Into<vk::Format> for ImageFormat {
 /// A raw image without specified format.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Image {
-    pub data: Vec<u8>,
+    pub mips: Vec<Vec<u8>>,
 
     pub format: ImageFormat,
 
@@ -134,6 +135,24 @@ pub struct Image {
 
     /// The pixel height of the image.
     pub height: u32,
+}
+
+impl Image {
+    pub fn mip_levels(&self) -> u32 {
+        self.mips.len() as u32
+    }
+
+    pub fn width(&self, mip_level: u32) -> u32 {
+        self.width >> mip_level
+    }
+
+    pub fn height(&self, mip_level: u32) -> u32 {
+        self.height >> mip_level
+    }
+
+    pub fn base_image_data(&self) -> &[u8] {
+        self.mips[0].as_slice()
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -155,7 +174,8 @@ impl Skybox {
     }
 
     pub fn store(&self, path: &Path) -> Result<()> {
-        fs::write(path, bincode::serialize(self)?).map_err(|err| err.into())
+        fs::write(path, bincode::serialize(self)?)
+            .map_err(|err| anyhow::anyhow!("failed to load skybox: {}", err))
     }
 }
 
@@ -246,7 +266,8 @@ impl Font {
     }
 
     pub fn store(&self, path: &Path) -> Result<()> {
-        fs::write(path, bincode::serialize(self)?).map_err(|err| err.into())
+        fs::write(path, bincode::serialize(self)?)
+            .map_err(|err| anyhow::anyhow!("failed to load font: {}", err))
     }
 }
 
