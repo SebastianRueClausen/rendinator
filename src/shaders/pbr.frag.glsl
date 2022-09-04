@@ -4,7 +4,7 @@
 #extension GL_GOOGLE_include_directive: require
 #extension GL_EXT_nonuniform_qualifier: require
 
-#include "cluster_general.glsl"
+#include "light.glsl"
 
 #ifdef CLUSTER_DEBUG
 #include "cluster_debug.glsl"

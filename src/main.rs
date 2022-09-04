@@ -65,8 +65,7 @@ fn main() -> Result<()> {
     let lights = debug_lights();
     let mut lights = Lights::new(&renderer, &resource_pool, &camera_uniforms, &camera, &lights)?;
 
-    let skybox = asset::Skybox::load(Path::new("assets/skyboxes/beach.skybox"))?;
-    let skybox = Skybox::new(&renderer, &resource_pool, &skybox)?;
+    let skybox = Skybox::new(&renderer, &lights, &resource_pool)?;
 
     let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
     let scene = Scene::from_scene_asset(

@@ -18,8 +18,8 @@ pub struct DirLight {
 impl Default for DirLight {
     fn default() -> Self {
         Self {
-            direction: Vec4::new(-1.0, -1.0, 0.0, 1.0).normalize(),
-            irradiance: Vec4::splat(3.0),
+            direction: Vec4::new(0.0, 1.0, -1.0, 1.0).normalize(),
+            irradiance: Vec4::splat(1.2),
         }
     }
 }
@@ -424,7 +424,7 @@ impl Lights {
     }
 
     fn build_clusters(&self, renderer: &Renderer) -> Result<()> {
-        renderer.transfer_with(|recorder| {
+        renderer.compute_with(|recorder| {
             recorder.bind_descriptor_sets(
                 0,
                 vk::PipelineBindPoint::COMPUTE,

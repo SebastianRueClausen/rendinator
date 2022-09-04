@@ -1,7 +1,7 @@
 #version 450
 #pragma shader_stage(compute)
 
-#include "cluster_general.glsl"
+#include "light.glsl"
 
 const uint THREADS_PER_CLUSTER = 64;
 

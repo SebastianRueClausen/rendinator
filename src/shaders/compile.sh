@@ -8,6 +8,7 @@ glslc sdf.frag.glsl -o ../../assets/shaders/sdf.frag.spv
 
 glslc skybox.vert.glsl -o ../../assets/shaders/skybox.vert.spv
 glslc skybox.frag.glsl -o ../../assets/shaders/skybox.frag.spv
+glslc skybox.comp.glsl -o ../../assets/shaders/skybox.comp.spv
 
 glslc cluster_build.comp.glsl -o ../../assets/shaders/cluster_build.comp.spv
 glslc cluster_update.comp.glsl -o ../../assets/shaders/cluster_update.comp.spv

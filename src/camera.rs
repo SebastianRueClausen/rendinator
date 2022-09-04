@@ -28,7 +28,7 @@ pub struct Camera {
 impl Camera {
     pub fn new(aspect_ratio: f32) -> Self {
         let pos = Vec3::new(10.0, 10.0, 10.0);
-        let up = Vec3::new(0.0, 1.0, 0.0);
+        let up = Vec3::new(0.0, -1.0, 0.0);
         let front = Vec3::default();
 
         let yaw = 0.0;
@@ -79,8 +79,8 @@ impl Camera {
 
         let (x_delta, y_delta) = input_state.mouse_delta();
        
-        self.yaw -= x_delta as f32 * self.rotation_speed;
-        self.pitch += y_delta as f32 * self.rotation_speed;
+        self.yaw += x_delta as f32 * self.rotation_speed;
+        self.pitch -= y_delta as f32 * self.rotation_speed;
         self.pitch = self.pitch.clamp(-89.0, 89.0);
 
         self.front = -Vec3::new(

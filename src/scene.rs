@@ -341,6 +341,15 @@ impl Scene {
             }
         })?;
 
+        let views: Result<Vec<_>> = images
+            .into_iter()
+            .map(|image| {
+                ImageView::new(renderer, pool, image, vk::ImageViewType::TYPE_2D)
+            })
+            .collect();
+    
+        let views = views?;
+
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
             LayoutBinding {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
@@ -404,7 +413,7 @@ impl Scene {
             LayoutBinding {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
-                array_count: Some(images.len() as u32),
+                array_count: Some(views.len() as u32),
             },
         ])?);
 
@@ -422,12 +431,12 @@ impl Scene {
                 draw_buffers.clone(),
             ),
             DescriptorBinding::Image(sampler.clone(), [
-                skybox.cube_map.image.clone(),
-                skybox.cube_map.image.clone(),
+                skybox.cube_map.image_view.clone(),
+                skybox.cube_map.image_view.clone(),
             ]),
             DescriptorBinding::VariableImageArray(sampler.clone(), [
-                &images,
-                &images,
+                &views,
+                &views,
             ]),
         ])?;
 

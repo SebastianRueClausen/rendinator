@@ -10,7 +10,7 @@ use std::{iter, mem, ops, slice, env};
 use std::cell::Cell;
 use std::str::FromStr;
 
-use crate::resource::{Image, Buffer, TextureSampler, ResourcePool, Res};
+use crate::resource::*;
 
 pub struct Renderer {
     pub device: Res<Device>,
@@ -24,6 +24,7 @@ pub struct Renderer {
 
     graphics_queue: Res<Queue>,
     transfer_queue: Res<Queue>,
+    compute_queue: Res<Queue>,
 
     pool: ResourcePool,
 }
@@ -47,14 +48,19 @@ impl Renderer {
         let transfer_queue_req = physical
             .get_queue_req(QueueReqKind::Transfer)
             .ok_or_else(|| anyhow!("can't find valid transfer queue"))?;
+        let compute_queue_req = physical
+            .get_queue_req(QueueReqKind::Compute)
+            .ok_or_else(|| anyhow!("can't find valid compute queue"))?;
 
         let device = pool.alloc(Device::new(instance, physical, &[
             &graphics_queue_req,
             &transfer_queue_req,
+            &compute_queue_req,
         ])?);
 
         let graphics_queue = pool.alloc(Queue::new(device.clone(), &graphics_queue_req)?);
         let transfer_queue = pool.alloc(Queue::new(device.clone(), &transfer_queue_req)?);
+        let compute_queue = pool.alloc(Queue::new(device.clone(), &compute_queue_req)?);
 
         let window_extent = vk::Extent2D {
             width: window.inner_size().width,
@@ -88,6 +94,7 @@ impl Renderer {
             render_targets,
             graphics_queue,
             transfer_queue,
+            compute_queue,
             pool,
         })
     }
@@ -213,16 +220,30 @@ impl Renderer {
         Ok(())
     }
 
-    /// Record and submut a command seqeunce to `Self::transfer_queue`. This will be performed
-    /// immediately, meaning that the transfer will be done before this function returns.
+    pub fn exec<F, R>(&self, queue: Res<Queue>, func: F) -> Result<R>
+    where
+        F: FnOnce(&CommandRecorder) -> R
+    {
+        let buffer = CommandBuffer::new(self.device.clone(), queue)?;
+        let ret = buffer.record(func)?;
+        buffer.submit_wait_idle()?;
+        Ok(ret)
+    }
+
+    /// Record and submut a command seqeunce to `Self::transfer_queue`.
     pub fn transfer_with<F, R>(&self, func: F) -> Result<R>
     where
         F: FnOnce(&CommandRecorder) -> R
     {
-        let buffer = CommandBuffer::new(self.device.clone(), self.transfer_queue.clone())?;
-        let ret = buffer.record(func)?;
-        buffer.submit_wait_idle()?;
-        Ok(ret)
+        self.exec(self.transfer_queue.clone(), func)
+    }
+
+    /// Record and submut a command seqeunce to `Self::compute_queue`.
+    pub fn compute_with<F, R>(&self, func: F) -> Result<R>
+    where
+        F: FnOnce(&CommandRecorder) -> R
+    {
+        self.exec(self.compute_queue.clone(), func)
     }
 
     /// Handle window resize. The extent of the swapchain and framebuffers will we match that of
@@ -440,6 +461,11 @@ impl PhysicalDevice {
                 self.queue_properties
                     .iter()
                     .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
+            }
+            QueueReqKind::Compute => {
+                self.queue_properties
+                    .iter()
+                    .position(|p| p.queue_flags.contains(vk::QueueFlags::COMPUTE))
             }
         };
 
@@ -667,7 +693,7 @@ impl RenderPass {
                 .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
                 .samples(render_targets.sample_count)
                 .build(),
-            // Msaa image.
+            // Color resolve image.
             vk::AttachmentDescription::builder()
                 .format(swapchain.surface_format.format)
                 .load_op(vk::AttachmentLoadOp::DONT_CARE)
@@ -690,14 +716,14 @@ impl RenderPass {
             layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
         };
 
-        let msaa_attachments = [vk::AttachmentReference {
+        let color_resolve_attachment = [vk::AttachmentReference {
             attachment: 2,
             layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
         }];
 
         let subpasses = [vk::SubpassDescription::builder()
             .depth_stencil_attachment(&depth_attachment)
-            .resolve_attachments(&msaa_attachments)
+            .resolve_attachments(&color_resolve_attachment)
             .color_attachments(&color_attachments)
             .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
             .build()];
@@ -725,8 +751,8 @@ impl RenderPass {
             .zip(swapchain.images.iter().cycle())
             .map(|(render_targets, swapchain_image)| {
                 let views = [
-                    render_targets.msaa.view,
-                    render_targets.depth.view,
+                    render_targets.color_resolve.handle,
+                    render_targets.depth.handle,
                     swapchain_image.view,
                 ];
                 let info = vk::FramebufferCreateInfo::builder()
@@ -772,6 +798,7 @@ impl Drop for RenderPass {
 pub enum QueueReqKind {
     Graphics(Res<Surface>),
     Transfer,
+    Compute,
 }
 
 #[derive(Clone, Copy)]
@@ -807,6 +834,10 @@ impl Queue {
         };
 
         Ok(Self { handle, flags: req.flags, family_index: req.family_index, device, pool })
+    }
+
+    pub fn family_index(&self) -> u32 {
+        self.family_index
     }
 
     pub fn wait_idle(&self) -> Result<()> {
@@ -913,8 +944,6 @@ pub struct Surface {
     instance: Res<Instance>,
 }
 
-
-
 impl Surface {
     fn new(instance: Res<Instance>, window: &winit::window::Window) -> Result<Self> {
         let loader = khr::Surface::new(&instance.entry, &instance.handle);
@@ -1016,8 +1045,8 @@ impl SwapchainImage {
 
 #[derive(Clone)]
 struct RenderTarget {
-    msaa: Res<Image>,
-    depth: Res<Image>,
+    color_resolve: Res<ImageView>,
+    depth: Res<ImageView>,
 }
 
 struct RenderTargets {
@@ -1035,89 +1064,72 @@ impl RenderTargets {
         pool: &ResourcePool,
         swapchain: &Swapchain,
     ) -> Result<Self> {
-        let queue_families = [graphics_queue.family_index];
-
         let extent = vk::Extent3D {
             width: swapchain.extent.width,
             height: swapchain.extent.height,
             depth: 1,
         };
+    
+        let samples = device.sample_count();
 
-        let sample_count = device.sample_count();
+        let depth_image_req = ImageReq {
+            kind: ImageKind::Depth {
+                queue: graphics_queue.clone(),
+                samples,
+            },
+            format: DEPTH_IMAGE_FORMAT,
+            mip_levels: 1,
+            extent,
+        };
 
-        let depth_image_info = vk::ImageCreateInfo::builder()
-            .image_type(vk::ImageType::TYPE_2D)
-            .usage(vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
-            .format(DEPTH_IMAGE_FORMAT)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .queue_family_indices(&queue_families)
-            .extent(extent)
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(sample_count)
-            .build();
-        let depth_subresource_info = vk::ImageSubresourceRange::builder()
-            .aspect_mask(vk::ImageAspectFlags::DEPTH)
-            .base_mip_level(0)
-            .level_count(1)
-            .base_array_layer(0)
-            .layer_count(1)
-            .build();
-        let depth_view_info = vk::ImageViewCreateInfo::builder()
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(DEPTH_IMAGE_FORMAT)
-            .subresource_range(depth_subresource_info)
-            .build();
-        let msaa_image_info = vk::ImageCreateInfo::builder()
-            .image_type(vk::ImageType::TYPE_2D)
-            .usage(
-                vk::ImageUsageFlags::TRANSIENT_ATTACHMENT | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-            )
-            .format(swapchain.surface_format.format)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .queue_family_indices(&queue_families)
-            .extent(extent)
-            .mip_levels(1)
-            .array_layers(1)
-            .samples(sample_count)
-            .build();
-        let msaa_subresource_info = vk::ImageSubresourceRange::builder()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .base_mip_level(0)
-            .level_count(1)
-            .base_array_layer(0)
-            .layer_count(1)
-            .build();
-        let msaa_view_info = vk::ImageViewCreateInfo::builder()
-            .view_type(vk::ImageViewType::TYPE_2D)
-            .format(swapchain.surface_format.format)
-            .subresource_range(msaa_subresource_info)
-            .build();
+        let color_resolve_req = ImageReq {
+            kind: ImageKind::ColorResolve {
+                queue: graphics_queue.clone(),
+                samples,
+            },
+            format: swapchain.surface_format.format,
+            mip_levels: 1,
+            extent,
+        };
+
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         let targets: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT)
-            .map(|_| Ok(RenderTarget {
-                depth: Image::from_raw(
+            .map(|_| {
+                let depth_image = Image::from_device(
                     device.clone(),
                     pool,
                     memory_flags,
-                    &depth_image_info,
-                    &depth_view_info,
-                )?,
-                msaa: Image::from_raw(
+                    &depth_image_req,
+                )?;
+
+                let depth = ImageView::from_device(
+                    device.clone(),
+                    pool,
+                    depth_image.clone(),
+                    vk::ImageViewType::TYPE_2D,
+                )?;
+
+                let color_resolve_image = Image::from_device(
                     device.clone(),
                     pool,
                     memory_flags,
-                    &msaa_image_info,
-                    &msaa_view_info,
-                )?,
-            }))
+                    &color_resolve_req,
+                )?;
+
+                let color_resolve = ImageView::from_device(
+                    device.clone(),
+                    pool,
+                    color_resolve_image.clone(),
+                    vk::ImageViewType::TYPE_2D,
+                )?;
+
+                Ok(RenderTarget { depth, color_resolve })
+            })
             .collect();
 
         let targets = targets?;
 
-        Ok(Self { targets, sample_count, graphics_queue })
+        Ok(Self { targets, sample_count: samples, graphics_queue })
     }
 }
 
@@ -1200,7 +1212,7 @@ impl Swapchain {
             }
         };
 
-        let preferred_present_mode = vk::PresentModeKHR::FIFO;
+        let preferred_present_mode = vk::PresentModeKHR::MAILBOX;
 
         let present_mode = _present_modes
             .iter()
@@ -1461,8 +1473,11 @@ impl LayoutBindings {
 
 pub enum DescriptorBinding<'a, const N: usize> {
     Buffer([Res<Buffer>; N]),
-    Image(Res<TextureSampler>, [Res<Image>; N]),
-    VariableImageArray(Res<TextureSampler>, [&'a [Res<Image>]; N]),
+    Image(Res<TextureSampler>, [Res<ImageView>; N]),
+    VariableImageArray(
+        Res<TextureSampler>,
+        [&'a [Res<ImageView>]; N]
+    ),
 }
 
 pub struct DescriptorSetLayout {
@@ -1499,7 +1514,7 @@ impl Drop for DescriptorSetLayout {
 enum BoundResource {
     Sampler(Res<TextureSampler>),
     Buffer(Res<Buffer>),
-    Image(Res<Image>),
+    Image(Res<ImageView>),
 }
 
 pub struct DescriptorSet {
@@ -1625,7 +1640,7 @@ impl DescriptorSet {
                             buffers: smallvec![vk::DescriptorBufferInfo::default()],
                             images: smallvec![vk::DescriptorImageInfo {
                                 image_layout: images[n].layout(),
-                                image_view: images[n].view,
+                                image_view: images[n].handle,
                                 sampler: sampler.handle,
                             }],
                         },
@@ -1636,7 +1651,7 @@ impl DescriptorSet {
                                 .iter()
                                 .map(|image| vk::DescriptorImageInfo {
                                     image_layout: image.layout(),
-                                    image_view: image.view,
+                                    image_view: image.handle,
                                     sampler: sampler.handle,
                                 })
                                 .collect(),
@@ -2062,15 +2077,6 @@ impl<'a> CommandRecorder<'a> {
     }
 
     /// Transition the layout of `image` to `new`.
-    ///
-    /// For now it handles two transitions (format` references the current layout of the image):
-    ///
-    /// | `format`               | `new`                      |
-    /// |------------------------|----------------------------|
-    /// | `UNDEFINED`            | `TRANSFER_DST_OPTIMAL`     |
-    /// | `TRANSFER_DST_OPTIMAL` | `SHADER_READ_ONLY_OPTIMAL` |
-    ///
-    /// The transition will fail if the transfer doesn't fit into the tabel.
     pub fn transition_image_layout(&self, image: &Image, new: vk::ImageLayout) {
         let subresource = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -2088,7 +2094,16 @@ impl<'a> CommandRecorder<'a> {
             .subresource_range(subresource);
 
         let (src_stage, dst_stage) = match (image.layout(), new) {
-            (vk::ImageLayout::UNDEFINED, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => {
+            (_, vk::ImageLayout::GENERAL) => {
+                barrier = barrier
+                    .src_access_mask(vk::AccessFlags::empty())
+                    .dst_access_mask(vk::AccessFlags::SHADER_WRITE);
+                (
+                    vk::PipelineStageFlags::TOP_OF_PIPE,
+                    vk::PipelineStageFlags::COMPUTE_SHADER,
+                )
+            }
+            (_, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => {
                 barrier = barrier
                     .src_access_mask(vk::AccessFlags::empty())
                     .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
@@ -2097,10 +2112,7 @@ impl<'a> CommandRecorder<'a> {
                     vk::PipelineStageFlags::TRANSFER,
                 )
             }
-            (
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            ) => {
+            (_, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => {
                 barrier = barrier
                     .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
                     .dst_access_mask(vk::AccessFlags::SHADER_READ);

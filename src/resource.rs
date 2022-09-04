@@ -63,18 +63,6 @@ impl MappedMemory {
         unsafe { self.as_slice().copy_from_slice(bytes) };
     }
 
-    pub fn fill_from_start(&self, bytes: &[u8]) {
-        if self.size < bytes.len() as vk::DeviceSize {
-            panic!("bytes is longer than the mapped memory range");
-        }
-
-        let slice = unsafe { self.as_slice() };
-
-        for (src, dst) in bytes.iter().zip(slice.iter_mut()) {
-            *dst = *src;
-        }
-    }
-
     /// Fill memory in `range` with the memory of `bytes`.
     ///
     /// # Panics
@@ -164,16 +152,6 @@ pub struct BufferReq {
     pub size: u64,
 }
 
-impl Into<vk::BufferCreateInfo> for BufferReq {
-    fn into(self) -> vk::BufferCreateInfo {
-        vk::BufferCreateInfo::builder()
-            .usage(self.usage)
-            .size(self.size)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .build()
-    }
-}
-
 #[derive(Clone)]
 pub struct Buffer {
     pub handle: vk::Buffer,
@@ -188,29 +166,24 @@ impl Buffer {
         renderer: &Renderer,
         pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
-        info: &BufferReq,
+        req: &BufferReq,
     ) -> Result<Res<Self>> {
-        Self::from_raw(renderer.device.clone(), pool,  memory_flags, info)
-    }
-
-    pub fn from_raw<T: Into<vk::BufferCreateInfo> + Clone + Copy>(
-        device: Res<Device>,
-        pool: &ResourcePool,
-        memory_flags: vk::MemoryPropertyFlags,
-        req: &T,
-    ) -> Result<Res<Self>> {
-        let info = (*req).into();
-
         let pool = unsafe {
-            let handle = device.handle.create_buffer(&info, None)?;
-            let req = device.handle.get_buffer_memory_requirements(handle);
+            let info = vk::BufferCreateInfo::builder()
+                .usage(req.usage)
+                .size(req.size)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .build();
 
-            let memory_type = device.physical
+            let handle = renderer.device.handle.create_buffer(&info, None)?;
+            let req = renderer.device.handle.get_buffer_memory_requirements(handle);
+
+            let memory_type = renderer.device.physical
                 .get_memory_type_index(req.memory_type_bits, memory_flags)
                 .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
             let (block, range) = pool.gpu_alloc(
-                device.clone(),
+                renderer.device.clone(),
                 memory_type,
                 req.size,
                 req.alignment,
@@ -218,9 +191,9 @@ impl Buffer {
 
             let range = range.start..range.start + info.size;
 
-            device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
+            renderer.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
 
-            pool.alloc(Self { handle, range, block, device })
+            pool.alloc(Self { handle, range, block, device: renderer.device.clone() })
         };
 
         Ok(pool)
@@ -241,13 +214,21 @@ impl Drop for Buffer {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub enum ImageKind {
     Texture,
     CubeMap,
+    Depth {
+        samples: vk::SampleCountFlags,
+        queue: Res<Queue>,
+    },
+    ColorResolve {
+        samples: vk::SampleCountFlags,
+        queue: Res<Queue>,
+    },
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 pub struct ImageReq {
     pub kind: ImageKind,
     pub format: vk::Format,
@@ -255,59 +236,18 @@ pub struct ImageReq {
     pub mip_levels: u32,
 }
 
-impl Into<vk::ImageCreateInfo> for ImageReq {
-    fn into(self) -> vk::ImageCreateInfo {
-        let (array_layers, flags) = match self.kind {
-            ImageKind::Texture => (1, vk::ImageCreateFlags::empty()),
-            ImageKind::CubeMap => (6, vk::ImageCreateFlags::CUBE_COMPATIBLE),
-        };
-        vk::ImageCreateInfo::builder()
-            .image_type(vk::ImageType::TYPE_2D)
-            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED)
-            .format(self.format)
-            .tiling(vk::ImageTiling::OPTIMAL)
-            .initial_layout(vk::ImageLayout::UNDEFINED)
-            .sharing_mode(vk::SharingMode::EXCLUSIVE)
-            .extent(self.extent)
-            .mip_levels(self.mip_levels)
-            .samples(vk::SampleCountFlags::TYPE_1)
-            .array_layers(array_layers)
-            .flags(flags)
-            .build()
-    }
-}
-
-impl Into<vk::ImageViewCreateInfo> for ImageReq {
-    fn into(self) -> vk::ImageViewCreateInfo {
-        let (view_type, layer_count) = match self.kind {
-            ImageKind::Texture => (vk::ImageViewType::TYPE_2D, 1),
-            ImageKind::CubeMap => (vk::ImageViewType::CUBE, 6),
-        };
-        let subresource_range = vk::ImageSubresourceRange::builder()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
-            .base_mip_level(0)
-            .level_count(self.mip_levels)
-            .base_array_layer(0)
-            .layer_count(layer_count);
-        vk::ImageViewCreateInfo::builder()
-            .view_type(view_type)
-            .subresource_range(*subresource_range)
-            .format(self.format)
-            .build()
-    }
-}
-
 #[derive(Clone)]
 pub struct Image {
     pub handle: vk::Image,
-    pub view: vk::ImageView,
+
+    kind: ImageKind,
+
     pub extent: vk::Extent3D,
     pub format: vk::Format,
 
     pub array_layers: u32,
     pub mip_levels: u32,
 
-    // Layout may change.
     pub layout: Cell<vk::ImageLayout>,
 
     pub range: MemoryRange,
@@ -326,63 +266,92 @@ impl Image {
         memory_flags: vk::MemoryPropertyFlags,
         req: &ImageReq,
     ) -> Result<Res<Self>> {
-        Self::from_raw(renderer.device.clone(), pool, memory_flags, req, req)
+        Self::from_device(renderer.device.clone(), pool, memory_flags, req)
     }
 
-    /// Create image from raw [`vk::ImageCreateInfo`] and [`vk::ImageViewCreateInfo`].
-    pub fn from_raw<I, V>(
+    pub fn from_device(
         device: Res<Device>,
         pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
-        image_info: &I,
-        view_info: &V,
-    ) -> Result<Res<Self>>
-    where
-        I: Into<vk::ImageCreateInfo> + Clone + Copy,
-        V: Into<vk::ImageViewCreateInfo> + Clone + Copy,
-    {
-        let device = device.clone();
-
-        let image_info: vk::ImageCreateInfo = (*image_info).into();
-
-        let (handle, req) = unsafe {
-            let handle = device.handle.create_image(&image_info, None)?;
-            let req = device.handle.get_image_memory_requirements(handle);
-
-            (handle, req)
+        req: &ImageReq,
+    ) -> Result<Res<Self>> {
+        let (array_layers, flags) = if let ImageKind::CubeMap = req.kind {
+            (6, vk::ImageCreateFlags::CUBE_COMPATIBLE)
+        } else {
+            (1, vk::ImageCreateFlags::empty())
         };
 
-        let memory_type = device.physical.get_memory_type_index(req.memory_type_bits, memory_flags)
+        let usage_flags = match &req.kind {
+            ImageKind::CubeMap => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+            ImageKind::Texture => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            ImageKind::Depth { .. } => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
+            ImageKind::ColorResolve { .. } => vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
+                | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        };
+
+        let handle = {
+            let info = vk::ImageCreateInfo::builder()
+                .image_type(vk::ImageType::TYPE_2D)
+                .usage(usage_flags)
+                .format(req.format)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .initial_layout(vk::ImageLayout::UNDEFINED)
+                .sharing_mode(vk::SharingMode::EXCLUSIVE)
+                .extent(req.extent)
+                .mip_levels(req.mip_levels)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .array_layers(array_layers)
+                .flags(flags);
+
+            match &req.kind {
+                ImageKind::Depth { queue, samples }
+                | ImageKind::ColorResolve { queue, samples } => unsafe {
+                    let queue_families = [queue.family_index()];
+                    let info = info
+                        .queue_family_indices(&queue_families)
+                        .samples(*samples)
+                        .clone();
+                    
+                    device.handle.create_image(&info, None)?
+                }
+                _ => unsafe {
+                    device.handle.create_image(&info, None)?
+                }
+            }
+        };
+
+        let memory_req = unsafe {
+            device.handle.get_image_memory_requirements(handle)
+        };
+         
+        let memory_type = device.physical
+            .get_memory_type_index(memory_req.memory_type_bits, memory_flags)
             .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
         let (block, range) = pool.gpu_alloc(
             device.clone(),
             memory_type,
-            req.size,
-            req.alignment,
+            memory_req.size,
+            memory_req.alignment,
         )?;
 
         unsafe {
             device.handle.bind_image_memory(handle, block.handle, range.start)?;
         }
-       
-        let view = unsafe {
-            let mut view_info: vk::ImageViewCreateInfo = (*view_info).into();
-            view_info.image = handle;
 
-            device.handle.create_image_view(&view_info, None)?
-        };
+        let layout = Cell::new(vk::ImageLayout::UNDEFINED);
+        let kind = req.kind.clone();
 
-        Ok(pool.alloc(Image {
-            mip_levels: image_info.mip_levels,
-            layout: Cell::new(image_info.initial_layout),
-            extent: image_info.extent,
-            format: image_info.format,
-            range: 0..req.size,
-            array_layers: image_info.array_layers,
+        Ok(pool.alloc(Self {
+            mip_levels: req.mip_levels,
+            extent: req.extent,
+            format: req.format,
+            range: 0..memory_req.size,
+            array_layers,
+            layout,
             handle,
-            view,
             block,
+            kind,
         }))
     }
 
@@ -401,14 +370,79 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        unsafe {
-            self.block.device.handle.destroy_image(self.handle, None);
-            self.block.device.handle.destroy_image_view(self.view, None);
-        }
+        unsafe { self.block.device.handle.destroy_image(self.handle, None); }
     }
 }
 
-#[derive(Clone)]
+pub struct ImageView {
+    pub handle: vk::ImageView,
+    image: Res<Image>,
+}
+
+impl ImageView {
+    pub fn new(
+        renderer: &Renderer,
+        pool: &ResourcePool,
+        image: Res<Image>,
+        view_type: vk::ImageViewType,
+    ) -> Result<Res<Self>> {
+        Self::from_device(renderer.device.clone(), pool, image, view_type)
+    }
+
+    pub fn from_device(
+        device: Res<Device>,
+        pool: &ResourcePool,
+        image: Res<Image>,
+        view_type: vk::ImageViewType,
+    ) -> Result<Res<Self>> {
+        let layer_count = if let ImageKind::CubeMap = image.kind {
+            6
+        } else {
+            1
+        };
+
+        let aspect_mask = if let ImageKind::Depth { .. } = image.kind {
+            vk::ImageAspectFlags::DEPTH
+        } else {
+            vk::ImageAspectFlags::COLOR
+        };
+
+        let subresource_range = vk::ImageSubresourceRange::builder()
+            .aspect_mask(aspect_mask)
+            .base_mip_level(0)
+            .level_count(image.mip_levels)
+            .base_array_layer(0)
+            .layer_count(layer_count);
+
+        let view_info = vk::ImageViewCreateInfo::builder()
+            .view_type(view_type)
+            .subresource_range(*subresource_range)
+            .format(image.format)
+            .image(image.handle)
+            .build();
+
+        let handle = unsafe {
+            device.handle.create_image_view(&view_info, None)?
+        };
+    
+        Ok(pool.alloc(Self { handle, image }))
+    }
+
+    pub fn layout(&self) -> vk::ImageLayout {
+        self.image.layout()
+    }
+
+    pub fn image(&self) -> &Image {
+        &self.image
+    }
+}
+
+impl Drop for ImageView {
+    fn drop(&mut self) {
+        unsafe { self.image.block.device.handle.destroy_image_view(self.handle, None) }
+    }
+}
+
 pub struct TextureSampler {
     pub handle: vk::Sampler,
     device: Res<Device>,
@@ -489,12 +523,16 @@ const CUBE_VERTICES: [Vec3; 36] = [
 ];
 
 pub struct CubeMap {
-    pub image: Res<Image>,
+    pub image_view: Res<ImageView>,
     pub vertex_buffer: Res<Buffer>,
 }
 
 impl CubeMap {
-    pub fn new(renderer: &Renderer, pool: &ResourcePool, image: Res<Image>) -> Result<Self> {
+    pub fn new(
+        renderer: &Renderer,
+        pool: &ResourcePool,
+        image_view: Res<ImageView>,
+    ) -> Result<Self> {
         let vertex_data: &[u8] = bytemuck::cast_slice(&CUBE_VERTICES);
 
         let staging = {
@@ -524,7 +562,7 @@ impl CubeMap {
             recorder.copy_buffers(&staging, &vertex_buffer)
         )?;
 
-        Ok(Self { image, vertex_buffer })
+        Ok(Self { image_view, vertex_buffer })
     }
 }
 

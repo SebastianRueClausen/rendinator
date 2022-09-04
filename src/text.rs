@@ -73,6 +73,8 @@ impl TextPass {
             kind: ImageKind::Texture, extent,
         })?;
 
+        let view = ImageView::new(renderer, pool, glyph_atlas.clone(), vk::ImageViewType::TYPE_2D)?;
+
         renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
             recorder.copy_buffer_to_image(&atlas_staging, &glyph_atlas, 0);
@@ -86,7 +88,7 @@ impl TextPass {
         }])?);
 
         let descriptor = DescriptorSet::new_single(&renderer, layout, &[
-            DescriptorBinding::Image(sampler.clone(), [glyph_atlas.clone()]),
+            DescriptorBinding::Image(sampler.clone(), [view.clone()]),
         ])?;
 
         let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
@@ -163,11 +165,19 @@ impl TextPass {
 
         func(&mut self.text_objects);
 
-        let index_data = bytemuck::cast_slice(self.text_objects.indices.as_slice());
         let vertex_data = bytemuck::cast_slice(self.text_objects.vertices.as_slice());
+        let index_data = bytemuck::cast_slice(self.text_objects.indices.as_slice());
 
-        self.vertex_buffers[frame_index].get_mapped()?.fill_from_start(vertex_data);
-        self.index_buffers[frame_index].get_mapped()?.fill_from_start(index_data);
+        let vertex_size = vertex_data.len() as vk::DeviceSize;
+        let index_size = index_data.len() as vk::DeviceSize;
+
+        self.vertex_buffers[frame_index]
+            .get_mapped()?
+            .fill_range(0..vertex_size, vertex_data);
+
+        self.index_buffers[frame_index]
+            .get_mapped()?
+            .fill_range(0..index_size, index_data);
 
         recorder.bind_graphics_pipeline(&self.pipeline);
         recorder.bind_descriptor_sets(

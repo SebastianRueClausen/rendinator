@@ -13,7 +13,6 @@ use asset::*;
 #[derive(Clone, clap::ValueEnum)]
 enum AssetKind {
     Font,
-    Skybox,
     Gltf,
 }
 
@@ -83,24 +82,6 @@ fn main() -> Result<()> {
             let res = load_font(&input)?.store(output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store font to {output:?}: {err}"));
-            }
-        }
-        AssetKind::Skybox => {
-            let inputs: Vec<&Path> = args.inputs
-                .iter()
-                .take(6)
-                .map(|buf| buf.as_ref())
-                .collect();
-            let Ok(inputs) = inputs.try_into() else {
-                return Err(anyhow!("expected 6 input image files"));
-            };
-            let output = args.ouput
-                .as_ref()
-                .map(|path| path.as_path())
-                .unwrap_or(&Path::new("out.skybox"));
-            let res = load_skybox(inputs)?.store(output);
-            if let Err(err) = res {
-                return Err(anyhow!("failed to store skybox to {output:?}: {err}"));
             }
         }
     }
@@ -560,27 +541,6 @@ fn new(path: &Path) -> Result<Self> {
 
 fn load_scene_from_gltf(path: &Path) -> Result<Scene> {
     GltfImporter::new(path)?.load_scene()
-}
-
-fn load_skybox(images: [&Path; 6]) -> Result<Skybox> {
-    let images: Result<Vec<_>> = images
-        .iter()
-        .map(|path| {
-            let image = image::open(path)?.into_rgba8();
-
-            let width = image.width() as u32;
-            let height = image.height() as u32;
-
-            let data = image.into_raw();
-            let format = ImageFormat::Raw(RawFormat::Rgba8Srgb);
-
-            Ok(Image { width, height, mips: vec![data], format, })
-        })
-        .collect();
-
-    let images = images?.try_into().unwrap();
-
-    Ok(Skybox { images })
 }
 
 /// Glyph of the angelcode bitmap format.

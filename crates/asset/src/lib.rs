@@ -155,30 +155,6 @@ impl Image {
     }
 }
 
-#[derive(Serialize, Deserialize)]
-pub struct Skybox {
-    pub images: [Image; 6],
-}
-
-impl Skybox {
-    pub fn width(&self) -> u32 {
-        self.images[0].width
-    }
-
-    pub fn height(&self) -> u32 {
-        self.images[0].height
-    }
-
-    pub fn load(path: &Path) -> Result<Self> {
-       Ok(bincode::deserialize(&fs::read(path)?)?)
-    }
-
-    pub fn store(&self, path: &Path) -> Result<()> {
-        fs::write(path, bincode::serialize(self)?)
-            .map_err(|err| anyhow::anyhow!("failed to load skybox: {}", err))
-    }
-}
-
 #[derive(Clone, Copy, Serialize, Deserialize)]
 pub struct BoundingSphere {
     pub center: Vec3,

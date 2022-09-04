@@ -1,60 +1,112 @@
 use anyhow::Result;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Vec3, UVec3};
 use ash::vk;
 
 use crate::core::*;
 use crate::resource::*;
+use crate::light::Lights;
 
 use std::mem;
+
+struct Generator {
+    pipeline: ComputePipeline,
+    descriptor: DescriptorSet,
+
+    size: u32,
+}
+
+impl Generator {
+    fn new(
+        renderer: &Renderer,
+        image_view: Res<ImageView>,
+        sampler: Res<TextureSampler>,
+        lights: &Lights,
+        pool: &ResourcePool,
+    ) -> Result<Self> {
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+        ])?);
+
+        let descriptor = DescriptorSet::new_single(&renderer, layout.clone(), &[
+            DescriptorBinding::Image(sampler.clone(), [image_view.clone()]),
+            DescriptorBinding::Buffer([lights.light_buffer.clone()]),
+        ])?;
+
+        let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");
+        let shader = ShaderModule::new(&renderer, "main", code)?;
+
+        let layout = pool.alloc(
+            PipelineLayout::new(&renderer, &[], &[layout])?
+        );
+
+        let pipeline = ComputePipeline::new(&renderer, layout, &shader)?;
+        let size = image_view.image().extent(0).width;
+
+        Ok(Self { pipeline, descriptor, size })
+    }
+
+    fn generate(&self, renderer: &Renderer) -> Result<()> {
+        renderer.compute_with(|recorder| {
+            recorder.bind_descriptor_sets(
+                0,
+                vk::PipelineBindPoint::COMPUTE,
+                self.pipeline.layout(),
+                &[&self.descriptor],
+            );
+
+            let dim = UVec3::new(self.size / 8, self.size / 8, 6);
+            recorder.dispatch(&self.pipeline, dim);
+        })
+    }
+}
 
 pub struct Skybox {
     pub cube_map: CubeMap,
     pub pipeline: GraphicsPipeline,
     pub descriptor: DescriptorSet, 
+
+    #[allow(dead_code)]
+    generator: Generator,
 }
 
 impl Skybox {
-    pub fn new(renderer: &Renderer, pool: &ResourcePool, skybox: &asset::Skybox) -> Result<Self> {
+    pub fn new(renderer: &Renderer, lights: &Lights, pool: &ResourcePool) -> Result<Self> {
+        let size = 64;
+
         let image = Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageReq {
             mip_levels: 1,
-            extent: vk::Extent3D { width: skybox.width(), height: skybox.height(), depth: 1 },
-            format: vk::Format::R8G8B8A8_SRGB,
+            extent: vk::Extent3D { width: size, height: size, depth: 1 },
+            format: vk::Format::R16G16B16A16_SFLOAT,
             kind: ImageKind::CubeMap,
         })?;
 
-        let staging = {
-            let size: usize = skybox.images
-                .iter()
-                .map(|image| image.base_image_data().len())
-                .sum();
+        renderer.transfer_with(|recorder| {
+            recorder.transition_image_layout(&image, vk::ImageLayout::GENERAL);
+        })?;
 
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+        let array_view =
+            ImageView::new(renderer, pool, image.clone(), vk::ImageViewType::TYPE_2D_ARRAY)?;
 
-            let buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                size: size as vk::DeviceSize
-            })?;
+        let sampler = pool.alloc(TextureSampler::new(renderer)?);
+        let generator = Generator::new(renderer, array_view, sampler.clone(), lights, pool)?;
 
-            let mapped = buffer.get_mapped()?;
-
-            skybox.images.iter().fold(0, |start, image| {
-                let end = start + image.base_image_data().len() as vk::DeviceSize;
-                mapped.fill_range(start..end, image.base_image_data());
-
-                end
-            });
-
-            buffer
-        };
+        generator.generate(renderer)?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(&image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            recorder.copy_buffer_to_image(&staging, &image, 0);
             recorder.transition_image_layout(&image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 
-        let cube_map = CubeMap::new(renderer, pool, image)?;
+        let cube_view = ImageView::new(renderer, pool, image.clone(), vk::ImageViewType::CUBE)?;
+        let cube_map = CubeMap::new(renderer, pool, cube_view.clone())?;
 
         let layout = pool.alloc(DescriptorSetLayout::new(renderer, &[
             LayoutBinding {
@@ -64,12 +116,10 @@ impl Skybox {
             },
         ])?);
 
-        let sampler = pool.alloc(TextureSampler::new(renderer)?);
-
         let descriptor = DescriptorSet::new_per_frame(&renderer, layout.clone(), &[
             DescriptorBinding::Image(sampler, [
-                cube_map.image.clone(), 
-                cube_map.image.clone(), 
+                cube_view.clone(), 
+                cube_view.clone(), 
             ]),
         ])?;
 
@@ -113,6 +163,6 @@ impl Skybox {
             layout,
         })?;
 
-        Ok(Self { cube_map, descriptor, pipeline })
+        Ok(Self { cube_map, descriptor, pipeline, generator })
     }
 }

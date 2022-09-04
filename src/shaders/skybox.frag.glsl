@@ -8,4 +8,5 @@ layout (location = 0) out vec4 out_color;
 
 void main() {
 	out_color = texture(box_sampler, in_texcoord);	
+	out_color.w = 1.0;
 }
