@@ -18,8 +18,8 @@ struct Vertex {
 }
 
 pub struct TextPass {
-    pub pipeline: GraphicsPipeline,
-    pub descriptor: DescriptorSet,
+    pub pipeline: Res<GraphicsPipeline>,
+    pub descriptor: Res<DescriptorSet>,
 
     vertex_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
     index_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
@@ -76,9 +76,17 @@ impl TextPass {
         let view = ImageView::new(renderer, pool, glyph_atlas.clone(), vk::ImageViewType::TYPE_2D)?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
-            recorder.copy_buffer_to_image(&atlas_staging, &glyph_atlas, 0);
-            recorder.transition_image_layout(&glyph_atlas, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            recorder.transition_image_layout(
+                glyph_atlas.clone(),
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+            );
+
+            recorder.copy_buffer_to_image(atlas_staging.clone(), glyph_atlas.clone(), 0);
+
+            recorder.transition_image_layout(
+                glyph_atlas.clone(),
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            );
         })?;
 
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[LayoutBinding {
@@ -87,9 +95,9 @@ impl TextPass {
             array_count: None,
         }])?);
 
-        let descriptor = DescriptorSet::new_single(&renderer, layout, &[
+        let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout, &[
             DescriptorBinding::Image(sampler.clone(), [view.clone()]),
-        ])?;
+        ])?);
 
         let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(false)
@@ -112,7 +120,7 @@ impl TextPass {
             PipelineLayout::new(&renderer, &push_consts, &[descriptor.layout.clone()])?
         );
 
-        let pipeline = GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
             layout,
             vertex_attributes: &[
                 vk::VertexInputAttributeDescription {
@@ -137,7 +145,7 @@ impl TextPass {
             vertex_shader: &vertex_module,
             fragment_shader: &fragment_module,
             cull_mode: vk::CullModeFlags::BACK,
-        })?;
+        })?);
 
         let width = renderer.swapchain.extent.width as f32;
         let height = renderer.swapchain.extent.height as f32;
@@ -179,16 +187,16 @@ impl TextPass {
             .get_mapped()?
             .fill_range(0..index_size, index_data);
 
-        recorder.bind_graphics_pipeline(&self.pipeline);
-        recorder.bind_descriptor_sets(
-            frame_index,
-            vk::PipelineBindPoint::GRAPHICS,
-            self.pipeline.layout(),
-            &[&self.descriptor],
-        );
+        recorder.bind_graphics_pipeline(self.pipeline.clone());
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            frame_index: Some(frame_index),
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+            layout: self.pipeline.layout(),
+            descriptors: &[self.descriptor.clone()],
+        });
 
-        recorder.bind_index_buffer(&self.index_buffers[frame_index], vk::IndexType::UINT16);
-        recorder.bind_vertex_buffer(&self.vertex_buffers[frame_index]);
+        recorder.bind_index_buffer(self.index_buffers[frame_index].clone(), vk::IndexType::UINT16);
+        recorder.bind_vertex_buffer(self.vertex_buffers[frame_index].clone());
 
         for label in &self.text_objects.labels {
             let proj_transform = self.proj * Mat4::from_scale_rotation_translation(
@@ -204,7 +212,7 @@ impl TextPass {
                 &proj_transform,
             );
 
-            recorder.draw_indexed(IndexedDrawCall {
+            recorder.draw_indexed(IndexedDrawReq {
                 index_count: label.index_count,
                 index_start: label.index_offset,
                 vertex_offset: 0,

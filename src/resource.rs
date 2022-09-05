@@ -569,7 +569,7 @@ impl CubeMap {
         };
 
         renderer.transfer_with(|recorder|
-            recorder.copy_buffers(&staging, &vertex_buffer)
+            recorder.copy_buffers(staging.clone(), vertex_buffer.clone())
         )?;
 
         Ok(Self { image_view, vertex_buffer })
@@ -834,6 +834,7 @@ impl ResourcePool {
     }
 }
 
+#[repr(C)]
 struct ResState<T> {
     /// The number of references to the item.
     ref_count: Cell<u32>,
@@ -841,6 +842,35 @@ struct ResState<T> {
 
     /// The resource value.
     val: T,
+}
+
+/// A dummy res exists to hold resources alive without holding a typed [`Res`] struct.
+///
+/// This is handy if you for instance want to have a list of resources with different types that
+/// you want to ensure lives for a certain time.
+pub struct DummyRes {
+    ptr: NonNull<ResState<()>>,
+
+    val: *mut (),
+    drop: Option<unsafe fn(*mut ())>,
+}
+
+impl Drop for DummyRes {
+    fn drop(&mut self) {
+        unsafe {
+            if self.ptr.as_ref().ref_count.get() == 1 {
+                if let Some(drop_ptr) = self.drop {
+                    (drop_ptr)(self.val);
+                }
+
+                let rc = self.ptr.as_mut().block.clone();
+                Rc::decrement_strong_count(Rc::into_raw(rc));
+            } else {
+                let count = self.ptr.as_ref().ref_count.get() - 1;
+                self.ptr.as_ref().ref_count.set(count);
+            }
+        }
+    }
 }
 
 /// A reference to a resource allocated from a [`ResourcePool`].
@@ -858,16 +888,45 @@ impl<T> Res<T> {
             ptr::drop_in_place::<T>((&mut self.ptr.as_mut().val) as *mut T);
         }
     }
-}
 
-impl<T> Clone for Res<T> {
-    fn clone(&self) -> Self {
+    fn increase_ref_count(&self) {
         if mem::needs_drop::<T>() {
             unsafe {
                 self.ptr.as_ref().ref_count.set(self.ptr.as_ref().ref_count.get() + 1);
             }
         }
+    }
 
+    pub fn to_dummy(self) -> DummyRes {
+        let drop = if mem::needs_drop::<T>() {
+            Some(unsafe {
+                mem::transmute::<unsafe fn(*mut T), unsafe fn(*mut ())>(
+                    ptr::drop_in_place::<T>
+                )
+            })
+        } else {
+            None 
+        };
+
+        let val = unsafe {
+            mem::transmute::<*mut T, *mut ()>(&mut (*self.ptr.as_ptr()).val as *mut T)
+        };
+
+        let ptr = self.ptr.cast();
+
+        mem::forget(self);
+
+        DummyRes { drop, val, ptr }
+    }
+
+    pub fn create_dummy(&self) -> DummyRes {
+        self.clone().to_dummy()
+    }
+}
+
+impl<T> Clone for Res<T> {
+    fn clone(&self) -> Self {
+        self.increase_ref_count();
         Self { ptr: self.ptr }
     }
 }
@@ -979,4 +1038,37 @@ fn res_with_inter_block_ref() {
     }
 
     assert_eq!(unsafe { COUNT }, 2);
+}
+
+/// Just test it doesn't crash.
+#[test]
+fn dummy_res() {
+    let p1 = ResourcePool::new();
+
+    let res = p1.alloc(0);
+
+    for _ in 0..100 {
+        res.create_dummy();
+    }
+}
+
+#[test]
+fn dummy_res_drop() {
+    static mut COUNT: usize = 0;
+
+    struct Test(usize);
+    impl Drop for Test {
+        fn drop(&mut self) {
+            unsafe { COUNT += 1; }
+        }
+    }
+    
+    let _dummy = {
+        let p1 = ResourcePool::new();
+
+        let res = p1.alloc(Test(0));
+        res.create_dummy()
+    };
+
+    assert_eq!(unsafe { COUNT }, 0);
 }

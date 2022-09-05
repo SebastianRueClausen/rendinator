@@ -1,4 +1,4 @@
-use glam::{Vec3, Vec2, Mat4};
+use glam::{Vec4, Vec3, Vec2, Mat4};
 use anyhow::Result;
 use ash::vk;
 
@@ -7,7 +7,7 @@ use std::{array, mem};
 use crate::light::Lights;
 use crate::core::*;
 use crate::resource::*;
-use crate::camera::CameraUniforms;
+use crate::camera::{Camera, CameraUniforms};
 use crate::skybox::Skybox;
 
 #[repr(C)]
@@ -89,13 +89,13 @@ pub struct FrustrumInfo {
 }
 
 pub struct Scene {
-    pub render_pipeline: GraphicsPipeline,
+    pub render_pipeline: Res<GraphicsPipeline>,
 
-    pub light_descriptor: DescriptorSet,
-    pub descriptor: DescriptorSet,
+    pub light_descriptor: Res<DescriptorSet>,
+    pub descriptor: Res<DescriptorSet>,
 
-    pub cull_descriptor: DescriptorSet,
-    pub cull_pipeline: ComputePipeline,
+    pub cull_descriptor: Res<DescriptorSet>,
+    pub cull_pipeline: Res<ComputePipeline>,
 
     pub primitive_count: u32,
 
@@ -258,13 +258,19 @@ impl Scene {
         })?;
 
         renderer.transfer_with(|recorder| {
-            recorder.copy_buffers(&instance_staging, &instance_buffer);
-            recorder.copy_buffers(&primitive_staging, &primitive_buffer);
-            recorder.copy_buffers(&vertex_staging, &vertex_buffer);
-            recorder.copy_buffers(&index_staging, &index_buffer);
+            let buffers = [
+                (instance_staging.clone(), instance_buffer.clone()),
+                (primitive_staging.clone(), primitive_buffer.clone()),
+                (vertex_staging.clone(), vertex_buffer.clone()),
+                (index_staging.clone(), index_buffer.clone()),
+            ];
+
+            for (staging, buffer) in buffers {
+                recorder.copy_buffers(staging, buffer);
+            }
 
             for buffer in &draw_count_buffers {
-                recorder.copy_buffers(&draw_count_staging, &buffer);
+                recorder.copy_buffers(draw_count_staging.clone(), buffer.clone());
             }
         })?;
 
@@ -327,17 +333,23 @@ impl Scene {
 
         renderer.transfer_with(|recorder| {
             for image in images.iter() {
-                recorder.transition_image_layout(image, vk::ImageLayout::TRANSFER_DST_OPTIMAL);
+                recorder.transition_image_layout(
+                    image.clone(),
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                );
             }
 
             for (levels, dst) in staging.iter().zip(images.iter()) {
                 for (level, src) in levels.iter().enumerate() {
-                    recorder.copy_buffer_to_image(src, dst, level as u32);
+                    recorder.copy_buffer_to_image(src.clone(), dst.clone(), level as u32);
                 }
             }
 
             for image in images.iter() {
-                recorder.transition_image_layout(image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+                recorder.transition_image_layout(
+                    image.clone(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                );
             }
         })?;
 
@@ -368,7 +380,7 @@ impl Scene {
             },
         ])?);
 
-        let light_descriptor = DescriptorSet::new_per_frame(&renderer, layout, &[
+        let light_descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
             DescriptorBinding::Buffer([
                 lights.cluster_info.buffer.clone(), 
                 lights.cluster_info.buffer.clone(), 
@@ -380,7 +392,7 @@ impl Scene {
             DescriptorBinding::Buffer(
                 lights.light_mask_buffers.clone()
             ),
-        ])?;
+        ])?);
 
         let sampler = pool.alloc(TextureSampler::new(&renderer)?);
 
@@ -417,7 +429,7 @@ impl Scene {
             },
         ])?);
 
-        let descriptor = DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
+        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
             DescriptorBinding::Buffer(camera_uniforms.view_buffers.clone()),
             DescriptorBinding::Buffer([
                 camera_uniforms.proj_buffer.clone(),
@@ -438,7 +450,7 @@ impl Scene {
                 &views,
                 &views,
             ]),
-        ])?;
+        ])?);
 
         let render_pipeline = {
             let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
@@ -457,7 +469,7 @@ impl Scene {
                 light_descriptor.layout.clone(),
             ])?);
 
-            let pipeline = GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+            pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
                 vertex_attributes: &[
                     vk::VertexInputAttributeDescription {
                         format: vk::Format::R32G32B32_SFLOAT,
@@ -494,9 +506,7 @@ impl Scene {
                 fragment_shader: &fragment_module,
                 depth_stencil_info,
                 layout,
-            })?;
-
-            pipeline
+            })?)
         };
 
         let descriptor_layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
@@ -522,7 +532,7 @@ impl Scene {
             },
         ])?);
 
-        let cull_descriptor = DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
+        let cull_descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
             DescriptorBinding::Buffer(draw_count_buffers.clone()),
             DescriptorBinding::Buffer(draw_buffers.clone()),
             DescriptorBinding::Buffer([
@@ -533,7 +543,7 @@ impl Scene {
                 instance_buffer.clone(),
                 instance_buffer.clone(),
             ]),
-        ])?;
+        ])?);
 
         let cull_pipeline = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
@@ -550,7 +560,7 @@ impl Scene {
                 descriptor_layout.clone(),
             ])?);
 
-            ComputePipeline::new(&renderer, layout, &shader)?
+            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
         };
 
         let index_format = scene.index_format;
@@ -571,5 +581,100 @@ impl Scene {
             instance_buffer,
             index_format,
         })
+    }
+
+    pub fn prepare_draw_buffers(
+        &self,
+        frame_index: usize,
+        lights: &Lights,
+        camera: &Camera,
+        recorder: &CommandRecorder,
+    ) {
+        recorder.update_buffer(
+            self.draw_count_buffers[frame_index].clone(),
+            &DrawCount {
+                command_count: 0,
+                primitive_count: self.primitive_count,
+            },
+        );
+
+        recorder.buffer_barrier(&BufferBarrierReq {
+            buffer: self.draw_count_buffers[frame_index].clone(),
+            src_mask: vk::AccessFlags::TRANSFER_WRITE,
+            dst_mask: vk::AccessFlags::SHADER_WRITE,
+            src_stage: vk::PipelineStageFlags::TRANSFER,
+            dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+        });
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            frame_index: Some(frame_index),
+            bind_point: vk::PipelineBindPoint::COMPUTE,
+            layout: self.cull_pipeline.layout(),
+            descriptors: &[self.cull_descriptor.clone()],
+        });
+
+        fn normalize_plane(plane: Vec4) -> Vec4 {
+            plane / plane.truncate().length()
+        }
+
+        let horizontal = normalize_plane(camera.proj.row(3) + camera.proj.row(0));
+        let vertical = normalize_plane(camera.proj.row(3) + camera.proj.row(1));
+
+        let frustrum_info = FrustrumInfo {
+            z_near: camera.z_near,
+            z_far: camera.z_far,
+
+            left: horizontal.x,
+            right: horizontal.y,
+            top: vertical.y,
+            bottom: vertical.z,
+        };
+
+        recorder.push_constants(
+            self.cull_pipeline.layout(),
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &frustrum_info,
+        );
+
+        recorder.dispatch(self.cull_pipeline.clone(), [
+            self.primitive_count.div_ceil(64), 1, 1,
+        ]);
+
+        recorder.buffer_barrier(&BufferBarrierReq {
+            buffer: lights.light_mask_buffers[frame_index].clone(),
+            src_mask: vk::AccessFlags::SHADER_WRITE,
+            dst_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
+            src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags::DRAW_INDIRECT,
+        });
+    }
+
+    pub fn draw(&self, frame_index: usize, recorder: &CommandRecorder) {
+        let index_type: vk::IndexType = self.index_format.into();
+
+        recorder.bind_index_buffer(self.index_buffer.clone(), index_type);
+        recorder.bind_vertex_buffer(self.vertex_buffer.clone());
+
+        recorder.bind_graphics_pipeline(self.render_pipeline.clone());
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            frame_index: Some(frame_index),
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+            layout: self.render_pipeline.layout(),
+            descriptors: &[
+                self.descriptor.clone(),
+                self.light_descriptor.clone(),
+            ],
+        });
+        
+        recorder.draw_indexed_indirect_count(&IndexedIndirectDrawReq {
+            draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
+            draw_buffer: self.draw_buffers[frame_index].clone(),
+            count_buffer: self.draw_count_buffers[frame_index].clone(),
+            max_draw_count: self.primitive_count,
+            count_offset: 0,
+            draw_offset: 0,
+        });
     }
 }

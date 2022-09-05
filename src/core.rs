@@ -1,13 +1,12 @@
 use anyhow::Result;
 use ash::extensions::{ext, khr};
 use ash::vk;
-use glam::UVec3;
 use smallvec::{SmallVec, smallvec};
 use arrayvec::ArrayVec;
 
 use std::ffi::{self, CStr, CString};
 use std::{iter, mem, ops, slice, env};
-use std::cell::Cell;
+use std::cell::{UnsafeCell, Cell};
 use std::str::FromStr;
 
 use crate::resource::*;
@@ -1511,12 +1510,6 @@ impl Drop for DescriptorSetLayout {
     }
 }
 
-enum BoundResource {
-    Sampler(Res<TextureSampler>),
-    Buffer(Res<Buffer>),
-    Image(Res<ImageView>),
-}
-
 pub struct DescriptorSet {
     pub layout: Res<DescriptorSetLayout>,
 
@@ -1524,7 +1517,7 @@ pub struct DescriptorSet {
     pub sets: ArrayVec<vk::DescriptorSet, FRAMES_IN_FLIGHT>,
 
     #[allow(dead_code)]
-    resources: SmallVec<[BoundResource; 32]>,
+    resources: SmallVec<[DummyRes; 32]>,
 
     device: Res<Device>,
 }
@@ -1682,22 +1675,22 @@ impl DescriptorSet {
             match &binding {
                 DescriptorBinding::Buffer(buffers) => {
                     for buffer in buffers {
-                        resources.push(BoundResource::Buffer(buffer.clone()));
+                        resources.push(buffer.create_dummy());
                     }
                 }
                 DescriptorBinding::Image(sampler, images) => {
-                    resources.push(BoundResource::Sampler(sampler.clone()));
+                    resources.push(sampler.create_dummy());
 
                     for image in images {
-                        resources.push(BoundResource::Image(image.clone()));
+                        resources.push(image.create_dummy());
                     }
                 }
                 DescriptorBinding::VariableImageArray(sampler, arrays) => {
-                    resources.push(BoundResource::Sampler(sampler.clone()));
+                    resources.push(sampler.create_dummy());
 
                     for array in arrays {
                         for image in *array {
-                            resources.push(BoundResource::Image(image.clone())); 
+                            resources.push(image.create_dummy()); 
                         }
                     }
                 }
@@ -1796,8 +1789,8 @@ impl ComputePipeline {
         Ok(Self { device, handle, layout })
     }
 
-    pub fn layout(&self) -> &PipelineLayout {
-        &self.layout
+    pub fn layout(&self) -> Res<PipelineLayout> {
+        self.layout.clone()
     }
 }
 
@@ -1907,8 +1900,8 @@ impl GraphicsPipeline {
         Ok(Self { device, handle, layout: req.layout })
     }
 
-    pub fn layout(&self) -> &PipelineLayout {
-        &self.layout
+    pub fn layout(&self) -> Res<PipelineLayout> {
+        self.layout.clone()
     }
 }
 
@@ -1918,25 +1911,17 @@ impl Drop for GraphicsPipeline {
     }
 }
 
-pub struct IndexedDrawCall {
-    pub instance: u32,
-    pub index_count: u32,
-    pub index_start: u32,
-    pub vertex_offset: i32,
-}
-
 pub struct CommandBuffer {
-    handle: vk::CommandBuffer,     
+    handle: vk::CommandBuffer,
+
+    /// This keeps track of all the items used by the command buffer.
+    ///
+    /// It's not free since clearing this means jumping through a pointer for each item, but it
+    /// makes sure the items live as long as they are used by the buffer.
+    bound_resources: UnsafeCell<Vec<DummyRes>>,
 
     queue: Res<Queue>,
     device: Res<Device>,
-}
-
-pub struct SubmitWaitReq {
-    signal: vk::Semaphore,
-    wait: vk::Semaphore,
-    wait_stage: vk::PipelineStageFlags,
-    fence: vk::Fence,
 }
 
 impl CommandBuffer {
@@ -1945,17 +1930,27 @@ impl CommandBuffer {
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_pool(queue.pool)
             .command_buffer_count(1);
+
         let handles = unsafe { device.handle.allocate_command_buffers(&info)? };
-        Ok(Self { handle: *handles.first().unwrap(), queue, device })
+        let bound_resources = UnsafeCell::new(Vec::new());
+
+        Ok(Self { handle: *handles.first().unwrap(), queue, device, bound_resources })
     }
 
     pub fn reset(&self) -> Result<()> {
         unsafe {
             let flags = vk::CommandBufferResetFlags::empty();
             self.device.handle.reset_command_buffer(self.handle, flags)?;
+
+            // We can clear all the bound items when the buffer is reset.
+            (*self.bound_resources.get()).clear();
         }
-        
+
         Ok(())
+    }
+
+    fn bind_resource<T>(&self, res: Res<T>) {
+        unsafe { (*self.bound_resources.get()).push(res.to_dummy()); }
     }
 
     pub fn record<F, R>(&self, func: F) -> Result<R>
@@ -1975,7 +1970,16 @@ impl CommandBuffer {
 
         Ok(ret)
     }
+}
 
+pub struct SubmitWaitReq {
+    signal: vk::Semaphore,
+    wait: vk::Semaphore,
+    wait_stage: vk::PipelineStageFlags,
+    fence: vk::Fence,
+}
+
+impl CommandBuffer {
     pub fn submit_wait(&self, req: SubmitWaitReq) -> Result<()> {
         let wait = [req.wait];
         let signals = [req.signal];
@@ -2025,6 +2029,39 @@ impl Drop for CommandBuffer {
     }
 }
 
+pub struct IndexedDrawReq {
+    pub instance: u32,
+    pub index_count: u32,
+    pub index_start: u32,
+    pub vertex_offset: i32,
+}
+
+pub struct IndexedIndirectDrawReq {
+    pub draw_buffer: Res<Buffer>,
+    pub count_buffer: Res<Buffer>,
+
+    pub draw_command_size: vk::DeviceSize,
+    pub draw_offset: vk::DeviceSize,
+    pub count_offset: vk::DeviceSize,
+
+    pub max_draw_count: u32,
+}
+
+pub struct BufferBarrierReq {
+    pub buffer: Res<Buffer>,
+    pub src_mask: vk::AccessFlags,
+    pub dst_mask: vk::AccessFlags,
+    pub src_stage: vk::PipelineStageFlags,
+    pub dst_stage: vk::PipelineStageFlags,
+}
+
+pub struct DescriptorBindReq<'a> {
+    pub frame_index: Option<usize>,
+    pub bind_point: vk::PipelineBindPoint,
+    pub layout: Res<PipelineLayout>,
+    pub descriptors: &'a [Res<DescriptorSet>],
+}
+
 pub struct CommandRecorder<'a> {
     buffer: &'a CommandBuffer,
 }
@@ -2034,7 +2071,7 @@ impl<'a> CommandRecorder<'a> {
         &self.buffer.device
     }
 
-    pub fn copy_buffers(&self, src: &Buffer, dst: &Buffer) {
+    pub fn copy_buffers(&self, src: Res<Buffer>, dst: Res<Buffer>) {
         let size = src.size().min(dst.size());
         let regions = [vk::BufferCopy::builder()
             .src_offset(0)
@@ -2046,9 +2083,12 @@ impl<'a> CommandRecorder<'a> {
                 .handle
                 .cmd_copy_buffer(self.buffer.handle, src.handle, dst.handle, &regions);
         }
+
+        self.buffer.bind_resource(src);
+        self.buffer.bind_resource(dst);
     }
 
-    pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Image, mip_level: u32) {
+    pub fn copy_buffer_to_image(&self, src: Res<Buffer>, dst: Res<Image>, mip_level: u32) {
         let subresource = vk::ImageSubresourceLayers::builder()
             .aspect_mask(dst.aspect_flags())
             .mip_level(mip_level)
@@ -2074,10 +2114,13 @@ impl<'a> CommandRecorder<'a> {
                 &regions,
             );
         }
+
+        self.buffer.bind_resource(src);
+        self.buffer.bind_resource(dst);
     }
 
     /// Transition the layout of `image` to `new`.
-    pub fn transition_image_layout(&self, image: &Image, new: vk::ImageLayout) {
+    pub fn transition_image_layout(&self, image: Res<Image>, new: vk::ImageLayout) {
         let subresource = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
@@ -2140,40 +2183,57 @@ impl<'a> CommandRecorder<'a> {
                 &barriers,
             );
         }
+
+        self.buffer.bind_resource(image);
     }
 
-    pub fn dispatch(&self, pipeline: &ComputePipeline, group_count: UVec3) {
+    pub fn dispatch(&self, pipeline: Res<ComputePipeline>, group_count: [u32; 3]) {
         let bind_point = vk::PipelineBindPoint::COMPUTE;
         unsafe {
-            self.device().handle.cmd_bind_pipeline(self.buffer.handle, bind_point, pipeline.handle);
-            self.device().handle.cmd_dispatch(self.buffer.handle, group_count.x, group_count.y, group_count.z);
+            self.device().handle.cmd_bind_pipeline(
+                self.buffer.handle,
+                bind_point,
+                pipeline.handle,
+            );
+            self.device().handle.cmd_dispatch(
+                self.buffer.handle,
+                group_count[0],
+                group_count[1],
+                group_count[2],
+            );
         }
+
+        self.buffer.bind_resource(pipeline);
     }
 
-    pub fn bind_descriptor_sets(
-        &self,
-        frame_index: usize,
-        bind_point: vk::PipelineBindPoint,
-        layout: &PipelineLayout,
-        descriptors: &[&DescriptorSet],
-    ) {
-        let descs: SmallVec<[_; 12]> = descriptors
+    pub fn bind_descriptor_sets(&self, req: &DescriptorBindReq) {
+        let frame_index = req.frame_index.unwrap_or(0);
+
+        let descs: SmallVec<[_; 12]> = req.descriptors
             .iter()
             .map(|desc| desc[frame_index])
             .collect();
+
         unsafe {
             self.device().handle.cmd_bind_descriptor_sets(
                 self.buffer.handle,
-                bind_point,
-                layout.handle,
+                req.bind_point,
+                req.layout.handle,
                 0,
                 &descs,
                 &[],
             );
         }
+
+        self.buffer.bind_resource(req.layout.clone());
+
+        for desc in req.descriptors {
+            self.buffer.bind_resource(desc.clone());
+        }
+
     }
 
-    pub fn bind_vertex_buffer(&self, buffer: &Buffer) {
+    pub fn bind_vertex_buffer(&self, buffer: Res<Buffer>) {
         unsafe {
             self.device().handle.cmd_bind_vertex_buffers(
                 self.buffer.handle,
@@ -2182,9 +2242,11 @@ impl<'a> CommandRecorder<'a> {
                 &[0],
             );
         }
+
+        self.buffer.bind_resource(buffer);
     }
 
-    pub fn bind_index_buffer(&self, buffer: &Buffer, index_type: vk::IndexType) {
+    pub fn bind_index_buffer(&self, buffer: Res<Buffer>, index_type: vk::IndexType) {
         unsafe {
             self.device().handle.cmd_bind_index_buffer(
                 self.buffer.handle,
@@ -2193,11 +2255,13 @@ impl<'a> CommandRecorder<'a> {
                 index_type,
             );
         }
+
+        self.buffer.bind_resource(buffer);
     }
 
     pub fn push_constants<T: bytemuck::NoUninit>(
         &self,
-        layout: &PipelineLayout,
+        layout: Res<PipelineLayout>,
         stage: vk::ShaderStageFlags,
         offset: u32,
         val: &T,
@@ -2212,9 +2276,11 @@ impl<'a> CommandRecorder<'a> {
                 bytes,
             );
         }
+
+        self.buffer.bind_resource(layout);
     }
 
-    pub fn bind_graphics_pipeline(&self, pipeline: &GraphicsPipeline) {
+    pub fn bind_graphics_pipeline(&self, pipeline: Res<GraphicsPipeline>) {
         let bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
             self.device().handle.cmd_bind_pipeline(
@@ -2223,6 +2289,8 @@ impl<'a> CommandRecorder<'a> {
                 pipeline.handle,
             );
         }
+
+        self.buffer.bind_resource(pipeline);
     }
     
     pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
@@ -2237,20 +2305,20 @@ impl<'a> CommandRecorder<'a> {
         }
     }
 
-    pub fn draw_indexed(&self, call: IndexedDrawCall) {
+    pub fn draw_indexed(&self, req: IndexedDrawReq) {
         unsafe {
             self.device().handle.cmd_draw_indexed(
                 self.buffer.handle,
-                call.index_count,
+                req.index_count,
                 1,
-                call.index_start,
-                call.vertex_offset,
-                call.instance,
+                req.index_start,
+                req.vertex_offset,
+                req.instance,
             );
         }
     }
 
-    pub fn update_buffer<T: bytemuck::NoUninit>(&self, buffer: &Buffer, val: &T) {
+    pub fn update_buffer<T: bytemuck::NoUninit>(&self, buffer: Res<Buffer>, val: &T) {
         assert_eq!(
             buffer.size(),
             mem::size_of::<T>() as vk::DeviceSize,
@@ -2265,59 +2333,50 @@ impl<'a> CommandRecorder<'a> {
                 bytemuck::bytes_of(val),
             );
         }
+
+        self.buffer.bind_resource(buffer);
     }
 
-    pub fn draw_indexed_indirect_count(
-        &self,
-        buffer: &Buffer,
-        offset: u64,
-        command_size: usize,
-        count_buffer: &Buffer,
-        count_offset: u64,
-        max_draw_count: u32,
-    ) {
+    pub fn draw_indexed_indirect_count(&self, req: &IndexedIndirectDrawReq) {
         unsafe {
             self.device().handle.cmd_draw_indexed_indirect_count(
                 self.buffer.handle,
-                buffer.handle,
-                offset,
-                count_buffer.handle,
-                count_offset,
-                max_draw_count,
-                command_size as u32,
+                req.draw_buffer.handle,
+                req.draw_offset,
+                req.count_buffer.handle,
+                req.count_offset,
+                req.max_draw_count,
+                req.draw_command_size as u32,
             );
         }
+
+        self.buffer.bind_resource(req.draw_buffer.clone());
+        self.buffer.bind_resource(req.count_buffer.clone());
     }
 
-
-    pub fn buffer_barrier(
-        &self,
-        buffer: &Buffer,
-        src_mask: vk::AccessFlags,
-        dst_mask: vk::AccessFlags,
-        src_stage: vk::PipelineStageFlags,
-        dst_stage: vk::PipelineStageFlags,
-    ) {
+    pub fn buffer_barrier(&self, req: &BufferBarrierReq) {
         let barriers = [vk::BufferMemoryBarrier::builder()
-            .src_access_mask(src_mask)
-            .dst_access_mask(dst_mask)
+            .src_access_mask(req.src_mask)
+            .dst_access_mask(req.dst_mask)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .buffer(buffer.handle)
+            .buffer(req.buffer.handle)
             .offset(0)
-            .size(buffer.size())
+            .size(req.buffer.size())
             .build()];
         unsafe {
             self.device().handle.cmd_pipeline_barrier(
                 self.buffer.handle,
-                src_stage,
-                dst_stage,
+                req.src_stage,
+                req.dst_stage,
                 vk::DependencyFlags::empty(),
                 &[],
                 &barriers,
                 &[],
             );
         }
+
+        self.buffer.bind_resource(req.buffer.clone());
     }
 }
 

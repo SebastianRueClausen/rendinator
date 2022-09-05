@@ -18,15 +18,13 @@ mod text;
 mod camera;
 
 use anyhow::Result;
-use glam::{UVec3, Vec3, Vec4, Mat3, Mat4};
+use glam::Vec3;
 use winit::event::VirtualKeyCode;
-use ash::vk;
 
 use std::time::Instant;
 use std::path::Path;
-use std::mem;
 
-use crate::core::Renderer;
+use crate::core::*;
 use crate::text::TextPass;
 use crate::scene::Scene;
 use crate::light::{Lights, PointLight};
@@ -125,158 +123,23 @@ fn main() -> Result<()> {
                             .update_view(frame_index, &camera)
                             .expect("failed to update view");
 
-                        recorder.bind_descriptor_sets(
-                            frame_index,
-                            vk::PipelineBindPoint::COMPUTE,
-                            lights.light_update.pipeline.layout(),
-                            &[&lights.light_update.descriptor],
-                        );
-
-                        let group_count = UVec3::new(lights.light_count.div_ceil(64), 1, 1);
-                        recorder.dispatch(&lights.light_update.pipeline, group_count);
-               
-                        recorder.buffer_barrier(
-                            &lights.light_pos_buffers[frame_index],
-                            vk::AccessFlags::SHADER_WRITE,
-                            vk::AccessFlags::SHADER_READ,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
-                        );
-
-                        recorder.bind_descriptor_sets(
-                            frame_index,
-                            vk::PipelineBindPoint::COMPUTE,
-                            lights.cluster_update.pipeline.layout(),
-                            &[&lights.cluster_update.descriptor],
-                        );
-
-                        let group_count = lights.cluster_info.info.cluster_subdivisions();
-                        recorder.dispatch(&lights.cluster_update.pipeline, group_count);
-               
-                        recorder.buffer_barrier(
-                            &lights.light_mask_buffers[frame_index],
-                            vk::AccessFlags::SHADER_WRITE,
-                            vk::AccessFlags::SHADER_READ,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
-                            vk::PipelineStageFlags::FRAGMENT_SHADER,
-                        );
-
-
-                        //
-                        // Cull primitives.
-                        //
-
-                        recorder.update_buffer(
-                            &scene.draw_count_buffers[frame_index],
-                            &scene::DrawCount {
-                                command_count: 0,
-                                primitive_count: scene.primitive_count,
-                            },
-                        );
-
-                        recorder.buffer_barrier(
-                            &scene.draw_count_buffers[frame_index],
-                            vk::AccessFlags::TRANSFER_WRITE,
-                            vk::AccessFlags::SHADER_WRITE,
-                            vk::PipelineStageFlags::TRANSFER,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
-                        );
-
-                        recorder.bind_descriptor_sets(
-                            frame_index,
-                            vk::PipelineBindPoint::COMPUTE,
-                            scene.cull_pipeline.layout(),
-                            &[&scene.cull_descriptor],
-                        );
-
-                        let frustrum_info = {
-                            fn normalize_plane(plane: Vec4) -> Vec4 {
-                                plane / plane.truncate().length()
-                            }
-
-                            let horizontal = normalize_plane(camera.proj.row(3) + camera.proj.row(0));
-                            let vertical = normalize_plane(camera.proj.row(3) + camera.proj.row(1));
-
-                            scene::FrustrumInfo {
-                                z_near: camera.z_near,
-                                z_far: camera.z_far,
-
-                                left: horizontal.x,
-                                right: horizontal.y,
-                                top: vertical.y,
-                                bottom: vertical.z,
-                            }
-                        };
-
-                        recorder.push_constants(
-                            scene.cull_pipeline.layout(),
-                            vk::ShaderStageFlags::COMPUTE,
-                            0,
-                            &frustrum_info,
-                        );
-
-                        let group_count = UVec3::new(scene.primitive_count.div_ceil(64), 1, 1);
-                        recorder.dispatch(&scene.cull_pipeline, group_count);
-
-                        recorder.buffer_barrier(
-                            &lights.light_mask_buffers[frame_index],
-                            vk::AccessFlags::SHADER_WRITE,
-                            vk::AccessFlags::INDIRECT_COMMAND_READ,
-                            vk::PipelineStageFlags::COMPUTE_SHADER,
-                            vk::PipelineStageFlags::DRAW_INDIRECT,
-                        );
+                        lights.prepare_lights(frame_index, recorder);
+                        scene.prepare_draw_buffers(frame_index, &lights, &camera, recorder);
                     },
                     |recorder, frame_index| {
-                        let index_type: vk::IndexType = scene.index_format.into();
+                        scene.draw(frame_index, recorder);
+                        skybox.draw(&camera, frame_index, recorder); 
 
-                        recorder.bind_index_buffer(&scene.index_buffer, index_type);
-                        recorder.bind_vertex_buffer(&scene.vertex_buffer);
-
-                        recorder.bind_graphics_pipeline(&scene.render_pipeline);
-
-                        recorder.bind_descriptor_sets(
-                            frame_index,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            scene.render_pipeline.layout(),
-                            &[&scene.descriptor, &scene.light_descriptor],
-                        );
-                               
-                        recorder.draw_indexed_indirect_count(
-                            &scene.draw_buffers[frame_index],
-                            0,
-                            mem::size_of::<scene::DrawCommand>(),
-                            &scene.draw_count_buffers[frame_index],
-                            0,
-                            scene.primitive_count,
-                        );
-
-                        recorder.bind_vertex_buffer(&skybox.cube_map.vertex_buffer);
-                        recorder.bind_graphics_pipeline(&skybox.pipeline);
-
-                        recorder.bind_descriptor_sets(
-                            frame_index,
-                            vk::PipelineBindPoint::GRAPHICS,
-                            skybox.pipeline.layout(),
-                            &[&skybox.descriptor],
-                        );
-
-                        let transform =
-                            camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));
-
-                        recorder.push_constants(
-                            &skybox.pipeline.layout(),
-                            vk::ShaderStageFlags::VERTEX,
-                            0,
-                            &transform,
-                        );
-
-                        recorder.draw(36, 0);
-               
                         text_pass.draw_text(recorder, frame_index, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
-                            texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
+                            let pos = format!(
+                                "position: ({}, {}, {})",
+                                camera.pos.x,
+                                camera.pos.y,
+                                camera.pos.z,
+                            );
 
-                            let pos = format!("position: ({}, {}, {})", camera.pos.x, camera.pos.y, camera.pos.z);
+                            texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
                             texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);
                         })
                         .expect("failed do draw text");

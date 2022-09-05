@@ -1,16 +1,17 @@
 use anyhow::Result;
-use glam::{Mat4, Vec3, UVec3};
+use glam::{Mat3, Mat4, Vec3};
 use ash::vk;
 
 use crate::core::*;
 use crate::resource::*;
+use crate::camera::Camera;
 use crate::light::Lights;
 
 use std::mem;
 
 struct Generator {
-    pipeline: ComputePipeline,
-    descriptor: DescriptorSet,
+    pipeline: Res<ComputePipeline>,
+    descriptor: Res<DescriptorSet>,
 
     size: u32,
 }
@@ -36,10 +37,10 @@ impl Generator {
             },
         ])?);
 
-        let descriptor = DescriptorSet::new_single(&renderer, layout.clone(), &[
+        let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout.clone(), &[
             DescriptorBinding::Image(sampler.clone(), [image_view.clone()]),
             DescriptorBinding::Buffer([lights.light_buffer.clone()]),
-        ])?;
+        ])?);
 
         let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");
         let shader = ShaderModule::new(&renderer, "main", code)?;
@@ -48,7 +49,7 @@ impl Generator {
             PipelineLayout::new(&renderer, &[], &[layout])?
         );
 
-        let pipeline = ComputePipeline::new(&renderer, layout, &shader)?;
+        let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
         let size = image_view.image().extent(0).width;
 
         Ok(Self { pipeline, descriptor, size })
@@ -56,23 +57,24 @@ impl Generator {
 
     fn generate(&self, renderer: &Renderer) -> Result<()> {
         renderer.compute_with(|recorder| {
-            recorder.bind_descriptor_sets(
-                0,
-                vk::PipelineBindPoint::COMPUTE,
-                self.pipeline.layout(),
-                &[&self.descriptor],
-            );
+            recorder.bind_descriptor_sets(&DescriptorBindReq {
+                frame_index: None,
+                bind_point: vk::PipelineBindPoint::COMPUTE,
+                layout: self.pipeline.layout(),
+                descriptors: &[self.descriptor.clone()],
+            });
 
-            let dim = UVec3::new(self.size / 8, self.size / 8, 6);
-            recorder.dispatch(&self.pipeline, dim);
+            recorder.dispatch(self.pipeline.clone(), [
+                self.size / 8, self.size / 8, 6,
+            ]);
         })
     }
 }
 
 pub struct Skybox {
     pub cube_map: CubeMap,
-    pub pipeline: GraphicsPipeline,
-    pub descriptor: DescriptorSet, 
+    pub pipeline: Res<GraphicsPipeline>,
+    pub descriptor: Res<DescriptorSet>, 
 
     #[allow(dead_code)]
     generator: Generator,
@@ -90,7 +92,7 @@ impl Skybox {
         })?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(&image, vk::ImageLayout::GENERAL);
+            recorder.transition_image_layout(image.clone(), vk::ImageLayout::GENERAL);
         })?;
 
         let array_view =
@@ -102,7 +104,7 @@ impl Skybox {
         generator.generate(renderer)?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(&image, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            recorder.transition_image_layout(image.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 
         let cube_view = ImageView::new(renderer, pool, image.clone(), vk::ImageViewType::CUBE)?;
@@ -116,12 +118,12 @@ impl Skybox {
             },
         ])?);
 
-        let descriptor = DescriptorSet::new_per_frame(&renderer, layout.clone(), &[
+        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout.clone(), &[
             DescriptorBinding::Image(sampler, [
                 cube_view.clone(), 
                 cube_view.clone(), 
             ]),
-        ])?;
+        ])?);
 
         let push_consts = [vk::PushConstantRange::builder()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -144,7 +146,7 @@ impl Skybox {
 
         let cull_mode = vk::CullModeFlags::FRONT;
 
-        let pipeline = GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
             vertex_attributes: &[vk::VertexInputAttributeDescription {
                 format: vk::Format::R32G32B32_SFLOAT,
                 binding: 0,
@@ -161,8 +163,31 @@ impl Skybox {
             depth_stencil_info,
             cull_mode,
             layout,
-        })?;
+        })?);
 
         Ok(Self { cube_map, descriptor, pipeline, generator })
+    }
+
+    pub fn draw(&self, camera: &Camera, frame_index: usize, recorder: &CommandRecorder) {
+        recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
+        recorder.bind_graphics_pipeline(self.pipeline.clone());
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            frame_index: Some(frame_index),
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+            layout: self.pipeline.layout(),
+            descriptors: &[self.descriptor.clone()],
+        });
+
+        let transform = camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));
+
+        recorder.push_constants(
+            self.pipeline.layout(),
+            vk::ShaderStageFlags::VERTEX,
+            0,
+            &transform,
+        );
+
+        recorder.draw(36, 0);
     }
 }

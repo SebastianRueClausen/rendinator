@@ -284,7 +284,7 @@ impl Lights {
         light_staging.get_mapped()?.fill(bytemuck::bytes_of(&light_data)); 
 
         renderer.transfer_with(|recorder| {
-            recorder.copy_buffers(&light_staging, &light_buffer)
+            recorder.copy_buffers(light_staging.clone(), light_buffer.clone())
         })?;
 
         let cluster_build = {
@@ -306,11 +306,11 @@ impl Lights {
                 },
             ])?);
 
-            let descriptor = DescriptorSet::new_single(&renderer, layout, &[
+            let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout, &[
                 DescriptorBinding::Buffer([cluster_info.buffer.clone()]),
                 DescriptorBinding::Buffer([camera_uniforms.proj_buffer.clone()]),
                 DescriptorBinding::Buffer([cluster_aabb_buffer.clone()]),
-            ])?;
+            ])?);
 
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_build.comp.spv");
             let shader = ShaderModule::new(&renderer, "main", code)?;
@@ -319,7 +319,7 @@ impl Lights {
                 PipelineLayout::new(&renderer, &[], &[descriptor.layout.clone()])?
             );
 
-            let pipeline = ComputePipeline::new(&renderer, layout, &shader)?;
+            let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
 
             ComputeProgram { pipeline, descriptor }
         };
@@ -343,11 +343,11 @@ impl Lights {
                 },
             ])?);
 
-            let descriptor = DescriptorSet::new_per_frame(&renderer, layout, &[
+            let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
                 DescriptorBinding::Buffer(camera_uniforms.view_buffers.clone()),
                 DescriptorBinding::Buffer([light_buffer.clone(), light_buffer.clone()]),
                 DescriptorBinding::Buffer(light_pos_buffers.clone()),
-            ])?;
+            ])?);
 
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/light_update.comp.spv");
             let shader = ShaderModule::new(&renderer, "main", code)?;
@@ -356,7 +356,7 @@ impl Lights {
                 PipelineLayout::new(&renderer, &[], &[descriptor.layout.clone()])?
             );
 
-            let pipeline = ComputePipeline::new(&renderer, layout, &shader)?;
+            let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
 
             ComputeProgram { pipeline, descriptor }
         };
@@ -385,12 +385,12 @@ impl Lights {
                 },
             ])?);
 
-            let descriptor = DescriptorSet::new_per_frame(&renderer, layout, &[
+            let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
                 DescriptorBinding::Buffer([light_buffer.clone(), light_buffer.clone()]),
                 DescriptorBinding::Buffer(light_pos_buffers.clone()),
                 DescriptorBinding::Buffer([cluster_aabb_buffer.clone(), cluster_aabb_buffer.clone()]),
                 DescriptorBinding::Buffer(light_mask_buffers.clone()),
-            ])?;
+            ])?);
 
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_update.comp.spv");
             let shader = ShaderModule::new(&renderer, "main", code)?;
@@ -399,7 +399,7 @@ impl Lights {
                 PipelineLayout::new(&renderer, &[], &[descriptor.layout.clone()])?
             );
 
-            let pipeline = ComputePipeline::new(&renderer, layout, &shader)?;
+            let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
 
             ComputeProgram { pipeline, descriptor }
         };
@@ -425,16 +425,55 @@ impl Lights {
 
     fn build_clusters(&self, renderer: &Renderer) -> Result<()> {
         renderer.compute_with(|recorder| {
-            recorder.bind_descriptor_sets(
-                0,
-                vk::PipelineBindPoint::COMPUTE,
-                self.cluster_build.pipeline.layout(),
-                &[&self.cluster_build.descriptor],
-            );
+            recorder.bind_descriptor_sets(&DescriptorBindReq {
+                frame_index: None,
+                bind_point: vk::PipelineBindPoint::COMPUTE,
+                layout: self.cluster_build.pipeline.layout(),
+                descriptors: &[self.cluster_build.descriptor.clone()],
+            });
 
             let subdivisions = self.cluster_info.info.cluster_subdivisions();
-            recorder.dispatch(&self.cluster_build.pipeline, subdivisions);
+            recorder.dispatch(self.cluster_build.pipeline.clone(), subdivisions.into());
         })
+    }
+
+    pub fn prepare_lights(&self, frame_index: usize, recorder: &CommandRecorder) {
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            frame_index: Some(frame_index),
+            bind_point: vk::PipelineBindPoint::COMPUTE,
+            layout: self.light_update.pipeline.layout(),
+            descriptors: &[self.light_update.descriptor.clone()],
+        });
+
+        recorder.dispatch(self.light_update.pipeline.clone(), [
+            self.light_count.div_ceil(64), 1, 1,
+        ]);
+
+        recorder.buffer_barrier(&BufferBarrierReq {
+            buffer: self.light_pos_buffers[frame_index].clone(),
+            src_mask: vk::AccessFlags::SHADER_WRITE,
+            dst_mask: vk::AccessFlags::SHADER_READ,
+            src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+        });
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            frame_index: Some(frame_index),
+            bind_point: vk::PipelineBindPoint::COMPUTE,
+            layout: self.cluster_update.pipeline.layout(),
+            descriptors: &[self.cluster_update.descriptor.clone()],
+        });
+
+        let group_count = self.cluster_info.info.cluster_subdivisions();
+        recorder.dispatch(self.cluster_update.pipeline.clone(), group_count.into());
+
+        recorder.buffer_barrier(&BufferBarrierReq {
+            buffer: self.light_mask_buffers[frame_index].clone(),
+            src_mask: vk::AccessFlags::SHADER_WRITE,
+            dst_mask: vk::AccessFlags::SHADER_READ,
+            src_stage:vk::PipelineStageFlags::COMPUTE_SHADER,
+            dst_stage:vk::PipelineStageFlags::FRAGMENT_SHADER,
+        });
     }
 
     /// Handle window resize.
@@ -450,8 +489,8 @@ impl Lights {
 }
 
 pub struct ComputeProgram {
-    pub descriptor: DescriptorSet,
-    pub pipeline: ComputePipeline,
+    pub descriptor: Res<DescriptorSet>,
+    pub pipeline: Res<ComputePipeline>,
 }
 
 const MAX_LIGHT_COUNT: usize = 256;
