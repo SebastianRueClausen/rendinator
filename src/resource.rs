@@ -242,24 +242,18 @@ pub struct Image {
 
     kind: ImageKind,
 
-    pub extent: vk::Extent3D,
-    pub format: vk::Format,
+    extent: vk::Extent3D,
+    format: vk::Format,
 
-    pub array_layers: u32,
-    pub mip_levels: u32,
+    mip_levels: u32,
 
     pub layout: Cell<vk::ImageLayout>,
 
-    pub range: MemoryRange,
-    pub block: Rc<MemoryBlock>,
+    range: MemoryRange,
+    block: Rc<MemoryBlock>,
 }
 
 impl Image {
-    #[allow(dead_code)]
-    pub fn size(&self) -> vk::DeviceSize {
-        self.range.end - self.range.start
-    }
-
     pub fn new(
         renderer: &Renderer,
         pool: &ResourcePool,
@@ -347,7 +341,6 @@ impl Image {
             extent: req.extent,
             format: req.format,
             range: 0..memory_req.size,
-            array_layers,
             layout,
             handle,
             block,
@@ -355,8 +348,37 @@ impl Image {
         }))
     }
 
+    #[allow(dead_code)]
+    pub fn size(&self) -> vk::DeviceSize {
+        self.range.end - self.range.start
+    }
+
     pub fn layout(&self) -> vk::ImageLayout {
         self.layout.get()
+    }
+
+    pub fn aspect_flags(&self) -> vk::ImageAspectFlags {
+        if let ImageKind::Depth { .. } = &self.kind {
+            vk::ImageAspectFlags::DEPTH
+        } else {
+            vk::ImageAspectFlags::COLOR
+        }
+    }
+
+    pub fn layer_count(&self) -> u32 {
+        if let ImageKind::CubeMap = &self.kind {
+            6
+        } else {
+            1
+        }
+    }
+
+    pub fn format(&self) -> vk::Format {
+        self.format
+    }
+
+    pub fn mip_level_count(&self) -> u32 {
+        self.mip_levels
     }
 
     pub fn extent(&self, mip_level: u32) -> vk::Extent3D {
@@ -395,29 +417,17 @@ impl ImageView {
         image: Res<Image>,
         view_type: vk::ImageViewType,
     ) -> Result<Res<Self>> {
-        let layer_count = if let ImageKind::CubeMap = image.kind {
-            6
-        } else {
-            1
-        };
-
-        let aspect_mask = if let ImageKind::Depth { .. } = image.kind {
-            vk::ImageAspectFlags::DEPTH
-        } else {
-            vk::ImageAspectFlags::COLOR
-        };
-
         let subresource_range = vk::ImageSubresourceRange::builder()
-            .aspect_mask(aspect_mask)
+            .aspect_mask(image.aspect_flags())
             .base_mip_level(0)
-            .level_count(image.mip_levels)
+            .level_count(image.mip_level_count())
             .base_array_layer(0)
-            .layer_count(layer_count);
+            .layer_count(image.layer_count());
 
         let view_info = vk::ImageViewCreateInfo::builder()
             .view_type(view_type)
             .subresource_range(*subresource_range)
-            .format(image.format)
+            .format(image.format())
             .image(image.handle)
             .build();
 

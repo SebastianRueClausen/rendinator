@@ -2050,10 +2050,10 @@ impl<'a> CommandRecorder<'a> {
 
     pub fn copy_buffer_to_image(&self, src: &Buffer, dst: &Image, mip_level: u32) {
         let subresource = vk::ImageSubresourceLayers::builder()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .aspect_mask(dst.aspect_flags())
             .mip_level(mip_level)
             .base_array_layer(0)
-            .layer_count(dst.array_layers)
+            .layer_count(dst.layer_count())
             .build();
         
         let extent = dst.extent(mip_level);
@@ -2081,9 +2081,9 @@ impl<'a> CommandRecorder<'a> {
         let subresource = vk::ImageSubresourceRange::builder()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
             .base_mip_level(0)
-            .level_count(image.mip_levels)
+            .level_count(image.mip_level_count())
             .base_array_layer(0)
-            .layer_count(image.array_layers)
+            .layer_count(image.layer_count())
             .build();
         let mut barrier = vk::ImageMemoryBarrier::builder()
             .image(image.handle)
