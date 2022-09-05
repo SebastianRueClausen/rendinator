@@ -1,3 +1,5 @@
+#ifndef MESH_GLSL
+#define MESH_GLSL
 
 struct DrawCommand {
 	uint index_count;
@@ -40,3 +42,4 @@ struct InstanceData {
 	mat4 inverse_transpose_transform;
 };
 
+#endif

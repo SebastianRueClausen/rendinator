@@ -1,3 +1,5 @@
+#ifndef LIGHT_GLSL
+#define LIGHT_GLSL
 
 const uint MAX_LIGHT_COUNT = 256;
 
@@ -49,3 +51,5 @@ uint cluster_index(uvec3 subdivisions, uvec3 coords) {
 		+ coords.y * subdivisions.x
 		+ coords.x;
 }
+
+#endif

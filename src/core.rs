@@ -2364,6 +2364,7 @@ impl<'a> CommandRecorder<'a> {
             .offset(0)
             .size(req.buffer.size())
             .build()];
+
         unsafe {
             self.device().handle.cmd_pipeline_barrier(
                 self.buffer.handle,

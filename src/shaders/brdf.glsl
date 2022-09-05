@@ -1,5 +1,5 @@
-#ifndef BRDF
-#define BRDF
+#ifndef BRDF_GLSL
+#define BRDF_GLSL
 
 const float PI = 3.14159265358979323846264;
 

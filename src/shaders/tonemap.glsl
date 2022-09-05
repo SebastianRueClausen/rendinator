@@ -1,5 +1,5 @@
-#ifndef TONEMAP
-#define TONEMAP
+#ifndef TONEMAP_GLSL
+#define TONEMAP_GLSL
 
 vec3 aces_approx_tonemap(vec3 color) {
     color *= 0.6;
