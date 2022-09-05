@@ -5,6 +5,7 @@
 #extension GL_EXT_nonuniform_qualifier: require
 
 #include "light.glsl"
+#include "tonemap.glsl"
 
 #ifdef CLUSTER_DEBUG
 #include "cluster_debug.glsl"

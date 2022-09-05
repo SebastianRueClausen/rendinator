@@ -3,18 +3,12 @@
 
 const float PI = 3.14159265358979323846264;
 
-// Earth radius in meters.
 const float EARTH_RADIUS = 6371000;
-
-// The center of the earth assuming `vec3(0.0)` is on the surface.
 const vec3 EARTH_CENTER = vec3(0.0, EARTH_RADIUS, 0.0);
 
-// The height of the atmosphere in meters.
-const float ATMOSPHERE_HEIGHT = 100000.0;
-
-// Height of which mie and reyleigh scattering happens in the atmosphere in meters.
-const float MIE_HEIGHT = ATMOSPHERE_HEIGHT * 0.012;
-const float RAYLEIGH_HEIGHT = ATMOSPHERE_HEIGHT * 0.08;
+const float ATMOS_HEIGHT = 100000.0;
+const float MIE_HEIGHT = ATMOS_HEIGHT * 0.012;
+const float RAYLEIGH_HEIGHT = ATMOS_HEIGHT * 0.08;
 
 // The ozone layer start at around 10 km height and has a width of 30 km.
 const float OZONE_CENTER_HEIGHT = 25000.0;
@@ -27,29 +21,25 @@ const vec3 OZONE_COEFF = vec3(0.650, 1.881, 0.085) * 1e-6;
 // The amount of time a ray should sample.
 const uint RAY_SAMPLE_COUNT = 16;
 
-vec2 ray_sphere_intersection(
-		vec3 origin,
-		const vec3 dir,
-		const vec3 center,
-		const float radius
+// The intersection between a ray and sphere.
+//
+// Assume theres always a hit.
+vec2 ray_sphere(
+	const vec3 origin,
+	const vec3 dir,
+	const vec3 center,
+	const float radius
 ) {
-	origin -= center;
+	const vec3 ray_origin = origin - center;
 
 	const float a = dot(dir, dir);
-	const float b = 2.0 * dot(dir, origin);
-	const float c = dot(origin, origin) - (radius * radius);
+	const float b = 2.0 * dot(ray_origin, dir);
+	const float c = dot(ray_origin, ray_origin) - (radius * radius);
 
-	const float disc = (b * b) - 4 * a * c;
+	// Square root of discriminant.
+	const float disc = sqrt(b * b - 4 * a * c);
 
-	if (disc < 0.0) {
-		return vec2(-1);
-	}
-
-	return vec2(-b - disc, -b + sqrt(disc)) / (2.0 * a);
-}
-
-float atmosphere_height(const vec3 world_pos) {
-	return distance(world_pos, EARTH_CENTER) - EARTH_RADIUS;
+	return vec2(-b - disc, -b + disc) / (2.0 * a);
 }
 
 float rayleigh_density(const float height) {
@@ -75,22 +65,21 @@ float mie_phase(const float cos_theta) {
 	return (1.0 - K * K) / ((4.0 * PI) * pow(1.0 - K * cos_theta, 2));
 }
 
-vec3 calc_optical_depth(const vec3 origin, const vec3 dir) {
-	const vec2 intersection = ray_sphere_intersection(origin, dir, EARTH_CENTER, EARTH_RADIUS);
+vec3 int_optical_depth(const vec3 origin, const vec3 dir) {
+	const vec2 intersection = ray_sphere(origin, dir, EARTH_CENTER, EARTH_RADIUS + ATMOS_HEIGHT);
 	const float ray_length = intersection.y;
 
 	const float step_size = ray_length / RAY_SAMPLE_COUNT;
 
 	vec3 optical_depth = vec3(0);
 
-	for (uint i = 0; i < RAY_SAMPLE_COUNT; ++i) {
+	const uint SAMPLE_COUNT = 8;
+	for (uint i = 0; i < SAMPLE_COUNT; ++i) {
 		const vec3 pos = origin + dir * (i + 0.5) * step_size;
-		const float height = atmosphere_height(pos);
-		const vec3 density = vec3(
-			rayleigh_density(height),
-			mie_density(height),
-			ozone_density(height)
-		);
+		const float height = distance(pos, EARTH_CENTER) - EARTH_RADIUS;
+
+		const vec3 density =
+			vec3(rayleigh_density(height), mie_density(height), ozone_density(height));
 
 		optical_depth += density * step_size;
 	}
@@ -106,27 +95,19 @@ vec3 absorb(const vec3 optical_depth) {
 	));
 }
 
-vec3 integrate_scattering(
-	vec3 ray_origin,
+vec3 int_scattering(
+	const vec3 ray_origin,
 	const vec3 ray_dir,
 	const vec3 light_dir,
 	const vec3 light_color
 ) {
-	const float ray_height = atmosphere_height(ray_origin);
-	const float sample_dist_exp = 7.0;
-	
-	const vec2 intersection =
-		ray_sphere_intersection(ray_origin, ray_dir, EARTH_CENTER, EARTH_RADIUS + ATMOSPHERE_HEIGHT);
+	// Intersection with the edge of the atmosphere.
+	const vec2 intersection = ray_sphere(ray_origin, ray_dir, EARTH_CENTER, EARTH_RADIUS + ATMOS_HEIGHT);
 
-	float ray_len = intersection.y;
-
-	if (intersection.x > 0.0) {
-		ray_origin += ray_dir * intersection.x;	
-		ray_len -= intersection.x;
-	}
+	// The length of the ray will be from the origin to the edge of the atmosphere.
+	const float ray_len = intersection.y;
 
 	const float cos_theta = dot(ray_dir, light_dir);
-
 	const float rayleigh_phase = rayleigh_phase(cos_theta);
 	const float mie_phase = mie_phase(cos_theta);
 
@@ -134,14 +115,17 @@ vec3 integrate_scattering(
 	vec3 rayleigh = vec3(0.0);
 	vec3 mie = vec3(0.0);
 
-	float prev_ray_time = 0.0;
+	// The distance marched before each iteration.
+	float prev_marched = 0.0;
 
-	for (uint i = 0; i < RAY_SAMPLE_COUNT; ++i) {
-		const float ray_time = pow(float(i) / RAY_SAMPLE_COUNT, sample_dist_exp) * ray_len;
-		const float step_size = ray_time - prev_ray_time;
+	const uint SAMPLE_COUNT = 16;
+	for (uint i = 0; i < SAMPLE_COUNT; ++i) {
+		// Sample at greater and greater intervals. 7 is just an arbitrary exponent.
+		const float marched = pow(float(i) / SAMPLE_COUNT, 7) * ray_len;
+		const float step_size = marched - prev_marched;
 
-		const vec3 pos = ray_origin + ray_dir * mix(prev_ray_time, ray_time, 0.5);
-		const float height = atmosphere_height(pos);
+		const vec3 pos = ray_origin + ray_dir * marched;
+		const float height = distance(pos, EARTH_CENTER) - EARTH_RADIUS;
 
 		const vec3 density =
 			vec3(rayleigh_density(height), mie_density(height), ozone_density(height));
@@ -149,8 +133,7 @@ vec3 integrate_scattering(
 		optical_depth += density * step_size;
 
 		const vec3 view_transmittance = absorb(optical_depth);
-		const vec3 optical_depth_light = calc_optical_depth(pos, light_dir);
-		const vec3 light_transmittance = absorb(optical_depth_light);
+		const vec3 light_transmittance = absorb(int_optical_depth(pos, light_dir));
 
 		rayleigh += view_transmittance
 			* light_transmittance
@@ -164,11 +147,11 @@ vec3 integrate_scattering(
 			* density.y
 			* step_size;
 
-		prev_ray_time = ray_time;
+		prev_marched = marched;
 	}
-	
-	const vec3 color = (rayleigh * RAYLEIGH_COEFF + mie * MIE_COEFF) * light_color * 20.0;
-	const vec3 transmittance = absorb(optical_depth);
+
+	const float EXPOSURE = 20.0;
+	const vec3 color = (rayleigh * RAYLEIGH_COEFF + mie * MIE_COEFF) * light_color * EXPOSURE;
 
 	return color;
 }
