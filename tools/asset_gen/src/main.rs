@@ -94,6 +94,10 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
         ImageFormat::Bc(bc) => {
             use intel_tex_2::{RgbaSurface, divide_up_by_multiple};
 
+            // Subtract 2 from the mip count to exclude mip levels of size 1x1 and 2x2 , which
+            // isn't allowed for block compressed textures.
+            let mip_levels = mip_levels - 2;
+
             let (width, height) = (image.width(), image.height());
             let mips: Vec<Vec<u8>> = (0..mip_levels)
                 .map(|level| {
@@ -283,7 +287,12 @@ fn new(path: &Path) -> Result<Self> {
             }
         };
 
-        let mip_levels = (image.width().max(image.height()) as f32).log2().floor() as usize;
+        // Calculate the number of mip levels.
+        //
+        // `(image.width().max(image.height()) as f32).log2().floor()` is the amount of times the 
+        // texture can be halved in size until it's 1x1 pixels big. The `+ 1` is to include the
+        // full resolution texture.
+        let mip_levels = (image.width().max(image.height()) as f32).log2().floor() as usize + 1;
 
         Ok(create_image(image, format, mip_levels))
     }
