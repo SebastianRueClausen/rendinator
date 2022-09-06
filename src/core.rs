@@ -1211,7 +1211,7 @@ impl Swapchain {
             }
         };
 
-        let preferred_present_mode = vk::PresentModeKHR::MAILBOX;
+        let preferred_present_mode = vk::PresentModeKHR::FIFO;
 
         let present_mode = _present_modes
             .iter()
@@ -1706,6 +1706,10 @@ impl DescriptorSet {
         };
 
         Ok(Self { device, layout, pool, sets, resources })
+    }
+
+    pub fn layout(&self) -> Res<DescriptorSetLayout> {
+        self.layout.clone()
     }
 }
 

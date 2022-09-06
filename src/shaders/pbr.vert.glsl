@@ -6,17 +6,17 @@
 
 #include "mesh.glsl"
 
-layout (set = 0, binding = 0) uniform View {
+layout (set = 0, binding = 1) uniform View {
 	vec4 eye;
 	mat4 view;
 	mat4 proj_view;
 };
 
-layout (std430, set = 0, binding = 2) buffer Instances {
+layout (std430, set = 2, binding = 0) buffer Instances {
 	InstanceData instance_data[];
 };
 
-layout (std430, set = 0, binding = 3) buffer DrawBuffer {
+layout (std430, set = 2, binding = 1) buffer DrawBuffer {
 	DrawCommand draw_commands[];
 };
 

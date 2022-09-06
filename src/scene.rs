@@ -90,12 +90,9 @@ pub struct FrustrumInfo {
 
 pub struct Scene {
     pub render_pipeline: Res<GraphicsPipeline>,
-
-    pub light_descriptor: Res<DescriptorSet>,
-    pub descriptor: Res<DescriptorSet>,
-
-    pub cull_descriptor: Res<DescriptorSet>,
     pub cull_pipeline: Res<ComputePipeline>,
+
+    pub descriptor: Res<DescriptorSet>,
 
     pub primitive_count: u32,
 
@@ -362,59 +359,27 @@ impl Scene {
     
         let views = views?;
 
-        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-            LayoutBinding {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
-                array_count: None,
-            },
-        ])?);
-
-        let light_descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
-            DescriptorBinding::Buffer([
-                lights.cluster_info.buffer.clone(), 
-                lights.cluster_info.buffer.clone(), 
-            ]),
-            DescriptorBinding::Buffer([
-                lights.light_buffer.clone(),
-                lights.light_buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer(
-                lights.light_mask_buffers.clone()
-            ),
-        ])?);
-
         let sampler = pool.alloc(TextureSampler::new(&renderer)?);
 
         let descriptor_layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
             LayoutBinding {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             LayoutBinding {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX,
+                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             LayoutBinding {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             LayoutBinding {
@@ -430,26 +395,15 @@ impl Scene {
         ])?);
 
         let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
-            DescriptorBinding::Buffer(camera_uniforms.view_buffers.clone()),
-            DescriptorBinding::Buffer([
-                camera_uniforms.proj_buffer.clone(),
-                camera_uniforms.proj_buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer([
-                instance_buffer.clone(),
-                instance_buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer(
-                draw_buffers.clone(),
-            ),
+            DescriptorBinding::Buffer([instance_buffer.clone(), instance_buffer.clone()]),
+            DescriptorBinding::Buffer(draw_buffers.clone()),
+            DescriptorBinding::Buffer([primitive_buffer.clone(), primitive_buffer.clone()]),
+            DescriptorBinding::Buffer(draw_count_buffers.clone()),
             DescriptorBinding::Image(sampler.clone(), [
                 skybox.cube_map.image_view.clone(),
                 skybox.cube_map.image_view.clone(),
             ]),
-            DescriptorBinding::VariableImageArray(sampler.clone(), [
-                &views,
-                &views,
-            ]),
+            DescriptorBinding::VariableImageArray(sampler.clone(), [&views, &views]),
         ])?);
 
         let render_pipeline = {
@@ -465,8 +419,9 @@ impl Scene {
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
 
             let layout = pool.alloc(PipelineLayout::new(&renderer, &[], &[
-                descriptor_layout.clone(),
-                light_descriptor.layout.clone(),
+                camera_uniforms.descriptor.layout(),
+                lights.descriptor.layout(),
+                descriptor.layout(),
             ])?);
 
             pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
@@ -509,42 +464,6 @@ impl Scene {
             })?)
         };
 
-        let descriptor_layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-        ])?);
-
-        let cull_descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
-            DescriptorBinding::Buffer(draw_count_buffers.clone()),
-            DescriptorBinding::Buffer(draw_buffers.clone()),
-            DescriptorBinding::Buffer([
-                primitive_buffer.clone(),
-                primitive_buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer([
-                instance_buffer.clone(),
-                instance_buffer.clone(),
-            ]),
-        ])?);
-
         let cull_pipeline = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
 
@@ -557,7 +476,7 @@ impl Scene {
                 .build()];
 
             let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
-                descriptor_layout.clone(),
+                descriptor.layout(),
             ])?);
 
             pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
@@ -567,10 +486,8 @@ impl Scene {
         let primitive_count = primitives.len() as u32;
 
         Ok(Self {
-            cull_descriptor,
             cull_pipeline,
             primitive_count,
-            light_descriptor,
             descriptor,
             render_pipeline,
             vertex_buffer,
@@ -610,7 +527,7 @@ impl Scene {
             frame_index: Some(frame_index),
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.cull_pipeline.layout(),
-            descriptors: &[self.cull_descriptor.clone()],
+            descriptors: &[self.descriptor.clone()],
         });
 
         fn normalize_plane(plane: Vec4) -> Vec4 {
@@ -642,7 +559,7 @@ impl Scene {
         ]);
 
         recorder.buffer_barrier(&BufferBarrierReq {
-            buffer: lights.light_mask_buffers[frame_index].clone(),
+            buffer: self.draw_buffers[frame_index].clone(),
             src_mask: vk::AccessFlags::SHADER_WRITE,
             dst_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
             src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
@@ -650,7 +567,13 @@ impl Scene {
         });
     }
 
-    pub fn draw(&self, frame_index: usize, recorder: &CommandRecorder) {
+    pub fn draw(
+        &self,
+        frame_index: usize,
+        camera_uniforms: &CameraUniforms,
+        lights: &Lights,
+        recorder: &CommandRecorder,
+    ) {
         let index_type: vk::IndexType = self.index_format.into();
 
         recorder.bind_index_buffer(self.index_buffer.clone(), index_type);
@@ -663,8 +586,9 @@ impl Scene {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.render_pipeline.layout(),
             descriptors: &[
+                camera_uniforms.descriptor.clone(),
+                lights.descriptor.clone(),
                 self.descriptor.clone(),
-                self.light_descriptor.clone(),
             ],
         });
         

@@ -13,35 +13,35 @@
 
 #include "brdf.glsl"
 
-readonly layout (std140, set = 0, binding = 0) uniform View {
-	vec4 eye;
-	mat4 view;
-	mat4 proj_view;
-};
-
-readonly layout (std140, set = 0, binding = 1) uniform Proj {
+layout (std140, set = 0, binding = 0) readonly uniform Proj {
 	mat4 proj;
 	mat4 inverse_proj;
 	vec2 screen_dimensions;
 };
 
-layout (set = 0, binding = 4) uniform samplerCube skybox_sampler;
-layout (set = 0, binding = 5) uniform sampler2D textures[];
+layout (std140, set = 0, binding = 1) readonly uniform View {
+	vec4 eye;
+	mat4 view;
+	mat4 proj_view;
+};
 
-readonly layout (std140, set = 1, binding = 0) uniform Cluster {
+layout (std140, set = 1, binding = 0) readonly uniform Cluster {
 	ClusterInfo cluster_info;
 };
 
-readonly layout (std430, set = 1, binding = 1) buffer Lights {
+layout (std430, set = 1, binding = 2) readonly buffer Lights {
 	uint point_light_count;
 
 	DirLight dir_light;
 	PointLight point_lights[];
 };
 
-readonly layout (std430, set = 1, binding = 2) buffer LightMasks {
+layout (std430, set = 1, binding = 4) readonly buffer LightMasks {
 	LightMask light_masks[];
 };
+
+layout (set = 2, binding = 4) uniform samplerCube skybox_sampler;
+layout (set = 2, binding = 5) uniform sampler2D textures[];
 
 layout (location = 0) in vec2 in_texcoord;
 layout (location = 1) in vec3 in_world_normal;

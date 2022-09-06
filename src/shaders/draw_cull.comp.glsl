@@ -11,9 +11,8 @@ layout (std140, push_constant) uniform PushConst {
 	FrustrumInfo frustrum_info;		
 };
 
-layout (std430, set = 0, binding = 0) buffer DrawCount {
-	uint command_count;
-	uint primitive_count;
+layout (std430, set = 0, binding = 0) readonly buffer Instances {
+	InstanceData instances[];
 };
 
 layout (std430, set = 0, binding = 1) writeonly buffer DrawBuffer {
@@ -24,8 +23,9 @@ layout (std430, set = 0, binding = 2) readonly buffer Primitives {
 	Primitive primitives[];	
 };
 
-layout (std430, set = 0, binding = 3) readonly buffer Instances {
-	InstanceData instances[];
+layout (std430, set = 0, binding = 3) buffer DrawCount {
+	uint command_count;
+	uint primitive_count;
 };
 
 void main() {
@@ -50,16 +50,15 @@ void main() {
 	if (visible) {
 		const uint command_id = atomicAdd(command_count, 1);
 
-		draw_commands[command_id].index_count = primitive.index_count;
-		draw_commands[command_id].first_index = primitive.first_index;
-
-		draw_commands[command_id].instance_count = 1;
-		draw_commands[command_id].first_instance = primitive.instance;
-
-		draw_commands[command_id].vertex_offset = primitive.vertex_offset;
-
-		draw_commands[command_id].albedo_map = primitive.albedo_map;
-		draw_commands[command_id].specular_map = primitive.specular_map;
-		draw_commands[command_id].normal_map = primitive.normal_map;
+		draw_commands[command_id] = DrawCommand(
+			primitive.index_count,
+			1,
+			primitive.first_index,
+			primitive.vertex_offset,
+			primitive.instance,
+			primitive.albedo_map,
+			primitive.specular_map,
+			primitive.normal_map
+		);
 	}
 }

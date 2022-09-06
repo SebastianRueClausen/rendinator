@@ -226,11 +226,13 @@ pub struct Lights {
     pub light_mask_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
 
     pub light_count: u32,
-
     pub cluster_info: ClusterInfoBuffer,
-    pub cluster_build: ComputeProgram,
-    pub light_update: ComputeProgram,
-    pub cluster_update: ComputeProgram,
+
+    pub descriptor: Res<DescriptorSet>,
+
+    cluster_build: Res<ComputePipeline>,
+    cluster_update: Res<ComputePipeline>,
+    light_update: Res<ComputePipeline>,
 }
 
 impl Lights {
@@ -287,121 +289,77 @@ impl Lights {
             recorder.copy_buffers(light_staging.clone(), light_buffer.clone())
         })?;
 
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
+                array_count: None,
+            },
+        ])?);
+
+        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
+            DescriptorBinding::Buffer([
+                cluster_info.buffer.clone(),
+                cluster_info.buffer.clone(),
+            ]),
+            DescriptorBinding::Buffer([
+                cluster_aabb_buffer.clone(),
+                cluster_aabb_buffer.clone(),
+            ]),
+            DescriptorBinding::Buffer([
+                light_buffer.clone(),
+                light_buffer.clone(),
+            ]),
+            DescriptorBinding::Buffer(light_pos_buffers.clone()),
+            DescriptorBinding::Buffer(light_mask_buffers.clone()),
+        ])?);
+
+        let layout = pool.alloc(
+            PipelineLayout::new(&renderer, &[], &[
+                camera_uniforms.descriptor.layout(),
+                descriptor.layout(),
+            ])?
+        );
+
         let cluster_build = {
-            let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-                LayoutBinding {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-            ])?);
-
-            let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout, &[
-                DescriptorBinding::Buffer([cluster_info.buffer.clone()]),
-                DescriptorBinding::Buffer([camera_uniforms.proj_buffer.clone()]),
-                DescriptorBinding::Buffer([cluster_aabb_buffer.clone()]),
-            ])?);
-
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_build.comp.spv");
             let shader = ShaderModule::new(&renderer, "main", code)?;
 
-            let layout = pool.alloc(
-                PipelineLayout::new(&renderer, &[], &[descriptor.layout.clone()])?
-            );
-
-            let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
-
-            ComputeProgram { pipeline, descriptor }
+            pool.alloc(ComputePipeline::new(&renderer, layout.clone(), &shader)?)
         };
 
         let light_update = {
-            let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-                LayoutBinding {
-                    ty: vk::DescriptorType::UNIFORM_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-            ])?);
-
-            let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
-                DescriptorBinding::Buffer(camera_uniforms.view_buffers.clone()),
-                DescriptorBinding::Buffer([light_buffer.clone(), light_buffer.clone()]),
-                DescriptorBinding::Buffer(light_pos_buffers.clone()),
-            ])?);
-
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/light_update.comp.spv");
             let shader = ShaderModule::new(&renderer, "main", code)?;
 
-            let layout = pool.alloc(
-                PipelineLayout::new(&renderer, &[], &[descriptor.layout.clone()])?
-            );
-
-            let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
-
-            ComputeProgram { pipeline, descriptor }
+            pool.alloc(ComputePipeline::new(&renderer, layout.clone(), &shader)?)
         };
 
         let cluster_update = {
-            let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-                LayoutBinding {
-                    ty: vk::DescriptorType::STORAGE_BUFFER,
-                    stage: vk::ShaderStageFlags::COMPUTE,
-                    array_count: None,
-                },
-            ])?);
-
-            let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
-                DescriptorBinding::Buffer([light_buffer.clone(), light_buffer.clone()]),
-                DescriptorBinding::Buffer(light_pos_buffers.clone()),
-                DescriptorBinding::Buffer([cluster_aabb_buffer.clone(), cluster_aabb_buffer.clone()]),
-                DescriptorBinding::Buffer(light_mask_buffers.clone()),
-            ])?);
-
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_update.comp.spv");
             let shader = ShaderModule::new(&renderer, "main", code)?;
 
-            let layout = pool.alloc(
-                PipelineLayout::new(&renderer, &[], &[descriptor.layout.clone()])?
-            );
-
-            let pipeline = pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?);
-
-            ComputeProgram { pipeline, descriptor }
+            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
         };
 
         let light_count = lights.len() as u32;
@@ -416,36 +374,48 @@ impl Lights {
             cluster_build,
             light_update,
             cluster_update,
+            descriptor,
         };
 
-        lights.build_clusters(renderer)?;
+        lights.build_clusters(renderer, camera_uniforms)?;
 
         Ok(lights)
     }
 
-    fn build_clusters(&self, renderer: &Renderer) -> Result<()> {
+    fn build_clusters(&self, renderer: &Renderer, camera_uniforms: &CameraUniforms) -> Result<()> {
         renderer.compute_with(|recorder| {
             recorder.bind_descriptor_sets(&DescriptorBindReq {
                 frame_index: None,
                 bind_point: vk::PipelineBindPoint::COMPUTE,
-                layout: self.cluster_build.pipeline.layout(),
-                descriptors: &[self.cluster_build.descriptor.clone()],
+                layout: self.cluster_build.layout(),
+                descriptors: &[
+                    camera_uniforms.descriptor.clone(),
+                    self.descriptor.clone()
+                ],
             });
 
             let subdivisions = self.cluster_info.info.cluster_subdivisions();
-            recorder.dispatch(self.cluster_build.pipeline.clone(), subdivisions.into());
+            recorder.dispatch(self.cluster_build.clone(), subdivisions.into());
         })
     }
 
-    pub fn prepare_lights(&self, frame_index: usize, recorder: &CommandRecorder) {
+    pub fn prepare_lights(
+        &self,
+        frame_index: usize,
+        camera_uniforms: &CameraUniforms,
+        recorder: &CommandRecorder,
+    ) {
         recorder.bind_descriptor_sets(&DescriptorBindReq {
             frame_index: Some(frame_index),
             bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.light_update.pipeline.layout(),
-            descriptors: &[self.light_update.descriptor.clone()],
+            layout: self.light_update.layout(),
+            descriptors: &[
+                camera_uniforms.descriptor.clone(),
+                self.descriptor.clone(),
+            ],
         });
 
-        recorder.dispatch(self.light_update.pipeline.clone(), [
+        recorder.dispatch(self.light_update.clone(), [
             self.light_count.div_ceil(64), 1, 1,
         ]);
 
@@ -457,15 +427,8 @@ impl Lights {
             dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
         });
 
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
-            frame_index: Some(frame_index),
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.cluster_update.pipeline.layout(),
-            descriptors: &[self.cluster_update.descriptor.clone()],
-        });
-
         let group_count = self.cluster_info.info.cluster_subdivisions();
-        recorder.dispatch(self.cluster_update.pipeline.clone(), group_count.into());
+        recorder.dispatch(self.cluster_update.clone(), group_count.into());
 
         recorder.buffer_barrier(&BufferBarrierReq {
             buffer: self.light_mask_buffers[frame_index].clone(),
@@ -482,15 +445,15 @@ impl Lights {
     ///
     /// This must only be called when the device is idle, e.g. no rendering is happening, as
     /// during so will upload data to a buffer which might be in use.
-    pub fn handle_resize(&mut self, renderer: &Renderer, camera: &Camera) -> Result<()> {
+    pub fn handle_resize(
+        &mut self,
+        renderer: &Renderer,
+        camera_uniforms: &CameraUniforms,
+        camera: &Camera,
+    ) -> Result<()> {
         self.cluster_info.handle_resize(camera, &renderer.swapchain);
-        self.build_clusters(renderer)
+        self.build_clusters(renderer, camera_uniforms)
     }
-}
-
-pub struct ComputeProgram {
-    pub descriptor: Res<DescriptorSet>,
-    pub pipeline: Res<ComputePipeline>,
 }
 
 const MAX_LIGHT_COUNT: usize = 256;

@@ -158,6 +158,8 @@ impl ProjUniform {
 pub struct CameraUniforms {
     pub view_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
     pub proj_buffer: Res<Buffer>,
+
+    pub descriptor: Res<DescriptorSet>,
 }
 
 impl CameraUniforms {
@@ -177,7 +179,29 @@ impl CameraUniforms {
             size: mem::size_of::<ProjUniform>() as u64,
         })?;
 
-        let uniforms = Self { view_buffers, proj_buffer };
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+        ])?);
+
+        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
+            DescriptorBinding::Buffer([proj_buffer.clone(), proj_buffer.clone()]),
+            DescriptorBinding::Buffer(view_buffers.clone()),
+        ])?);
+
+        let uniforms = Self { view_buffers, proj_buffer, descriptor };
 
         uniforms.update_proj(renderer, camera)?;
 

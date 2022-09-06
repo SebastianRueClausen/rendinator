@@ -6,6 +6,7 @@ const float PI = 3.14159265358979323846264;
 float norm_dist(const float norm_dot_half, const float rough) {
 	const float a = rough * rough;
 	const float ggx = fma(fma(norm_dot_half, a, -norm_dot_half), norm_dot_half, 1.0);
+
 	return a / (PI * ggx * ggx);
 }
 
@@ -44,6 +45,7 @@ float burley_diffuse(
 	const float f90 = fma(light_dot_half * light_dot_half, 2.0 * rough, 0.5);
 	const float light_scatter = fresnel_schlick(norm_dot_light, 1.0, f90);
 	const float view_scatter = fresnel_schlick(norm_dot_view, 1.0, f90);
+
 	return light_scatter * view_scatter * lambert_diffuse();
 }
 

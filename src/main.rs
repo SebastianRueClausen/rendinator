@@ -105,7 +105,7 @@ fn main() -> Result<()> {
                     .expect("failed to update projection");
 
                 lights
-                    .handle_resize(&renderer, &camera)
+                    .handle_resize(&renderer, &camera_uniforms, &camera)
                     .expect("failed to resize lights");
             }
         }
@@ -123,11 +123,11 @@ fn main() -> Result<()> {
                             .update_view(frame_index, &camera)
                             .expect("failed to update view");
 
-                        lights.prepare_lights(frame_index, recorder);
+                        lights.prepare_lights(frame_index, &camera_uniforms, recorder);
                         scene.prepare_draw_buffers(frame_index, &lights, &camera, recorder);
                     },
                     |recorder, frame_index| {
-                        scene.draw(frame_index, recorder);
+                        scene.draw(frame_index, &camera_uniforms, &lights, recorder);
                         skybox.draw(&camera, frame_index, recorder); 
 
                         text_pass.draw_text(recorder, frame_index, |texts| {
