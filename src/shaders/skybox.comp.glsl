@@ -48,7 +48,7 @@ void main() {
 	sun_dir.y = -sun_dir.y;
 
 	const vec3 ray_dir = normalize(CUBE_MAP_FACES[face] * vec3(uv * 2.0 - 1.0, -1.0));
-	const vec3 color = aces_approx_tonemap(sky_color(ray_dir, sun_dir));
+	const vec3 color = sky_color(ray_dir, sun_dir);
 
 	imageStore(skybox, ivec3(coords), vec4(color, 1.0));
 }

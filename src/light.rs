@@ -18,7 +18,7 @@ pub struct DirLight {
 impl Default for DirLight {
     fn default() -> Self {
         Self {
-            direction: Vec4::new(0.0, 1.0, -1.0, 1.0).normalize(),
+            direction: Vec4::new(0.0, 0.8, -1.0, 1.0).normalize(),
             irradiance: Vec4::splat(1.2),
         }
     }

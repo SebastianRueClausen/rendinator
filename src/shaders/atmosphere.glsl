@@ -1,6 +1,10 @@
 #ifndef ATMOSPHERE_GLSL
 #define ATMOSPHERE_GLSL
 
+#extension GL_GOOGLE_include_directive: require
+
+#include "tonemap.glsl"
+
 const float PI = 3.14159265358979323846264;
 
 const float EARTH_RADIUS = 6371000;
@@ -20,6 +24,8 @@ const vec3 OZONE_COEFF = vec3(0.650, 1.881, 0.085) * 1e-6;
 
 // The amount of time a ray should sample.
 const uint RAY_SAMPLE_COUNT = 16;
+
+const float SUN_ANGULAR_DIAMETER = cos(0.01);
 
 // The intersection between a ray and sphere.
 //
@@ -150,10 +156,16 @@ vec3 int_scattering(
 		prev_marched = marched;
 	}
 
-	const float EXPOSURE = 20.0;
-	const vec3 color = (rayleigh * RAYLEIGH_COEFF + mie * MIE_COEFF) * light_color * EXPOSURE;
+	const vec3 transmittance = absorb(optical_depth);
+	const vec3 sun = vec3(
+		max(0.0, pow(cos_theta, 42.0) * 18000 + pow(cos_theta, 80.0) * 12.0)
+	) * transmittance;
 
-	return color;
+
+	const float EXPOSURE = 20.0;
+	const vec3 sky = (rayleigh * RAYLEIGH_COEFF + mie * MIE_COEFF) * light_color * EXPOSURE;
+
+	return aces_approx_tonemap(sky) + sun;
 }
 
 #endif

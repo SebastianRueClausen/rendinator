@@ -124,7 +124,7 @@ fn main() -> Result<()> {
                             .expect("failed to update view");
 
                         lights.prepare_lights(frame_index, &camera_uniforms, recorder);
-                        scene.prepare_draw_buffers(frame_index, &lights, &camera, recorder);
+                        scene.prepare_draw_buffers(frame_index, &camera, recorder);
                     },
                     |recorder, frame_index| {
                         scene.draw(frame_index, &camera_uniforms, &lights, recorder);

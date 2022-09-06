@@ -503,7 +503,6 @@ impl Scene {
     pub fn prepare_draw_buffers(
         &self,
         frame_index: usize,
-        lights: &Lights,
         camera: &Camera,
         recorder: &CommandRecorder,
     ) {
