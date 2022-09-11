@@ -965,6 +965,59 @@ impl<T> ops::Deref for Res<T> {
     }
 }
 
+pub struct PerFrame<T> {
+    items: [T; FRAMES_IN_FLIGHT],
+}
+
+impl<T> PerFrame<T> {
+    pub fn from_fn<F>(func: F) -> Self
+    where F: Fn(FrameIndex) -> T
+    {
+        Self { items: FrameIndex::ALL.map(|idx| func(idx)) }
+    }
+
+    pub fn try_from_fn<F>(func: F) -> Result<Self>
+    where F: Fn(FrameIndex) -> Result<T>
+    {
+        FrameIndex::ALL
+            .try_map(|idx| func(idx))
+            .map(|items| Self { items })
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &T> {
+        self.items.iter()
+    }
+}
+
+impl<T> ops::Index<FrameIndex> for PerFrame<T> {
+    type Output = T;
+
+    fn index(&self, idx: FrameIndex) -> &Self::Output {
+        &self.items[idx as usize]
+    }
+}
+
+impl<T: Clone> Clone for PerFrame<T> {
+    fn clone(&self) -> Self {
+        Self { items: self.items.clone() }
+    }
+}
+
+impl<T> Into<[T; FRAMES_IN_FLIGHT]> for PerFrame<T> {
+    fn into(self) -> [T; FRAMES_IN_FLIGHT] {
+        self.items
+    }
+}
+
+impl<'a, T> IntoIterator for &'a PerFrame<T> {
+    type Item = &'a T;
+    type IntoIter = slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.items.as_slice().iter()
+    }
+}
+
 /// Round `a` up to next integer with aligned to `aligment`.
 #[inline]
 pub fn align_up_to(a: u64, alignment: u64) -> u64 {

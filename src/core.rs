@@ -100,8 +100,8 @@ impl Renderer {
 
     pub fn draw<P, R>(&mut self, pre: P, render: R) -> Result<()>
     where
-        P: FnOnce(&CommandRecorder, usize),
-        R: FnOnce(&CommandRecorder, usize),
+        P: FnOnce(&CommandRecorder, FrameIndex),
+        R: FnOnce(&CommandRecorder, FrameIndex),
     {
         self.frame_queue.next_frame();
 
@@ -773,7 +773,7 @@ impl RenderPass {
     fn get_framebuffer(
         &self,
         swapchain: &Swapchain,
-        frame_index: usize,
+        frame_index: FrameIndex,
         image_index: u32,
     ) -> vk::Framebuffer {
         let index = frame_index as u32 * swapchain.image_count() + image_index;
@@ -866,11 +866,11 @@ struct Frame {
     /// since the amount of frames (most likely) doesn't match the number if swapchain images.
     pub command_buffer: CommandBuffer,
 
-    pub index: usize,
+    pub index: FrameIndex,
 }
 
 impl Frame {
-    fn new(device: &Device, index: usize, command_buffer: CommandBuffer) -> Result<Self> {
+    fn new(device: &Device, index: FrameIndex, command_buffer: CommandBuffer) -> Result<Self> {
         let semaphore_info = vk::SemaphoreCreateInfo::builder();
         let presented = unsafe { device.handle.create_semaphore(&semaphore_info, None)? };
         let rendered = unsafe { device.handle.create_semaphore(&semaphore_info, None)? };
@@ -883,11 +883,11 @@ impl Frame {
 }
 
 struct FrameQueue {
-    frames: Vec<Frame>,
+    frames: PerFrame<Frame>,
 
     /// The index of the frame currently being rendered or presented. It changes just before
     /// rendering of the next image begins.
-    frame_index: Cell<usize>,
+    frame_index: Cell<FrameIndex>,
 
     device: Res<Device>,
 
@@ -897,27 +897,28 @@ struct FrameQueue {
 
 impl FrameQueue {
     pub fn new(device: Res<Device>, graphics_queue: Res<Queue>) -> Result<Self> {
-        let frames: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT)
-            .map(|i| {
-                let buffer = CommandBuffer::new(device.clone(), graphics_queue.clone())?;
-                Frame::new(&device, i, buffer)
-            })
-            .collect();
+        let frames = PerFrame::try_from_fn(|index| {
+            let buffer = CommandBuffer::new(device.clone(), graphics_queue.clone())?;
+            Frame::new(&device, index, buffer)
+        })?;
 
-        let frame_index = Cell::new(0_usize);
+        let frame_index = Cell::new(FrameIndex::Uno);
 
-        Ok(Self { frames: frames?, frame_index, device: device.clone(), graphics_queue })
+        Ok(Self { frames, frame_index, device: device.clone(), graphics_queue })
     }
 
     pub fn next_frame(&self) {
-        self.frame_index.set((self.index() + 1) % FRAMES_IN_FLIGHT);
+        self.frame_index.set(match self.index() {
+            FrameIndex::Uno => FrameIndex::Dos,
+            FrameIndex::Dos => FrameIndex::Uno,
+        });
     }
 
     pub fn current_frame(&self) -> &Frame {
         &self.frames[self.index()]
     }
 
-    pub fn index(&self) -> usize {
+    pub fn index(&self) -> FrameIndex {
         self.frame_index.get()
     }
 }
@@ -1522,11 +1523,11 @@ pub struct DescriptorSet {
     device: Res<Device>,
 }
 
-impl ops::Index<usize> for DescriptorSet {
+impl ops::Index<FrameIndex> for DescriptorSet {
     type Output = vk::DescriptorSet;
 
-    fn index(&self, idx: usize) -> &Self::Output {
-        &self.sets[idx % self.sets.len()]
+    fn index(&self, idx: FrameIndex) -> &Self::Output {
+        &self.sets[idx as usize % self.sets.len()]
     }
 }
 
@@ -2060,7 +2061,7 @@ pub struct BufferBarrierReq {
 }
 
 pub struct DescriptorBindReq<'a> {
-    pub frame_index: Option<usize>,
+    pub frame_index: Option<FrameIndex>,
     pub bind_point: vk::PipelineBindPoint,
     pub layout: Res<PipelineLayout>,
     pub descriptors: &'a [Res<DescriptorSet>],
@@ -2211,7 +2212,7 @@ impl<'a> CommandRecorder<'a> {
     }
 
     pub fn bind_descriptor_sets(&self, req: &DescriptorBindReq) {
-        let frame_index = req.frame_index.unwrap_or(0);
+        let frame_index = req.frame_index.unwrap_or(FrameIndex::Uno);
 
         let descs: SmallVec<[_; 12]> = req.descriptors
             .iter()
@@ -2414,3 +2415,20 @@ unsafe extern "system" fn debug_callback(
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
 const DEPTH_IMAGE_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
+
+#[derive(Clone, Copy)]
+pub enum FrameIndex {
+    Uno = 0,
+    Dos = 1,
+}
+
+impl FrameIndex {
+    pub const ALL: [Self; FRAMES_IN_FLIGHT] = [
+        FrameIndex::Uno,
+        FrameIndex::Dos,
+    ];
+
+    pub fn enumerate() -> impl Iterator<Item = Self> {
+        Self::ALL.into_iter()
+    }
+}

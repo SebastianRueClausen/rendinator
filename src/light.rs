@@ -2,10 +2,10 @@ use glam::{Vec4, UVec3, Vec3, Vec2, UVec4, UVec2};
 use ash::vk;
 use anyhow::Result;
 
-use std::{mem, array};
+use std::mem;
 
 use crate::camera::{Camera, CameraUniforms};
-use crate::resource::{MappedMemory, Buffer, BufferReq, ResourcePool, Res};
+use crate::resource::*;
 use crate::core::*;
 
 #[repr(C)]
@@ -222,8 +222,8 @@ struct LightMask {
 pub struct Lights {
     pub light_buffer: Res<Buffer>,
     pub cluster_aabb_buffer: Res<Buffer>,
-    pub light_pos_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
-    pub light_mask_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub light_pos_buffers: PerFrame<Res<Buffer>>,
+    pub light_mask_buffers: PerFrame<Res<Buffer>>,
 
     pub light_count: u32,
     pub cluster_info: ClusterInfoBuffer,
@@ -258,14 +258,14 @@ impl Lights {
             size: (cluster_count * mem::size_of::<Aabb>()) as vk::DeviceSize,
         })?;
 
-        let light_mask_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+        let light_mask_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: (cluster_count * mem::size_of::<LightMask>()) as vk::DeviceSize,
             })
         })?;
 
-        let light_pos_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+        let light_pos_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as vk::DeviceSize,
@@ -330,8 +330,8 @@ impl Lights {
                 light_buffer.clone(),
                 light_buffer.clone(),
             ]),
-            DescriptorBinding::Buffer(light_pos_buffers.clone()),
-            DescriptorBinding::Buffer(light_mask_buffers.clone()),
+            DescriptorBinding::Buffer(light_pos_buffers.clone().into()),
+            DescriptorBinding::Buffer(light_mask_buffers.clone().into()),
         ])?);
 
         let layout = pool.alloc(
@@ -401,7 +401,7 @@ impl Lights {
 
     pub fn prepare_lights(
         &self,
-        frame_index: usize,
+        frame_index: FrameIndex,
         camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {

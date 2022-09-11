@@ -1,4 +1,4 @@
-#![feature(let_else, int_roundings, array_try_from_fn)]
+#![feature(let_else, int_roundings, array_try_map)]
 
 #[macro_use]
 extern crate log;

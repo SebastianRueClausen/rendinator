@@ -3,7 +3,7 @@ use ash::vk;
 use glam::{Vec3, Quat, Vec2, Mat4};
 use nohash_hasher::NoHashHasher;
 
-use std::{array, mem, hash};
+use std::{mem, hash};
 use std::collections::HashMap;
 
 use crate::core::*;
@@ -21,8 +21,8 @@ pub struct TextPass {
     pub pipeline: Res<GraphicsPipeline>,
     pub descriptor: Res<DescriptorSet>,
 
-    vertex_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
-    index_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    vertex_buffers: PerFrame<Res<Buffer>>,
+    index_buffers: PerFrame<Res<Buffer>>,
 
     /// The projection matrix used for rendering text.
     ///
@@ -39,14 +39,14 @@ impl TextPass {
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let vertex_buffers = array::try_from_fn(|_| {
+        let vertex_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::VERTEX_BUFFER,
                 size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as vk::DeviceSize,
             })
         })?;
 
-        let index_buffers = array::try_from_fn(|_| {
+        let index_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::INDEX_BUFFER,
                 size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as vk::DeviceSize,
@@ -163,7 +163,7 @@ impl TextPass {
     pub fn draw_text<F>(
         &mut self,
         recorder: &CommandRecorder,
-        frame_index: usize,
+        frame_index: FrameIndex,
         mut func: F,
     ) -> Result<()>
     where

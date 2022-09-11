@@ -3,12 +3,12 @@ use glam::{Mat4, Vec2, Vec3, Vec4};
 use winit::event::VirtualKeyCode;
 use anyhow::Result;
 
-use std::{mem, array};
+use std::mem;
 use std::time::Duration;
 
 use crate::core::*;
+use crate::resource::*;
 use crate::InputState;
-use crate::resource::{Buffer, BufferReq, ResourcePool, Res};
 
 pub struct Camera {
     pub pos: Vec3,
@@ -156,7 +156,7 @@ impl ProjUniform {
 
 /// Uniform buffers containing camera information.
 pub struct CameraUniforms {
-    pub view_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub view_buffers: PerFrame<Res<Buffer>>,
     pub proj_buffer: Res<Buffer>,
 
     pub descriptor: Res<DescriptorSet>,
@@ -167,7 +167,7 @@ impl CameraUniforms {
         let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
             | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let view_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+        let view_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                 size: mem::size_of::<ViewUniform>() as u64,
@@ -198,7 +198,7 @@ impl CameraUniforms {
 
         let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
             DescriptorBinding::Buffer([proj_buffer.clone(), proj_buffer.clone()]),
-            DescriptorBinding::Buffer(view_buffers.clone()),
+            DescriptorBinding::Buffer(view_buffers.clone().into()),
         ])?);
 
         let uniforms = Self { view_buffers, proj_buffer, descriptor };
@@ -209,7 +209,7 @@ impl CameraUniforms {
     }
 
     /// Update view uniform for frame with index `frame_index`.
-    pub fn update_view(&self, frame_index: usize, camera: &Camera) -> Result<()> {
+    pub fn update_view(&self, frame_index: FrameIndex, camera: &Camera) -> Result<()> {
         self.view_buffers[frame_index]
             .get_mapped()?
             .fill(bytemuck::bytes_of(&ViewUniform::new(camera)));

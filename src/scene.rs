@@ -2,7 +2,7 @@ use glam::{Vec4, Vec3, Vec2, Mat4};
 use anyhow::Result;
 use ash::vk;
 
-use std::{array, mem};
+use std::mem;
 
 use crate::light::Lights;
 use crate::core::*;
@@ -106,10 +106,10 @@ pub struct Scene {
     pub instance_buffer: Res<Buffer>,
 
     /// [`DrawCommand`] for each primitive that should be drawn.
-    pub draw_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub draw_buffers: PerFrame<Res<Buffer>>,
 
     /// [`DrawCount`] for each frame in flight.
-    pub draw_count_buffers: [Res<Buffer>; FRAMES_IN_FLIGHT],
+    pub draw_count_buffers: PerFrame<Res<Buffer>>,
 
     /// Buffer containing [`Primitive`] for every primitive in the scene.
     pub primitive_buffer: Res<Buffer>,
@@ -245,7 +245,7 @@ impl Scene {
             size: index_data.len() as vk::DeviceSize,
         })?;
 
-        let draw_count_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+        let draw_count_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
@@ -271,7 +271,7 @@ impl Scene {
             }
         })?;
 
-        let draw_buffers: [_; FRAMES_IN_FLIGHT] = array::try_from_fn(|_| {
+        let draw_buffers = PerFrame::try_from_fn(|_| {
             Buffer::new(renderer, pool, memory_flags, &BufferReq {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
@@ -396,9 +396,9 @@ impl Scene {
 
         let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, descriptor_layout.clone(), &[
             DescriptorBinding::Buffer([instance_buffer.clone(), instance_buffer.clone()]),
-            DescriptorBinding::Buffer(draw_buffers.clone()),
+            DescriptorBinding::Buffer(draw_buffers.clone().into()),
             DescriptorBinding::Buffer([primitive_buffer.clone(), primitive_buffer.clone()]),
-            DescriptorBinding::Buffer(draw_count_buffers.clone()),
+            DescriptorBinding::Buffer(draw_count_buffers.clone().into()),
             DescriptorBinding::Image(sampler.clone(), [
                 skybox.cube_map.image_view.clone(),
                 skybox.cube_map.image_view.clone(),
@@ -502,7 +502,7 @@ impl Scene {
 
     pub fn prepare_draw_buffers(
         &self,
-        frame_index: usize,
+        frame_index: FrameIndex,
         camera: &Camera,
         recorder: &CommandRecorder,
     ) {
@@ -568,7 +568,7 @@ impl Scene {
 
     pub fn draw(
         &self,
-        frame_index: usize,
+        frame_index: FrameIndex,
         camera_uniforms: &CameraUniforms,
         lights: &Lights,
         recorder: &CommandRecorder,
