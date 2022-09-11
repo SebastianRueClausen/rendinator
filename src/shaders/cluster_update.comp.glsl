@@ -18,11 +18,11 @@ layout (std430, set = 1, binding = 2) readonly buffer Lights {
 	PointLight point_lights[];
 };
 
-layout (std430, set = 1, binding = 2) readonly buffer LightPositions {
+layout (std430, set = 1, binding = 3) readonly buffer LightPositions {
 	LightPos light_positions[];
 };
 
-layout (std430, set = 1, binding = 3) writeonly buffer LightMasks {
+layout (std430, set = 1, binding = 4) writeonly buffer LightMasks {
 	LightMask light_masks[];
 };
 
