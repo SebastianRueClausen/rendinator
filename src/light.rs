@@ -230,9 +230,10 @@ pub struct Lights {
 
     pub descriptor: Res<DescriptorSet>,
 
-    cluster_build: Res<ComputePipeline>,
     cluster_update: Res<ComputePipeline>,
     light_update: Res<ComputePipeline>,
+
+    build_clusters: CommandBuffer, 
 }
 
 impl Lights {
@@ -364,39 +365,43 @@ impl Lights {
 
         let light_count = lights.len() as u32;
 
+        let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
+
+        build_clusters.record(SubmitCount::Multiple, |recorder| {
+            recorder.bind_descriptor_sets(&DescriptorBindReq {
+                frame_index: None,
+                bind_point: vk::PipelineBindPoint::COMPUTE,
+                layout: cluster_build.layout(),
+                descriptors: &[
+                    camera_uniforms.descriptor.clone(),
+                    descriptor.clone()
+                ],
+            });
+
+            let subdivisions = cluster_info.info.cluster_subdivisions();
+            recorder.dispatch(cluster_build.clone(), subdivisions.into());
+        })?;
+
         let lights = Self {
+            build_clusters,
             light_buffer,
             cluster_aabb_buffer,
             light_pos_buffers,
             light_mask_buffers,
             cluster_info,
             light_count,
-            cluster_build,
             light_update,
             cluster_update,
             descriptor,
         };
 
-        lights.build_clusters(renderer, camera_uniforms)?;
+        lights.build_clusters()?;
 
         Ok(lights)
     }
 
-    fn build_clusters(&self, renderer: &Renderer, camera_uniforms: &CameraUniforms) -> Result<()> {
-        renderer.compute_with(|recorder| {
-            recorder.bind_descriptor_sets(&DescriptorBindReq {
-                frame_index: None,
-                bind_point: vk::PipelineBindPoint::COMPUTE,
-                layout: self.cluster_build.layout(),
-                descriptors: &[
-                    camera_uniforms.descriptor.clone(),
-                    self.descriptor.clone()
-                ],
-            });
-
-            let subdivisions = self.cluster_info.info.cluster_subdivisions();
-            recorder.dispatch(self.cluster_build.clone(), subdivisions.into());
-        })
+    fn build_clusters(&self) -> Result<()> {
+        self.build_clusters.submit_wait_idle()
     }
 
     pub fn prepare_lights(
@@ -445,14 +450,9 @@ impl Lights {
     ///
     /// This must only be called when the device is idle, e.g. no rendering is happening, as
     /// during so will upload data to a buffer which might be in use.
-    pub fn handle_resize(
-        &mut self,
-        renderer: &Renderer,
-        camera_uniforms: &CameraUniforms,
-        camera: &Camera,
-    ) -> Result<()> {
+    pub fn handle_resize(&mut self, renderer: &Renderer, camera: &Camera) -> Result<()> {
         self.cluster_info.handle_resize(camera, &renderer.swapchain);
-        self.build_clusters(renderer, camera_uniforms)
+        self.build_clusters()
     }
 }
 

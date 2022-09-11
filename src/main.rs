@@ -105,7 +105,7 @@ fn main() -> Result<()> {
                     .expect("failed to update projection");
 
                 lights
-                    .handle_resize(&renderer, &camera_uniforms, &camera)
+                    .handle_resize(&renderer, &camera)
                     .expect("failed to resize lights");
             }
         }

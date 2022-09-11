@@ -122,7 +122,7 @@ impl Renderer {
 
             unsafe { self.device.handle.reset_fences(&[frame.ready_to_draw])?; }
 
-            frame.command_buffer.record(|recorder| {
+            frame.command_buffer.record(SubmitCount::OneTime, |recorder| {
                 pre(recorder, frame.index);
 
                 let framebuffer =
@@ -224,7 +224,7 @@ impl Renderer {
         F: FnOnce(&CommandRecorder) -> R
     {
         let buffer = CommandBuffer::new(self.device.clone(), queue)?;
-        let ret = buffer.record(func)?;
+        let ret = buffer.record(SubmitCount::OneTime, func)?;
         buffer.submit_wait_idle()?;
         Ok(ret)
     }
@@ -243,6 +243,15 @@ impl Renderer {
         F: FnOnce(&CommandRecorder) -> R
     {
         self.exec(self.compute_queue.clone(), func)
+    }
+
+    pub fn transfer_queue(&self) -> Res<Queue> {
+        self.transfer_queue.clone()
+    }
+
+    #[allow(dead_code)]
+    pub fn graphics_queue(&self) -> Res<Queue> {
+        self.graphics_queue.clone()
     }
 
     /// Handle window resize. The extent of the swapchain and framebuffers will we match that of
@@ -1929,6 +1938,11 @@ pub struct CommandBuffer {
     device: Res<Device>,
 }
 
+pub enum SubmitCount {
+    OneTime,
+    Multiple,
+}
+
 impl CommandBuffer {
     pub fn new(device: Res<Device>, queue: Res<Queue>) -> Result<Self> {
         let info = vk::CommandBufferAllocateInfo::builder()
@@ -1958,13 +1972,17 @@ impl CommandBuffer {
         unsafe { (*self.bound_resources.get()).push(res.to_dummy()); }
     }
 
-    pub fn record<F, R>(&self, func: F) -> Result<R>
+    pub fn record<F, R>(&self, submit_count: SubmitCount, func: F) -> Result<R>
     where
         F: FnOnce(&CommandRecorder) -> R
     {
+        let flags = match submit_count {
+            SubmitCount::OneTime => vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
+            SubmitCount::Multiple => vk::CommandBufferUsageFlags::empty(),
+        };
+
         unsafe {
-            let begin_info = vk::CommandBufferBeginInfo::builder()
-                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
+            let begin_info = vk::CommandBufferBeginInfo::builder().flags(flags);
             self.device.handle.begin_command_buffer(self.handle, &begin_info)?;
         }
 
