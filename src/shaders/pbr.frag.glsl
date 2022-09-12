@@ -40,7 +40,6 @@ layout (std430, set = 1, binding = 4) readonly buffer LightMasks {
 	LightMask light_masks[];
 };
 
-layout (set = 2, binding = 4) uniform samplerCube skybox_sampler;
 layout (set = 2, binding = 5) uniform sampler2D textures[];
 
 layout (location = 0) in vec2 in_texcoord;
@@ -78,9 +77,7 @@ void main() {
 	const vec3 view_dir = normalize(eye.xyz - in_world_position.xyz);
 	const float norm_dot_view = clamp(dot(normal, view_dir), 0.0001, 1.0);
 
-	const vec3 env_map = texture(skybox_sampler, reflect(-view_dir, normal)).xyz;
-
-	const vec3 diffuse_albedo = (1.0 - metallic) * albedo + metallic * env_map;
+	const vec3 diffuse_albedo = (1.0 - metallic) * albedo;
 	const vec3 f0 = mix(vec3(0.04), albedo, metallic);
 
 	vec3 radiance = vec3(0.0);
@@ -160,5 +157,9 @@ void main() {
 
 #ifdef CLUSTER_DEBUG
 	out_color = debug_cluster_overlay(out_color, cluster_coords, light_count);
+#endif
+
+#ifdef NORMAL_DEBUG
+	out_color = vec4(normal * 0.5 + vec3(0.5), 1.0);
 #endif
 }

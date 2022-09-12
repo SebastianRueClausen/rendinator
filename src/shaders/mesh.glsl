@@ -42,4 +42,12 @@ struct InstanceData {
 	mat4 inverse_transpose_transform;
 };
 
+struct Vert {
+	vec4 position;
+	
+	f16vec2 texcoord;
+	f16vec2 normal;
+	f16vec4 tangent;
+};
+
 #endif

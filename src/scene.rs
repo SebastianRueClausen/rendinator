@@ -1,4 +1,4 @@
-use glam::{Vec4, Vec3, Vec2, Mat4};
+use glam::{Vec4, Vec3, Mat4};
 use anyhow::Result;
 use ash::vk;
 
@@ -8,7 +8,6 @@ use crate::light::Lights;
 use crate::core::*;
 use crate::resource::*;
 use crate::camera::{Camera, CameraUniforms};
-use crate::skybox::Skybox;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -113,9 +112,6 @@ pub struct Scene {
 
     /// Buffer containing [`Primitive`] for every primitive in the scene.
     pub primitive_buffer: Res<Buffer>,
-
-    /// The format of the indices in `index_buffer`.
-    pub index_format: asset::IndexFormat,
 }
 
 impl Scene {
@@ -123,7 +119,6 @@ impl Scene {
         renderer: &Renderer,
         pool: &ResourcePool,
         camera_uniforms: &CameraUniforms,
-        skybox: &Skybox,
         lights: &Lights,
         scene: &asset::Scene,
     ) -> Result<Self> {
@@ -234,7 +229,7 @@ impl Scene {
         })?;
 
         let vertex_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
-            usage: vk::BufferUsageFlags::VERTEX_BUFFER
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: vertex_data.len() as vk::DeviceSize,
         })?;
@@ -383,8 +378,8 @@ impl Scene {
                 array_count: None,
             },
             LayoutBinding {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX,
                 array_count: None,
             },
             LayoutBinding {
@@ -399,10 +394,7 @@ impl Scene {
             DescriptorBinding::Buffer(draw_buffers.clone().into()),
             DescriptorBinding::Buffer([primitive_buffer.clone(), primitive_buffer.clone()]),
             DescriptorBinding::Buffer(draw_count_buffers.clone().into()),
-            DescriptorBinding::Image(sampler.clone(), [
-                skybox.cube_map.image_view.clone(),
-                skybox.cube_map.image_view.clone(),
-            ]),
+            DescriptorBinding::Buffer([vertex_buffer.clone(), vertex_buffer.clone()]),
             DescriptorBinding::VariableImageArray(sampler.clone(), [&views, &views]),
         ])?);
 
@@ -425,37 +417,8 @@ impl Scene {
             ])?);
 
             pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
-                vertex_attributes: &[
-                    vk::VertexInputAttributeDescription {
-                        format: vk::Format::R32G32B32_SFLOAT,
-                        binding: 0,
-                        location: 0,
-                        offset: 0,
-                    },
-                    vk::VertexInputAttributeDescription {
-                        format: vk::Format::R32G32B32_SFLOAT,
-                        binding: 0,
-                        location: 1,
-                        offset: mem::size_of::<Vec3>() as u32,
-                    },
-                    vk::VertexInputAttributeDescription {
-                        format: vk::Format::R32G32_SFLOAT,
-                        binding: 0,
-                        location: 2,
-                        offset: mem::size_of::<[Vec3; 2]>() as u32
-                    },
-                    vk::VertexInputAttributeDescription {
-                        format: vk::Format::R32G32B32A32_SFLOAT,
-                        binding: 0,
-                        location: 3,
-                        offset: (mem::size_of::<[Vec3; 2]>() + mem::size_of::<Vec2>())as u32,
-                    },
-                ],
-                vertex_bindings: &[vk::VertexInputBindingDescription {
-                    binding: 0,
-                    stride: mem::size_of::<asset::Vertex>() as u32,
-                    input_rate: vk::VertexInputRate::VERTEX,
-                }],
+                vertex_attributes: &[],
+                vertex_bindings: &[],
                 cull_mode: vk::CullModeFlags::BACK,
                 vertex_shader: &vertex_module,
                 fragment_shader: &fragment_module,
@@ -482,7 +445,6 @@ impl Scene {
             pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
         };
 
-        let index_format = scene.index_format;
         let primitive_count = primitives.len() as u32;
 
         Ok(Self {
@@ -496,7 +458,6 @@ impl Scene {
             draw_count_buffers,
             primitive_buffer,
             instance_buffer,
-            index_format,
         })
     }
 
@@ -573,11 +534,7 @@ impl Scene {
         lights: &Lights,
         recorder: &CommandRecorder,
     ) {
-        let index_type: vk::IndexType = self.index_format.into();
-
-        recorder.bind_index_buffer(self.index_buffer.clone(), index_type);
-        recorder.bind_vertex_buffer(self.vertex_buffer.clone());
-
+        recorder.bind_index_buffer(self.index_buffer.clone(), vk::IndexType::UINT32);
         recorder.bind_graphics_pipeline(self.render_pipeline.clone());
 
         recorder.bind_descriptor_sets(&DescriptorBindReq {

@@ -544,12 +544,14 @@ impl Device {
             .build();
 
         let mut vk11_features = vk::PhysicalDeviceVulkan11Features::builder()
+            .storage_buffer16_bit_access(true)
             .shader_draw_parameters(true)
             .build();
 
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features::builder()
             .shader_sampled_image_array_non_uniform_indexing(true)
             .shader_input_attachment_array_dynamic_indexing(true)
+            .shader_float16(true)
             .runtime_descriptor_array(true)
             .descriptor_binding_variable_descriptor_count(true)
             .draw_indirect_count(true)
@@ -1406,7 +1408,8 @@ impl ShaderModule {
         }
 
         let code = unsafe { slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
-        let info = vk::ShaderModuleCreateInfo::builder().code(code);
+        let info = vk::ShaderModuleCreateInfo::builder()
+            .code(code);
         let handle = unsafe { device.handle.create_shader_module(&info, None)? };
 
         let Ok(entry) = CString::new(entry) else {

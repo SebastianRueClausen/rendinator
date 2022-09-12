@@ -1,6 +1,8 @@
 #version 450
 #pragma shader_stage(compute)
 
+#extension GL_EXT_shader_16bit_storage: require
+
 #include "mesh.glsl"
 
 const uint THREAD_COUNT = 64;

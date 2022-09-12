@@ -70,7 +70,6 @@ fn main() -> Result<()> {
         &renderer,
         &resource_pool,
         &camera_uniforms,
-        &skybox,
         &lights,
         &scene,
     )?;

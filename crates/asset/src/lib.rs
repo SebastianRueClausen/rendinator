@@ -1,6 +1,6 @@
 use anyhow::Result;
 use ash::vk;
-use glam::{Vec2, Vec3, Vec4, Mat4};
+use glam::{Vec2, Vec3, Mat4};
 use serde::{Serialize, Deserialize};
 
 use std::path::Path;
@@ -8,34 +8,15 @@ use std::fs;
 
 /// The vertex format used by the [`Mesh`].
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::NoUninit, Serialize, Deserialize)]
+#[derive(Default, Clone, Copy, bytemuck::NoUninit, Serialize, Deserialize)]
 pub struct Vertex {
-    pub position: Vec3,
-    pub normal: Vec3,
-    pub texcoord: Vec2,
-    pub tangent: Vec4,
-}
-
-
-#[derive(Clone, Copy, Serialize, Deserialize)]
-pub enum IndexFormat {
-    U16 = vk::IndexType::UINT16.as_raw() as isize,
-    U32 = vk::IndexType::UINT32.as_raw() as isize,
-}
-
-impl IndexFormat {
-    pub fn byte_size(&self) -> usize {
-        match self {
-            IndexFormat::U16 => 2,
-            IndexFormat::U32 => 4,
-        }
-    }
-}
-
-impl Into<vk::IndexType> for IndexFormat {
-    fn into(self) -> vk::IndexType {
-        vk::IndexType::from_raw(self as i32) 
-    }
+    pub position: [f32; 4],
+    pub texcoord: [u16; 2],
+    pub normal: [u16; 2],
+    pub tangent: [u16; 4],
+    // pub normal: Vec3,
+    // pub texcoord: Vec2,
+    // pub tangent: Vec4,
 }
 
 /// All mesh and texture data for at scene.
@@ -54,12 +35,7 @@ pub struct Scene {
     pub vertices: Vec<Vertex>,
 
     /// The index data for all meshes.
-    ///
-    /// The format is indicated by `index_format`.
-    pub indices: Vec<u8>,
-
-    /// The format of `indices`.
-    pub index_format: IndexFormat,
+    pub indices: Vec<u32>,
 }
 
 impl Scene {

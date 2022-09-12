@@ -6,9 +6,18 @@ use intel_tex_2::{bc5, bc7};
 use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
-use std::{fs, io};
+use std::{fs, io, mem};
 
 use asset::*;
+
+#[repr(C)]
+#[derive(Default, Clone, Copy, bytemuck::NoUninit)]
+struct RawVertex {
+    pub position: Vec3,
+    pub normal: Vec3,
+    pub texcoord: Vec2,
+    pub tangent: Vec4,
+}
 
 #[derive(Clone, clap::ValueEnum)]
 enum AssetKind {
@@ -358,20 +367,8 @@ fn new(path: &Path) -> Result<Self> {
             })
             .collect();
 
-        let mut vertices = Vec::<Vertex>::new();
-        let mut indices = Vec::<u8>::new();
-
-        let index_format = self.gltf
-            .meshes()
-            .map(|mesh| mesh.primitives())
-            .flatten()
-            .filter_map(|prim| prim
-                .indices()
-                .map(|acc| acc.data_type())
-            )
-            .any(|ty| ty == gltf::accessor::DataType::U32)
-            .then_some(IndexFormat::U32)
-            .unwrap_or(IndexFormat::U16);
+        let mut vertex_buffer = Vec::<Vertex>::new();
+        let mut index_buffer = Vec::<u32>::new();
 
         let meshes: Result<Vec<_>> = self.gltf
             .meshes()
@@ -395,7 +392,7 @@ fn new(path: &Path) -> Result<Self> {
                         BoundingSphere { center, radius }
                     };
 
-                    let vertex_start = {
+                    let vertices = {
                         let positions = primitive.get(&gltf::Semantic::Positions);
                         let texcoords = primitive.get(&gltf::Semantic::TexCoords(0));
                         let normals = primitive.get(&gltf::Semantic::Normals);
@@ -449,14 +446,12 @@ fn new(path: &Path) -> Result<Self> {
                         assert_eq!(positions.len() / 3, normals.len() / 3);
                         assert_eq!(positions.len() / 3, tangents.len() / 4);
 
-                        let vertex_start = vertices.len() as u32;
-
-                        vertices.extend(positions
-                            .chunks(12)
+                        positions
+                            .chunks(4 * 3)
                             .zip(normals.chunks(4 * 3))
                             .zip(tangents.chunks(4 * 4))
                             .zip(texcoords.chunks(4 * 2))
-                            .map(|(((p, n), t), c)| Vertex {
+                            .map(|(((p, n), t), c)| RawVertex {
                                 position: Vec3::new(
                                     f32::from_le_bytes([p[0], p[1], p[2], p[3]]),
                                     f32::from_le_bytes([p[4], p[5], p[6], p[7]]),
@@ -478,12 +473,10 @@ fn new(path: &Path) -> Result<Self> {
                                     f32::from_le_bytes([t[12], t[13], t[14], t[15]]),
                                 ),
                             })
-                        );
-                        
-                        vertex_start
+                            .collect::<Vec<_>>()
                     };
 
-                    let (index_start, index_count) = {
+                    let indices = {
                         let Some(accessor) = primitive.indices() else {
                             return Err(anyhow!("primtive {} has no indices", primitive.index()));
                         };
@@ -504,30 +497,117 @@ fn new(path: &Path) -> Result<Self> {
                         let size = accessor.count() * accessor.size();
 
                         let index_slice = self.get_buffer_data(&view, offset, Some(size));
+                        let mut indices: Vec<u32> = Vec::with_capacity(index_slice.len() / 4);
 
-                        let index_start = (indices.len() / index_format.byte_size()) as u32;
-                        let index_count = (index_slice.len() / index_format.byte_size()) as u32;
-
-                        match (index_format, accessor.data_type()) {
-                            (IndexFormat::U32, DataType::U32) => {
-                                indices.extend_from_slice(index_slice)
+                        match accessor.data_type() {
+                            DataType::U32 => {
+                                indices.extend(index_slice
+                                    .chunks(4)
+                                    .map(|bytes| bytemuck::from_bytes(bytes))
+                                );
                             }
-                            (IndexFormat::U16, DataType::U16) => {
-                                indices.extend_from_slice(index_slice)
+                            DataType::U16 => {
+                                indices.extend(index_slice
+                                    .chunks(2)
+                                    .map(|bytes| 0_u32
+                                        | (bytes[1] as u32) << 8
+                                        | (bytes[0] as u32)
+                                    )
+                                );
                             }
-                            (IndexFormat::U32, DataType::U16) => {
-                                for bytes in index_slice.chunks(2) {
-                                    indices.extend_from_slice(&[0, 0]);
-                                    indices.extend_from_slice(bytes);  
-                                }
-                            }
-                            (_, format) => {
+                            format => {
                                 return Err(anyhow!("invalid index format {format:?}"));
                             }
                         }
 
-                        (index_start, index_count)
+                        indices
                     };
+
+                    let (remap_count, remap_table) =
+                        meshopt::remap::generate_vertex_remap(&vertices, Some(&indices));
+
+                    let mut indices = meshopt::remap::remap_index_buffer(
+                        Some(&indices),
+                        remap_count,
+                        &remap_table,
+                    );
+        
+                    let mut vertices = meshopt::remap::remap_vertex_buffer(
+                        &vertices,
+                        remap_count,
+                        &remap_table,
+                    );
+
+                    meshopt::optimize::optimize_vertex_cache_in_place(&indices, vertices.len());
+
+                    let vertex_adapter = meshopt::utilities::VertexDataAdapter::new(
+                        bytemuck::cast_slice(&vertices),
+                        mem::size_of::<RawVertex>(),
+                        0,
+                    )
+                    .expect("failed to create vertex data adapter");
+
+                    const OVERDRAW_THRESHOLD: f32 = 1.05;
+
+                    meshopt::optimize::optimize_overdraw_in_place(
+                        &indices,
+                        &vertex_adapter,
+                        OVERDRAW_THRESHOLD,
+                    );
+
+                    meshopt::optimize::optimize_vertex_fetch_in_place(
+                        &mut indices,
+                        &mut vertices,
+                    );
+
+                    let mut vertices: Vec<_> = vertices
+                        .iter()
+                        .map(|vertex| {
+                            let texcoord = [
+                                meshopt::utilities::quantize_half(vertex.texcoord.x),
+                                meshopt::utilities::quantize_half(vertex.texcoord.y),
+                            ];
+
+                            let tangent = [
+                                meshopt::utilities::quantize_half(vertex.tangent.x),
+                                meshopt::utilities::quantize_half(vertex.tangent.y),
+                                meshopt::utilities::quantize_half(vertex.tangent.z),
+                                meshopt::utilities::quantize_half(vertex.tangent.w),
+                            ];
+
+                            let scale = 1.7777;
+
+                            let mut nx = vertex.normal.x / (vertex.normal.z + 1.0);
+                            let mut ny = vertex.normal.y / (vertex.normal.z + 1.0);
+
+                            nx /= scale;
+                            ny /= scale;
+
+                            nx = nx * 0.5 + 0.5;
+                            ny = ny * 0.5 + 0.5;
+
+                            let normal = [
+                                meshopt::utilities::quantize_half(nx),
+                                meshopt::utilities::quantize_half(ny),
+                            ];
+
+                            let position = [
+                                vertex.position.x,
+                                vertex.position.y,
+                                vertex.position.z,
+                                1.0,
+                            ];
+                           
+                            Vertex { position, normal, texcoord, tangent }
+                        })
+                        .collect();
+
+                    let vertex_start = vertex_buffer.len() as u32;
+                    let index_start = index_buffer.len() as u32;
+                    let index_count = indices.len() as u32;
+
+                    vertex_buffer.append(&mut vertices);
+                    index_buffer.append(&mut indices);
 
                     primitives.push(Primitive {
                         bounding_sphere,
@@ -544,7 +624,7 @@ fn new(path: &Path) -> Result<Self> {
 
         let meshes = meshes?;
 
-        Ok(Scene { vertices, indices, meshes, textures, materials, instances, index_format })
+        Ok(Scene { vertices: vertex_buffer, indices: index_buffer, meshes, textures, materials, instances })
     }
 }
 
