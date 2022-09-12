@@ -10,13 +10,10 @@ use std::fs;
 #[repr(C)]
 #[derive(Default, Clone, Copy, bytemuck::NoUninit, Serialize, Deserialize)]
 pub struct Vertex {
-    pub position: [f32; 4],
+    pub position: [u16; 4],
     pub texcoord: [u16; 2],
     pub normal: [u16; 2],
     pub tangent: [u16; 4],
-    // pub normal: Vec3,
-    // pub texcoord: Vec2,
-    // pub tangent: Vec4,
 }
 
 /// All mesh and texture data for at scene.

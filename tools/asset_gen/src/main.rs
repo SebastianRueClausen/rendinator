@@ -563,18 +563,6 @@ fn new(path: &Path) -> Result<Self> {
                     let mut vertices: Vec<_> = vertices
                         .iter()
                         .map(|vertex| {
-                            let texcoord = [
-                                meshopt::utilities::quantize_half(vertex.texcoord.x),
-                                meshopt::utilities::quantize_half(vertex.texcoord.y),
-                            ];
-
-                            let tangent = [
-                                meshopt::utilities::quantize_half(vertex.tangent.x),
-                                meshopt::utilities::quantize_half(vertex.tangent.y),
-                                meshopt::utilities::quantize_half(vertex.tangent.z),
-                                meshopt::utilities::quantize_half(vertex.tangent.w),
-                            ];
-
                             let scale = 1.7777;
 
                             let mut nx = vertex.normal.x / (vertex.normal.z + 1.0);
@@ -591,13 +579,25 @@ fn new(path: &Path) -> Result<Self> {
                                 meshopt::utilities::quantize_half(ny),
                             ];
 
-                            let position = [
-                                vertex.position.x,
-                                vertex.position.y,
-                                vertex.position.z,
-                                1.0,
-                            ];
-                           
+                            let texcoord = vertex.texcoord
+                                .to_array()
+                                .map(|val| {
+                                    meshopt::utilities::quantize_half(val)
+                                });
+
+                            let position = vertex.position
+                                .extend(1.0)
+                                .to_array()
+                                .map(|val| {
+                                    meshopt::utilities::quantize_half(val)
+                                });
+
+                            let tangent = vertex.tangent
+                                .to_array()
+                                .map(|val| {
+                                    meshopt::utilities::quantize_half(val)
+                                });
+
                             Vertex { position, normal, texcoord, tangent }
                         })
                         .collect();

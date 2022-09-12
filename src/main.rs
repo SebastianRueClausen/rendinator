@@ -65,7 +65,7 @@ fn main() -> Result<()> {
 
     let skybox = Skybox::new(&renderer, &lights, &resource_pool)?;
 
-    let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
+    let scene = asset::Scene::load(Path::new("assets/scenes/helmet.scene"))?;
     let scene = Scene::from_scene_asset(
         &renderer,
         &resource_pool,

@@ -11,6 +11,8 @@
 #include "cluster_debug.glsl"
 #endif
 
+#define NORMAL_DEBUG
+
 #include "brdf.glsl"
 
 layout (std140, set = 0, binding = 0) readonly uniform Proj {
@@ -44,7 +46,7 @@ layout (set = 2, binding = 5) uniform sampler2D textures[];
 
 layout (location = 0) in vec2 in_texcoord;
 layout (location = 1) in vec3 in_world_normal;
-layout (location = 2) in vec4 in_world_tangent;
+layout (location = 2) in vec3 in_world_tangent;
 layout (location = 3) in vec3 in_world_bitangent;
 layout (location = 4) in vec4 in_world_position;
 layout (location = 5) in float in_view_z;
