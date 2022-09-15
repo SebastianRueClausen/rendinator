@@ -1,6 +1,8 @@
 #ifndef MESH_GLSL
 #define MESH_GLSL
 
+const uint MAX_LOD_COUNT = 8;
+
 struct DrawCommand {
 	uint index_count;
 	uint instance_count;
@@ -13,28 +15,40 @@ struct DrawCommand {
 	uint normal_map;
 };
 
-struct Primitive {
-	vec3 position;
-	float radius;
-
-	uint vertex_offset;
+struct Lod {
 	uint first_index;
 	uint index_count;
+};
+
+struct Primitive {
+	vec4 position;
+	float radius;
+
+	uint _pad;
+
+	Lod lods[MAX_LOD_COUNT];
+
 	uint instance;
+
+	uint vertex_offset;
+	uint lod_count;
 
 	uint albedo_map;
 	uint specular_map;
 	uint normal_map;
 };
 
-struct FrustrumInfo {
+struct CullInfo {
 	float z_near;
 	float z_far;
 
-	float left;
-	float right;
-	float top;
-	float bottom;
+	float frust_left;
+	float frust_right;
+	float frust_top;
+	float frust_bottom;
+
+	float lod_base;
+	float lod_step;
 };
 
 struct InstanceData {

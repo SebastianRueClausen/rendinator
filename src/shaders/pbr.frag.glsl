@@ -11,8 +11,6 @@
 #include "cluster_debug.glsl"
 #endif
 
-#define NORMAL_DEBUG
-
 #include "brdf.glsl"
 
 layout (std140, set = 0, binding = 0) readonly uniform Proj {
@@ -159,6 +157,14 @@ void main() {
 
 #ifdef CLUSTER_DEBUG
 	out_color = debug_cluster_overlay(out_color, cluster_coords, light_count);
+#endif
+
+#ifdef ROUGHNESS_DEBUG
+	out_color = vec4(vec3(rough * 0.5 + 0.5), 1.0);
+#endif
+
+#ifdef METALLIC_DEBUG
+	out_color = vec4(vec3(metallic * 0.5 + 0.5), 1.0);
 #endif
 
 #ifdef NORMAL_DEBUG

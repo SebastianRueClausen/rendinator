@@ -332,18 +332,9 @@ fn new(path: &Path) -> Result<Self> {
                 .source();
 
             textures.extend([
-                self.load_image(
-                    ImageFormat::Bc(BcFormat::Bc7Srgb),
-                    &albedo_map,
-                )?,
-                self.load_image(
-                    ImageFormat::Bc(BcFormat::Bc5Unorm),
-                    &specular_map,
-                )?,
-                self.load_image(
-                    ImageFormat::Bc(BcFormat::Bc7Unorm),
-                    &normal_map,
-                )?,
+                self.load_image(ImageFormat::Bc(BcFormat::Bc7Srgb), &albedo_map)?,
+                self.load_image(ImageFormat::Bc(BcFormat::Bc5Unorm), &specular_map)?,
+                self.load_image(ImageFormat::Bc(BcFormat::Bc7Unorm), &normal_map)?,
             ].into_iter());
         }
 
@@ -361,9 +352,9 @@ fn new(path: &Path) -> Result<Self> {
         let instances: Vec<_> = self.gltf
             .nodes()
             .filter_map(|node| node.mesh().map(|mesh| (node, mesh.index())))
-            .map(|(node, mesh)| {
-                let transform = Mat4::from_cols_array_2d(&node.transform().matrix());
-                Instance { mesh, transform }
+            .map(|(node, mesh)| Instance {
+                transform: Mat4::from_cols_array_2d(&node.transform().matrix()),
+                mesh
             })
             .collect();
 
@@ -540,7 +531,9 @@ fn new(path: &Path) -> Result<Self> {
 
                     meshopt::optimize::optimize_vertex_cache_in_place(&indices, vertices.len());
 
-                    let vertex_adapter = meshopt::utilities::VertexDataAdapter::new(
+                    use meshopt::utilities::VertexDataAdapter;
+
+                    let vertex_adapter = VertexDataAdapter::new(
                         bytemuck::cast_slice(&vertices),
                         mem::size_of::<RawVertex>(),
                         0,
@@ -560,6 +553,55 @@ fn new(path: &Path) -> Result<Self> {
                         &mut vertices,
                     );
 
+                    let index_count = indices.len() as f32;
+
+                    let mut lods = Vec::<asset::Lod>::with_capacity(TARGET_LOD_COUNT);
+                    let mut sloppy = false;
+
+                    for i in 0..TARGET_LOD_COUNT {
+                        let index_target =
+                            (index_count * LOD_SHRINK_FACTOR.powi(i as i32)) as usize;
+
+                        // Should never fail.
+                        let vertex_adapter = &VertexDataAdapter::new(
+                            bytemuck::cast_slice(&vertices),
+                            mem::size_of::<RawVertex>(),
+                            0,
+                        )
+                        .expect("failed to create vertex adapter");
+
+                        let mut indices = if !sloppy {
+                            meshopt::simplify::simplify(
+                                &indices,
+                                &vertex_adapter,
+                                index_target,
+                                1e-2,
+                            )
+                        } else {
+                            meshopt::simplify::simplify_sloppy(
+                                &indices,
+                                &vertex_adapter,
+                                index_target,
+                            )
+                        };
+
+                        if Some(indices.len()) == lods.last().map(|lod| lod.index_count as usize) {
+                            if sloppy {
+                                break;
+                            } else {
+                                sloppy = true;
+                                continue;
+                            }
+                        }
+                     
+                        let index_start = index_buffer.len() as u32;
+                        let index_count = indices.len() as u32;
+
+                        index_buffer.append(&mut indices);
+                        
+                        lods.push(Lod { index_count, index_start });
+                    }
+
                     let mut vertices: Vec<_> = vertices
                         .iter()
                         .map(|vertex| {
@@ -574,10 +616,9 @@ fn new(path: &Path) -> Result<Self> {
                             nx = nx * 0.5 + 0.5;
                             ny = ny * 0.5 + 0.5;
 
-                            let normal = [
-                                meshopt::utilities::quantize_half(nx),
-                                meshopt::utilities::quantize_half(ny),
-                            ];
+                            let normal = [nx, ny].map(|val| {
+                                meshopt::utilities::quantize_half(val)
+                            });
 
                             let texcoord = vertex.texcoord
                                 .to_array()
@@ -603,19 +644,10 @@ fn new(path: &Path) -> Result<Self> {
                         .collect();
 
                     let vertex_start = vertex_buffer.len() as u32;
-                    let index_start = index_buffer.len() as u32;
-                    let index_count = indices.len() as u32;
 
                     vertex_buffer.append(&mut vertices);
-                    index_buffer.append(&mut indices);
 
-                    primitives.push(Primitive {
-                        bounding_sphere,
-                        vertex_start,
-                        index_start,
-                        index_count,
-                        material,
-                    })
+                    primitives.push(Primitive { bounding_sphere, vertex_start, material, lods })
                 }
 
                 Ok(Mesh { primitives })
@@ -737,3 +769,6 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
 
     Ok(Font { size: font.info.size, atlas, glyphs })
 }
+
+const TARGET_LOD_COUNT: usize = 8;
+const LOD_SHRINK_FACTOR: f32 = 0.75;

@@ -1,4 +1,4 @@
-use glam::{Vec4, Vec3, Mat4};
+use glam::{Vec4, Mat4};
 use anyhow::Result;
 use ash::vk;
 
@@ -23,35 +23,39 @@ struct InstanceData {
 ///
 /// These correspond to a single primitive.
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct DrawCommand {
-    command: vk::DrawIndexedIndirectCommand,
+#[derive(Clone, Copy, bytemuck::NoUninit)]
+struct DrawCommand {
+    // NOTE: This is the same layout as `vk::DrawIndexedIndirectCommand` and thus the order must
+    // not be changed.
+    index_count: u32,
+    instance_count: u32,
+    first_index: u32,
+    vertex_offset: u32,
+    first_instance: u32,
 
     albedo_map: u32,
     specular_map: u32,
     normal_map: u32,
 }
 
-unsafe impl bytemuck::NoUninit for DrawCommand {}
-
-#[repr(align(16))]
 #[repr(C)]
-#[derive(Clone, Copy)]
-pub struct Primitive {
-    center: Vec3,
+#[derive(Default, Clone, Copy, bytemuck::NoUninit)]
+struct Primitive {
+    center: Vec4,
     radius: f32,
+
+    _pad: u32,
+
+    lods: [Lod; MAX_LOD_COUNT],
+
+    /// The instance index.
+    instance: u32,
 
     /// The vertex offset of the indices in the index buffer.
     vertex_offset: u32,
 
-    /// The first index in the index buffer belonging to this primitive.
-    first_index: u32,
-
-    /// The amount of indices used by this primitive.
-    index_count: u32,
-
-    /// The instance index.
-    instance: u32,
+    /// The amount lods in `lods`.
+    lod_count: u32,
 
     /// The index of the albedo texture.
     albedo_map: u32,
@@ -63,11 +67,16 @@ pub struct Primitive {
     normal_map: u32,
 }
 
-unsafe impl bytemuck::NoUninit for Primitive {}
+#[repr(C)]
+#[derive(Default, Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
+struct Lod {
+    first_index: u32,
+    index_count: u32,
+}
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
-pub struct DrawCount {
+struct DrawCount {
     /// The amount of draw commands.
     pub command_count: u32, 
 
@@ -77,14 +86,17 @@ pub struct DrawCount {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
-pub struct FrustrumInfo {
-    pub z_near: f32,
-    pub z_far: f32,
+struct CullInfo {
+    z_near: f32,
+    z_far: f32,
 
-    pub left: f32,
-    pub right: f32,
-    pub top: f32,
-    pub bottom: f32,
+    frust_left: f32,
+    frust_right: f32,
+    frust_top: f32,
+    frust_bottom: f32,
+
+    lod_base: f32,
+    lod_step: f32,
 }
 
 pub struct Scene {
@@ -140,19 +152,35 @@ impl Scene {
                 scene.meshes[instance.mesh].primitives
                     .iter()
                     .map(move |prim| {
+                        let mut lods: [Lod; MAX_LOD_COUNT] = Default::default();
+                        let mut lod_count = 0;
+
+                        for (i, lod) in prim.lods.iter().take(MAX_LOD_COUNT).enumerate() {
+                            lod_count += 1;
+
+                            lods[i] = Lod {
+                                first_index: lod.index_start,
+                                index_count: lod.index_count,
+                            };
+                        }
+
                         let material = &scene.materials[prim.material];
 
                         Primitive {
-                            center: prim.bounding_sphere.center,
+                            center: prim.bounding_sphere.center.extend(1.0),
                             radius: prim.bounding_sphere.radius,
+
                             albedo_map: material.albedo_map as u32,
                             normal_map: material.normal_map as u32,
                             specular_map: material.specular_map as u32,
 
                             vertex_offset: prim.vertex_start,
-                            first_index: prim.index_start,
-                            index_count: prim.index_count,
                             instance: i as u32,
+
+                            lod_count,
+                            lods,
+
+                            ..Primitive::default()
                         }
                     })
             })
@@ -434,7 +462,7 @@ impl Scene {
 
             let push_consts = [vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<FrustrumInfo>() as u32)
+                .size(mem::size_of::<CullInfo>() as u32)
                 .offset(0)
                 .build()];
 
@@ -497,21 +525,24 @@ impl Scene {
         let horizontal = normalize_plane(camera.proj.row(3) + camera.proj.row(0));
         let vertical = normalize_plane(camera.proj.row(3) + camera.proj.row(1));
 
-        let frustrum_info = FrustrumInfo {
+        let cull_info = CullInfo {
             z_near: camera.z_near,
             z_far: camera.z_far,
 
-            left: horizontal.x,
-            right: horizontal.y,
-            top: vertical.y,
-            bottom: vertical.z,
+            frust_left: horizontal.x,
+            frust_right: horizontal.y,
+            frust_top: vertical.y,
+            frust_bottom: vertical.z,
+
+            lod_base: 10.0,
+            lod_step: 2.0,
         };
 
         recorder.push_constants(
             self.cull_pipeline.layout(),
             vk::ShaderStageFlags::COMPUTE,
             0,
-            &frustrum_info,
+            &cull_info,
         );
 
         recorder.dispatch(self.cull_pipeline.clone(), [
@@ -558,3 +589,5 @@ impl Scene {
         });
     }
 }
+
+const MAX_LOD_COUNT: usize = 8;

@@ -135,18 +135,18 @@ pub struct BoundingSphere {
 }
 
 #[derive(Clone, Copy, Serialize, Deserialize)]
+pub struct Lod {
+    pub index_start: u32,
+    pub index_count: u32,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Primitive {
     /// The material of the mesh.
     pub material: usize,
 
-    /// The first index from `Scene::indices` used.
-    pub index_start: u32,
+    pub lods: Vec<Lod>,
 
-    /// The number of indices in the mesh.
-    pub index_count: u32,
-
-    /// The vertex start / vertex offset.
-    ///
     /// This is the first vertex index 0 points to.
     pub vertex_start: u32,
 

@@ -551,11 +551,12 @@ impl Device {
         let mut vk12_features = vk::PhysicalDeviceVulkan12Features::builder()
             .shader_sampled_image_array_non_uniform_indexing(true)
             .shader_input_attachment_array_dynamic_indexing(true)
-            .shader_float16(true)
-            .runtime_descriptor_array(true)
             .descriptor_binding_variable_descriptor_count(true)
+            .runtime_descriptor_array(true)
+            .scalar_block_layout(true)
             .draw_indirect_count(true)
             .descriptor_indexing(true)
+            .shader_float16(true)
             .build();
 
         let layer_names: Vec<_> = instance.layers
