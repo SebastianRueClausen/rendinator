@@ -426,10 +426,10 @@ impl Lights {
 
         recorder.buffer_barrier(&BufferBarrierReq {
             buffer: self.light_pos_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_mask: vk::AccessFlags::SHADER_READ,
-            src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+            src_mask: vk::AccessFlags2::SHADER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_READ,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
         });
 
         let group_count = self.cluster_info.info.cluster_subdivisions();
@@ -437,10 +437,10 @@ impl Lights {
 
         recorder.buffer_barrier(&BufferBarrierReq {
             buffer: self.light_mask_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_mask: vk::AccessFlags::SHADER_READ,
-            src_stage:vk::PipelineStageFlags::COMPUTE_SHADER,
-            dst_stage:vk::PipelineStageFlags::FRAGMENT_SHADER,
+            src_mask: vk::AccessFlags2::SHADER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_READ,
+            src_stage:vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage:vk::PipelineStageFlags2::FRAGMENT_SHADER,
         });
     }
 

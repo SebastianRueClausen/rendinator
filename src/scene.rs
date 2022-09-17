@@ -505,10 +505,10 @@ impl Scene {
 
         recorder.buffer_barrier(&BufferBarrierReq {
             buffer: self.draw_count_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags::TRANSFER_WRITE,
-            dst_mask: vk::AccessFlags::SHADER_WRITE,
-            src_stage: vk::PipelineStageFlags::TRANSFER,
-            dst_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+            src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+            src_stage: vk::PipelineStageFlags2::TRANSFER,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
         });
 
         recorder.bind_descriptor_sets(&DescriptorBindReq {
@@ -551,10 +551,10 @@ impl Scene {
 
         recorder.buffer_barrier(&BufferBarrierReq {
             buffer: self.draw_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags::SHADER_WRITE,
-            dst_mask: vk::AccessFlags::INDIRECT_COMMAND_READ,
-            src_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags::DRAW_INDIRECT,
+            src_mask: vk::AccessFlags2::SHADER_WRITE,
+            dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
         });
     }
 

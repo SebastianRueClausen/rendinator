@@ -126,11 +126,13 @@ impl Renderer {
                 let color_resolve_image = &self.render_targets.targets[frame.index].color_resolve;
                 let depth_image = &self.render_targets.targets[frame.index].depth;
 
+                // Transition color resolve image layout to color attachment.
                 recorder.image_barrier(&ImageBarrierReq {
-                    src_stage: vk::PipelineStageFlags::ALL_COMMANDS,
-                    dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    src_mask: vk::AccessFlags::empty(),
-                    dst_mask: vk::AccessFlags::empty(),
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+                    dst_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    src_mask: vk::AccessFlags2::NONE,
+                    dst_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                     new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
                     image: color_resolve_image.image().clone(),
                 });
@@ -185,20 +187,24 @@ impl Renderer {
                     self.device.handle.cmd_end_rendering(recorder.buffer.handle);
                 };
 
+                // Transition swapchain image layout to transfer destination layout before resolve stage.
                 recorder.image_barrier(&ImageBarrierReq {
-                    src_stage: vk::PipelineStageFlags::empty(),
-                    dst_stage: vk::PipelineStageFlags::TRANSFER,
-                    src_mask: vk::AccessFlags::empty(),
-                    dst_mask: vk::AccessFlags::empty(),
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::empty(),
+                    dst_stage: vk::PipelineStageFlags2::RESOLVE,
+                    src_mask: vk::AccessFlags2::empty(),
+                    dst_mask: vk::AccessFlags2::TRANSFER_WRITE,
                     new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     image: swapchain_image.image().clone(),
                 });
 
+                // Transition color resolve image to transfer source layout before resolve stage.
                 recorder.image_barrier(&ImageBarrierReq {
-                    src_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                    dst_stage: vk::PipelineStageFlags::TRANSFER,
-                    src_mask: vk::AccessFlags::empty(),
-                    dst_mask: vk::AccessFlags::empty(),
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                    dst_stage: vk::PipelineStageFlags2::RESOLVE,
+                    src_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                    dst_mask: vk::AccessFlags2::TRANSFER_WRITE,
                     new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                     image: color_resolve_image.image().clone(),
                 });
@@ -208,11 +214,13 @@ impl Renderer {
                     dst: swapchain_image.image().clone(),
                 });
 
+                // Transition swapchain image to present layout.
                 recorder.image_barrier(&ImageBarrierReq {
-                    src_stage: vk::PipelineStageFlags::TRANSFER,
-                    dst_stage: vk::PipelineStageFlags::empty(),
-                    src_mask: vk::AccessFlags::TRANSFER_WRITE,
-                    dst_mask: vk::AccessFlags::empty(),
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::RESOLVE,
+                    dst_stage: vk::PipelineStageFlags2::empty(),
+                    src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+                    dst_mask: vk::AccessFlags2::empty(),
                     new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                     image: swapchain_image.image().clone(),
                 });
@@ -987,10 +995,11 @@ impl RenderTargets {
         command_buffer.record(SubmitCount::OneTime, |recorder| {
             for target in &targets {
                 recorder.image_barrier(&ImageBarrierReq {
-                    src_stage: vk::PipelineStageFlags::ALL_COMMANDS,
-                    dst_stage: vk::PipelineStageFlags::ALL_COMMANDS,
-                    src_mask: vk::AccessFlags::empty(),
-                    dst_mask: vk::AccessFlags::empty(),
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+                    dst_stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+                    src_mask: vk::AccessFlags2::empty(),
+                    dst_mask: vk::AccessFlags2::empty(),
                     new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
                     image: target.depth.image().clone(),
                 });
@@ -1975,19 +1984,21 @@ pub struct IndexedIndirectDrawReq {
 pub struct BufferBarrierReq {
     pub buffer: Res<Buffer>,
 
-    pub src_mask: vk::AccessFlags,
-    pub dst_mask: vk::AccessFlags,
-    pub src_stage: vk::PipelineStageFlags,
-    pub dst_stage: vk::PipelineStageFlags,
+    pub src_mask: vk::AccessFlags2,
+    pub dst_mask: vk::AccessFlags2,
+    pub src_stage: vk::PipelineStageFlags2,
+    pub dst_stage: vk::PipelineStageFlags2,
 }
 
 pub struct ImageBarrierReq {
     pub image: Res<Image>,
 
-    pub src_mask: vk::AccessFlags,
-    pub dst_mask: vk::AccessFlags,
-    pub src_stage: vk::PipelineStageFlags,
-    pub dst_stage: vk::PipelineStageFlags,
+    pub flags: vk::DependencyFlags,
+
+    pub src_mask: vk::AccessFlags2,
+    pub dst_mask: vk::AccessFlags2,
+    pub src_stage: vk::PipelineStageFlags2,
+    pub dst_stage: vk::PipelineStageFlags2,
 
     pub new_layout: vk::ImageLayout,
 }
@@ -2015,15 +2026,19 @@ impl<'a> CommandRecorder<'a> {
 
     pub fn copy_buffers(&self, src: Res<Buffer>, dst: Res<Buffer>) {
         let size = src.size().min(dst.size());
-        let regions = [vk::BufferCopy::builder()
+        let regions = [vk::BufferCopy2::builder()
             .src_offset(0)
             .dst_offset(0)
             .size(size)
             .build()];
+
+        let info = vk::CopyBufferInfo2::builder()
+            .src_buffer(src.handle)
+            .dst_buffer(dst.handle)
+            .regions(&regions);
+
         unsafe { 
-            self.device()
-                .handle
-                .cmd_copy_buffer(self.buffer.handle, src.handle, dst.handle, &regions);
+            self.device().handle.cmd_copy_buffer2(self.buffer.handle, &info);
         }
 
         self.buffer.bind_resource(src);
@@ -2040,21 +2055,22 @@ impl<'a> CommandRecorder<'a> {
         
         let extent = dst.extent(mip_level);
 
-        let regions = [vk::BufferImageCopy::builder()
+        let regions = [vk::BufferImageCopy2::builder()
             .buffer_offset(0)
             .buffer_row_length(extent.width)
             .buffer_image_height(0)
             .image_extent(extent)
             .image_subresource(subresource)
             .build()];
+
+        let info = vk::CopyBufferToImageInfo2::builder()
+            .src_buffer(src.handle)
+            .dst_image(dst.handle)
+            .dst_image_layout(dst.layout())
+            .regions(&regions);
+
         unsafe {
-            self.device().handle.cmd_copy_buffer_to_image(
-                self.buffer.handle,
-                src.handle,
-                dst.handle,
-                dst.layout(),
-                &regions,
-            );
+            self.device().handle.cmd_copy_buffer_to_image2(self.buffer.handle, &info);
         }
 
         self.buffer.bind_resource(src);
@@ -2069,7 +2085,7 @@ impl<'a> CommandRecorder<'a> {
             .base_array_layer(0)
             .layer_count(req.image.layer_count())
             .build();
-        let barrier = vk::ImageMemoryBarrier::builder()
+        let barriers = [vk::ImageMemoryBarrier2::builder()
             .image(req.image.handle)
             .old_layout(req.image.layout())
             .new_layout(req.new_layout)
@@ -2077,21 +2093,19 @@ impl<'a> CommandRecorder<'a> {
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .src_access_mask(req.src_mask)
             .dst_access_mask(req.dst_mask)
-            .subresource_range(subresource);
+            .src_stage_mask(req.src_stage)
+            .dst_stage_mask(req.dst_stage)
+            .subresource_range(subresource)
+            .build()];
 
         req.image.layout.set(req.new_layout);
 
+        let dependency_info = vk::DependencyInfo::builder()
+            .dependency_flags(req.flags)
+            .image_memory_barriers(&barriers);
+
         unsafe {
-            let barriers = [barrier.build()];
-            self.device().handle.cmd_pipeline_barrier(
-                self.buffer.handle,
-                req.src_stage,
-                req.dst_stage,
-                vk::DependencyFlags::empty(),
-                &[],
-                &[],
-                &barriers,
-            );
+            self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
         }
 
         self.buffer.bind_resource(req.image.clone());
@@ -2133,22 +2147,22 @@ impl<'a> CommandRecorder<'a> {
     pub fn transition_image_layout(&self, image: Res<Image>, new: vk::ImageLayout) {
         let (src_stage, dst_stage, src_mask, dst_mask) = match (image.layout(), new) {
             (_, vk::ImageLayout::GENERAL) => (
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::COMPUTE_SHADER,
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::SHADER_WRITE,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::PipelineStageFlags2::COMPUTE_SHADER,
+                vk::AccessFlags2::empty(),
+                vk::AccessFlags2::empty(),
             ),
             (_, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
-                vk::PipelineStageFlags::TOP_OF_PIPE,
-                vk::PipelineStageFlags::TRANSFER,
-                vk::AccessFlags::empty(),
-                vk::AccessFlags::TRANSFER_WRITE,
+                vk::PipelineStageFlags2::TOP_OF_PIPE,
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::AccessFlags2::empty(),
+                vk::AccessFlags2::empty(),
             ),
             (_, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
-                vk::PipelineStageFlags::TRANSFER,
-                vk::PipelineStageFlags::FRAGMENT_SHADER,
-                vk::AccessFlags::TRANSFER_WRITE,
-                vk::AccessFlags::SHADER_READ,
+                vk::PipelineStageFlags2::TRANSFER,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::empty(),
+                vk::AccessFlags2::empty(),
             ),
             _ => {
                 todo!()
@@ -2156,6 +2170,7 @@ impl<'a> CommandRecorder<'a> {
         };
 
         self.image_barrier(&ImageBarrierReq {
+            flags: vk::DependencyFlags::BY_REGION,
             new_layout: new,
             src_stage,
             dst_stage,
@@ -2333,9 +2348,11 @@ impl<'a> CommandRecorder<'a> {
     }
 
     pub fn buffer_barrier(&self, req: &BufferBarrierReq) {
-        let barriers = [vk::BufferMemoryBarrier::builder()
+        let barriers = [vk::BufferMemoryBarrier2::builder()
             .src_access_mask(req.src_mask)
             .dst_access_mask(req.dst_mask)
+            .src_stage_mask(req.src_stage)
+            .dst_stage_mask(req.dst_stage)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .buffer(req.buffer.handle)
@@ -2343,16 +2360,12 @@ impl<'a> CommandRecorder<'a> {
             .size(req.buffer.size())
             .build()];
 
+        let dependency_info = vk::DependencyInfo::builder()
+            .dependency_flags(vk::DependencyFlags::empty())
+            .buffer_memory_barriers(&barriers);
+
         unsafe {
-            self.device().handle.cmd_pipeline_barrier(
-                self.buffer.handle,
-                req.src_stage,
-                req.dst_stage,
-                vk::DependencyFlags::empty(),
-                &[],
-                &barriers,
-                &[],
-            );
+            self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
         }
 
         self.buffer.bind_resource(req.buffer.clone());
