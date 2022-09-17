@@ -226,9 +226,9 @@ pub enum ImageKind {
         samples: vk::SampleCountFlags,
         queue: Res<Queue>,
     },
+    Swapchain { handle: vk::Image },
 }
 
-#[derive(Clone)]
 pub struct ImageReq {
     pub kind: ImageKind,
     pub format: vk::Format,
@@ -236,21 +236,29 @@ pub struct ImageReq {
     pub mip_levels: u32,
 }
 
-#[derive(Clone)]
+enum ImageStorage {
+    Swapchain,
+    Block {
+        range: MemoryRange,
+
+        #[allow(dead_code)]
+        block: Rc<MemoryBlock>,
+    },
+}
+
+// FIXME: Swapchain images may be invalid if the swapchain is recreated or destroyed.
 pub struct Image {
     pub handle: vk::Image,
+    pub layout: Cell<vk::ImageLayout>,
 
     kind: ImageKind,
 
     extent: vk::Extent3D,
     format: vk::Format,
-
     mip_levels: u32,
 
-    pub layout: Cell<vk::ImageLayout>,
-
-    range: MemoryRange,
-    block: Rc<MemoryBlock>,
+    storage: ImageStorage,
+    device: Res<Device>,
 }
 
 impl Image {
@@ -275,12 +283,26 @@ impl Image {
             (1, vk::ImageCreateFlags::empty())
         };
 
-        let usage_flags = match &req.kind {
+        let layout = Cell::new(vk::ImageLayout::UNDEFINED);
+
+        let usage_flags = match req.kind {
             ImageKind::CubeMap => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
             ImageKind::Texture => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             ImageKind::Depth { .. } => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            ImageKind::ColorResolve { .. } => vk::ImageUsageFlags::TRANSIENT_ATTACHMENT
-                | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+            ImageKind::ColorResolve { .. } => vk::ImageUsageFlags::COLOR_ATTACHMENT
+                | vk::ImageUsageFlags::TRANSFER_SRC,
+            ImageKind::Swapchain { handle } => {
+                return Ok(pool.alloc(Self {
+                    storage: ImageStorage::Swapchain,
+                    mip_levels: req.mip_levels,
+                    device: device.clone(),
+                    extent: req.extent,
+                    format: req.format,
+                    kind: req.kind.clone(),
+                    layout,
+                    handle,
+                }));
+            }
         };
 
         let handle = {
@@ -333,24 +355,28 @@ impl Image {
             device.handle.bind_image_memory(handle, block.handle, range.start)?;
         }
 
-        let layout = Cell::new(vk::ImageLayout::UNDEFINED);
         let kind = req.kind.clone();
+
+        let storage = ImageStorage::Block { range: 0..memory_req.size, block };
 
         Ok(pool.alloc(Self {
             mip_levels: req.mip_levels,
+            device: device.clone(),
             extent: req.extent,
             format: req.format,
-            range: 0..memory_req.size,
+            storage,
             layout,
             handle,
-            block,
             kind,
         }))
     }
 
     #[allow(dead_code)]
     pub fn size(&self) -> vk::DeviceSize {
-        self.range.end - self.range.start
+        match &self.storage {
+            ImageStorage::Block { range, .. } => range_length(range),
+            ImageStorage::Swapchain => todo!(),
+        }
     }
 
     pub fn layout(&self) -> vk::ImageLayout {
@@ -392,7 +418,12 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        unsafe { self.block.device.handle.destroy_image(self.handle, None); }
+        // Swapchain images should not be manually destroyd.
+        if let ImageStorage::Block { .. } = self.storage {
+            unsafe {
+                self.device.handle.destroy_image(self.handle, None);
+            }
+        }
     }
 }
 
@@ -442,14 +473,14 @@ impl ImageView {
         self.image.layout()
     }
 
-    pub fn image(&self) -> &Image {
+    pub fn image(&self) -> &Res<Image> {
         &self.image
     }
 }
 
 impl Drop for ImageView {
     fn drop(&mut self) {
-        unsafe { self.image.block.device.handle.destroy_image_view(self.handle, None) }
+        unsafe { self.image.device.handle.destroy_image_view(self.handle, None) }
     }
 }
 

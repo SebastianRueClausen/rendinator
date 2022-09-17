@@ -15,8 +15,6 @@ pub struct Renderer {
     pub device: Res<Device>,
     pub swapchain: Swapchain,
 
-    render_pass: RenderPass,
-
     frame_queue: FrameQueue,
 
     render_targets: RenderTargets,
@@ -68,6 +66,7 @@ impl Renderer {
 
         let swapchain = Swapchain::new(
             device.clone(),
+            &pool,
             surface.clone(),
             graphics_queue.clone(),
             window_extent,
@@ -80,7 +79,6 @@ impl Renderer {
             &swapchain,
         )?;
 
-        let render_pass = RenderPass::new(device.clone(), &swapchain, &render_targets)?;
         let frame_queue = FrameQueue::new(device.clone(), graphics_queue.clone())?;
 
         device.wait_until_idle();
@@ -88,7 +86,6 @@ impl Renderer {
         Ok(Self {
             device,
             swapchain,
-            render_pass,
             frame_queue,
             render_targets,
             graphics_queue,
@@ -125,54 +122,101 @@ impl Renderer {
             frame.command_buffer.record(SubmitCount::OneTime, |recorder| {
                 pre(recorder, frame.index);
 
-                let framebuffer =
-                    self.render_pass.get_framebuffer(&self.swapchain, frame.index, image_index);
+                let swapchain_image = self.swapchain.image(image_index);
+                let color_resolve_image = &self.render_targets.targets[frame.index].color_resolve;
+                let depth_image = &self.render_targets.targets[frame.index].depth;
 
-                let clear_values = [
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.2, 0.2, 0.2, 1.0],
-                        },
-                    },
-                    vk::ClearValue {
+                recorder.image_barrier(&ImageBarrierReq {
+                    src_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+                    dst_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    src_mask: vk::AccessFlags::empty(),
+                    dst_mask: vk::AccessFlags::empty(),
+                    new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                    image: color_resolve_image.image().clone(),
+                });
+
+                let color_attachments = [
+                    vk::RenderingAttachmentInfo::builder()
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .image_view(color_resolve_image.handle)
+                        .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .clear_value(vk::ClearValue {
+                            color: vk::ClearColorValue {
+                                float32: [0.0, 0.0, 0.0, 1.0],
+                            },
+                        })
+                        .build(),
+                ];
+
+                let depth_resolve_attachment = vk::RenderingAttachmentInfo::builder()
+                    .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
+                    .image_view(depth_image.handle)
+                    .load_op(vk::AttachmentLoadOp::CLEAR)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
                         depth_stencil: vk::ClearDepthStencilValue {
                             depth: 1.0,
                             stencil: 0,
                         },
-                    },
-                    vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.00, 0.00, 0.00, 1.0],
-                        },
-                    },
-                ];
+                    });
 
-                let render_pass_begin_info = vk::RenderPassBeginInfo::builder()
-                    .render_pass(self.render_pass.handle)
-                    .framebuffer(framebuffer)
+                let rendering_info = vk::RenderingInfo::builder()
+                    .color_attachments(&color_attachments)
+                    .depth_attachment(&depth_resolve_attachment)
+                    .layer_count(1)
                     .render_area(vk::Rect2D {
                         offset: vk::Offset2D { x: 0, y: 0 },
                         extent: self.swapchain.extent,
-                    })
-                    .clear_values(&clear_values);
+                    });
+
+                let viewports = self.swapchain.viewports();
+                let scissors = self.swapchain.scissors();
 
                 unsafe {
-                    self.device.handle.cmd_begin_render_pass(
-                        recorder.buffer.handle,
-                        &render_pass_begin_info,
-                        vk::SubpassContents::INLINE,
-                    );
-
-                    let viewports = self.swapchain.viewports();
-                    let scissors = self.swapchain.scissors();
-
+                    self.device.handle.cmd_begin_rendering(recorder.buffer.handle, &rendering_info);
                     self.device.handle.cmd_set_viewport(recorder.buffer.handle, 0, &viewports);
                     self.device.handle.cmd_set_scissor(recorder.buffer.handle, 0, &scissors);
                 }
 
                 render(&recorder, frame.index);
 
-                unsafe { self.device.handle.cmd_end_render_pass(recorder.buffer.handle) };
+                unsafe {
+                    self.device.handle.cmd_end_rendering(recorder.buffer.handle);
+                };
+
+                recorder.image_barrier(&ImageBarrierReq {
+                    src_stage: vk::PipelineStageFlags::empty(),
+                    dst_stage: vk::PipelineStageFlags::TRANSFER,
+                    src_mask: vk::AccessFlags::empty(),
+                    dst_mask: vk::AccessFlags::empty(),
+                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    image: swapchain_image.image().clone(),
+                });
+
+                recorder.image_barrier(&ImageBarrierReq {
+                    src_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    dst_stage: vk::PipelineStageFlags::TRANSFER,
+                    src_mask: vk::AccessFlags::empty(),
+                    dst_mask: vk::AccessFlags::empty(),
+                    new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    image: color_resolve_image.image().clone(),
+                });
+
+                recorder.resolve_image(&ImageResolveReq {
+                    src: color_resolve_image.image().clone(),
+                    dst: swapchain_image.image().clone(),
+                });
+
+                recorder.image_barrier(&ImageBarrierReq {
+                    src_stage: vk::PipelineStageFlags::TRANSFER,
+                    dst_stage: vk::PipelineStageFlags::empty(),
+                    src_mask: vk::AccessFlags::TRANSFER_WRITE,
+                    dst_mask: vk::AccessFlags::empty(),
+                    new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                    image: swapchain_image.image().clone(),
+                });
+
             })?;
 
             // Submit command buffer to be rendered. Wait for semaphore `frame.presented` first and
@@ -266,19 +310,13 @@ impl Renderer {
             height: window.inner_size().height,
         };
 
-        self.swapchain.recreate(extent)?;
+        self.swapchain.recreate(&self.pool, extent)?;
 
         self.render_targets = RenderTargets::new(
             self.device.clone(),
             self.graphics_queue.clone(),
             &self.pool,
             &self.swapchain,
-        )?;
-
-        self.render_pass = RenderPass::new(
-            self.device.clone(),
-            &self.swapchain,
-            &self.render_targets,
         )?;
 
         self.device.wait_until_idle();
@@ -323,7 +361,7 @@ impl Instance {
         };
 
         let layer_names: Vec<_> = layers.iter().map(|layer| layer.as_ptr()).collect();
-        let version = vk::make_api_version(0, 1, 2, 0);
+        let version = vk::make_api_version(0, 1, 3, 0);
 
         let handle = unsafe {
             let engine_name = CString::new("spillemotor").unwrap();
@@ -403,8 +441,7 @@ pub struct PhysicalDevice {
 impl PhysicalDevice {
     pub fn select(instance: &Instance) -> Result<Self> {
         let handle = unsafe {
-            instance
-                .handle
+            instance.handle
                 .enumerate_physical_devices()?
                 .into_iter()
                 .max_by_key(|dev| {
@@ -559,6 +596,11 @@ impl Device {
             .shader_float16(true)
             .build();
 
+        let mut vk13_features = vk::PhysicalDeviceVulkan13Features::builder()
+            .dynamic_rendering(true)
+            .synchronization2(true)
+            .build();
+
         let layer_names: Vec<_> = instance.layers
             .iter()
             .map(|layer| layer.as_ptr())
@@ -570,7 +612,8 @@ impl Device {
             .enabled_layer_names(&layer_names)
             .enabled_features(&enabled_features)
             .push_next(&mut vk11_features)
-            .push_next(&mut vk12_features);
+            .push_next(&mut vk12_features)
+            .push_next(&mut vk13_features);
 
         let handle = unsafe { instance.handle.create_device(physical.handle, &device_info, None)? };
 
@@ -631,177 +674,6 @@ impl DebugMessenger {
         let handle = unsafe { loader.create_debug_utils_messenger(&info, None)? };
 
         Ok(Self { loader, handle })
-    }
-}
-
-struct RenderPass {
-    handle: vk::RenderPass,
-    /// We choose the amount of framebuffers to be the swapchain image count times `FRAMES_IN_FLIGHT`.
-    ///
-    /// This is to avoid allocating attachments for each swapchain image. Instead we have a
-    /// framebuffer for each combination of frame resources and swapchain image, and can therefore
-    /// have a render attachment for each frame in flight instead. It's essentially a mapping from
-    /// swapchain image index and frame index to framebuffer.
-    ///
-    /// Alternatively you could either have a render attachments for each swapchain image, or
-    /// create a new framebuffer dynamically before each frame. They both have disadvanges however.
-    ///
-    /// Some graphics cards gives up to 5 swapchain images it seems, so having 5 depth images and
-    /// msaa images is be somewhat wasteful considering we only use `FRAMES_IN_FLIGHT` at a time.
-    ///
-    /// Creating new a new framebuffer each frame doesn't seem to be expensive as such, but it's
-    /// still seems like an unnecessary cost to pay.
-    ///
-    /// # TODO
-    ///
-    /// Maybe use dynamic rendering instead.
-    ///
-    /// # Example
-    ///
-    /// Let's say the system gives 4 swapchain images and we have 2 images in flight, the
-    /// framebuffers looks as follows.
-    ///
-    /// | Framebuffer | Frame | Image |
-    /// |-------------|-------|-------|
-    /// | 0           | 0     | 0     |
-    /// | 1           | 0     | 1     |
-    /// | 2           | 0     | 2     |
-    /// | 3           | 0     | 3     |
-    /// | 4           | 1     | 0     |
-    /// | 5           | 1     | 1     |
-    /// | 6           | 1     | 2     |
-    /// | 7           | 1     | 3     |
-    ///
-    /// As you can see there is a framebuffer for each combination of frame and image.
-    ///
-    framebuffers: Vec<vk::Framebuffer>,
-
-    device: Res<Device>,
-}
-
-impl RenderPass {
-    fn new(device: Res<Device>, swapchain: &Swapchain, render_targets: &RenderTargets) -> Result<Self> {
-        let attachments = [
-            // Swapchain image.
-            vk::AttachmentDescription::builder()
-                .format(swapchain.surface_format.format)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .samples(render_targets.sample_count)
-                .build(),
-            // Depth image.
-            vk::AttachmentDescription::builder()
-                .format(DEPTH_IMAGE_FORMAT)
-                .load_op(vk::AttachmentLoadOp::CLEAR)
-                .store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-                .samples(render_targets.sample_count)
-                .build(),
-            // Color resolve image.
-            vk::AttachmentDescription::builder()
-                .format(swapchain.surface_format.format)
-                .load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .stencil_load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .stencil_store_op(vk::AttachmentStoreOp::DONT_CARE)
-                .initial_layout(vk::ImageLayout::UNDEFINED)
-                .final_layout(vk::ImageLayout::PRESENT_SRC_KHR)
-                .samples(vk::SampleCountFlags::TYPE_1)
-                .build(),
-        ];
-
-        let color_attachments = [vk::AttachmentReference {
-            attachment: 0,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        }];
-
-        let depth_attachment = vk::AttachmentReference {
-            attachment: 1,
-            layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
-        };
-
-        let color_resolve_attachment = [vk::AttachmentReference {
-            attachment: 2,
-            layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-        }];
-
-        let subpasses = [vk::SubpassDescription::builder()
-            .depth_stencil_attachment(&depth_attachment)
-            .resolve_attachments(&color_resolve_attachment)
-            .color_attachments(&color_attachments)
-            .pipeline_bind_point(vk::PipelineBindPoint::GRAPHICS)
-            .build()];
-
-        let subpass_dependencies = [vk::SubpassDependency::builder()
-            .src_subpass(vk::SUBPASS_EXTERNAL)
-            .src_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .src_access_mask(vk::AccessFlags::empty())
-            .dst_subpass(0)
-            .dst_stage_mask(vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT)
-            .dst_access_mask(vk::AccessFlags::COLOR_ATTACHMENT_WRITE)
-            .build()];
-
-        let handle = unsafe {
-            let info = vk::RenderPassCreateInfo::builder()
-                .attachments(&attachments)
-                .subpasses(&subpasses)
-                .dependencies(&subpass_dependencies);
-            device.handle.create_render_pass(&info, None)?
-        };
-
-        let framebuffers: Result<Vec<_>> = render_targets.targets
-            .iter()
-            .flat_map(|t| iter::repeat(t).take(swapchain.image_count() as usize))
-            .zip(swapchain.images.iter().cycle())
-            .map(|(render_targets, swapchain_image)| {
-                let views = [
-                    render_targets.color_resolve.handle,
-                    render_targets.depth.handle,
-                    swapchain_image.view,
-                ];
-                let info = vk::FramebufferCreateInfo::builder()
-                    .render_pass(handle)
-                    .attachments(&views)
-                    .width(swapchain.extent.width)
-                    .height(swapchain.extent.height)
-                    .layers(1);
-                Ok(unsafe { device.handle.create_framebuffer(&info, None)? })
-            })
-            .collect();
-
-        Ok(RenderPass { device: device.clone(), framebuffers: framebuffers?, handle })
-    }
-
-    /// Get the framebuffer mapped to `image_index` and `frame_index`.
-    ///
-    /// See [`RenderPass::framebuffers`] for details.
-    fn get_framebuffer(
-        &self,
-        swapchain: &Swapchain,
-        frame_index: FrameIndex,
-        image_index: u32,
-    ) -> vk::Framebuffer {
-        let index = frame_index as u32 * swapchain.image_count() + image_index;
-        self.framebuffers[index as usize]
-    }
-}
-
-impl Drop for RenderPass {
-    fn drop(&mut self) {
-        unsafe {
-            self.device.handle.destroy_render_pass(self.handle, None);
-
-            for framebuffer in &self.framebuffers {
-                self.device.handle.destroy_framebuffer(*framebuffer, None);
-            }
-        }
     }
 }
 
@@ -1029,32 +901,6 @@ impl Drop for Surface {
     }
 }
 
-struct SwapchainImage {
-    #[allow(dead_code)]
-    image: vk::Image,
-    view: vk::ImageView,
-}
-
-impl SwapchainImage {
-    fn new(device: &Device, image: vk::Image, format: vk::Format) -> Result<Self> {
-        let view = unsafe {
-            let subresource_range = vk::ImageSubresourceRange::builder()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_mip_level(0)
-                .level_count(1)
-                .base_array_layer(0)
-                .layer_count(1);
-            let view_info = vk::ImageViewCreateInfo::builder()
-                .image(image)
-                .view_type(vk::ImageViewType::TYPE_2D)
-                .format(format)
-                .subresource_range(*subresource_range);
-            device.handle.create_image_view(&view_info, None)?
-        };
-        Ok(SwapchainImage { image, view })
-    }
-}
-
 #[derive(Clone)]
 struct RenderTarget {
     color_resolve: Res<ImageView>,
@@ -1062,7 +908,7 @@ struct RenderTarget {
 }
 
 struct RenderTargets {
-    targets: Vec<RenderTarget>,
+    targets: PerFrame<RenderTarget>,
     sample_count: vk::SampleCountFlags,
 
     #[allow(dead_code)]
@@ -1105,43 +951,63 @@ impl RenderTargets {
         };
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let targets: Result<Vec<_>> = (0..FRAMES_IN_FLIGHT)
-            .map(|_| {
-                let depth_image = Image::from_device(
-                    device.clone(),
-                    pool,
-                    memory_flags,
-                    &depth_image_req,
-                )?;
+        let targets = PerFrame::try_from_fn(|_| {
+            let depth_image = Image::from_device(
+                device.clone(),
+                pool,
+                memory_flags,
+                &depth_image_req,
+            )?;
 
-                let depth = ImageView::from_device(
-                    device.clone(),
-                    pool,
-                    depth_image.clone(),
-                    vk::ImageViewType::TYPE_2D,
-                )?;
+            let depth = ImageView::from_device(
+                device.clone(),
+                pool,
+                depth_image.clone(),
+                vk::ImageViewType::TYPE_2D,
+            )?;
 
-                let color_resolve_image = Image::from_device(
-                    device.clone(),
-                    pool,
-                    memory_flags,
-                    &color_resolve_req,
-                )?;
+            let color_resolve_image = Image::from_device(
+                device.clone(),
+                pool,
+                memory_flags,
+                &color_resolve_req,
+            )?;
 
-                let color_resolve = ImageView::from_device(
-                    device.clone(),
-                    pool,
-                    color_resolve_image.clone(),
-                    vk::ImageViewType::TYPE_2D,
-                )?;
+            let color_resolve = ImageView::from_device(
+                device.clone(),
+                pool,
+                color_resolve_image.clone(),
+                vk::ImageViewType::TYPE_2D,
+            )?;
 
-                Ok(RenderTarget { depth, color_resolve })
-            })
-            .collect();
+            Ok(RenderTarget { depth, color_resolve })
+        })?;
 
-        let targets = targets?;
+        let command_buffer = CommandBuffer::new(device.clone(), graphics_queue.clone())?;
+        command_buffer.record(SubmitCount::OneTime, |recorder| {
+            for target in &targets {
+                recorder.image_barrier(&ImageBarrierReq {
+                    src_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+                    dst_stage: vk::PipelineStageFlags::ALL_COMMANDS,
+                    src_mask: vk::AccessFlags::empty(),
+                    dst_mask: vk::AccessFlags::empty(),
+                    new_layout: vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                    image: target.depth.image().clone(),
+                });
+            }
+        })?;
+
+        command_buffer.submit_wait_idle()?;
 
         Ok(Self { targets, sample_count: samples, graphics_queue })
+    }
+
+    fn depth_format(&self) -> vk::Format {
+        DEPTH_IMAGE_FORMAT
+    }
+
+    fn color_resolve_format(&self) -> vk::Format {
+        self.targets[FrameIndex::Uno].color_resolve.image().format()
     }
 }
 
@@ -1153,7 +1019,7 @@ pub struct Swapchain {
     surface_format: vk::SurfaceFormatKHR,
     pub extent: vk::Extent2D,
 
-    images: Vec<SwapchainImage>,
+    images: Vec<Res<ImageView>>,
 
     device: Res<Device>,
     surface: Res<Surface>,
@@ -1170,6 +1036,7 @@ impl Swapchain {
     /// if it aren't able to determine it from `surface`.
     pub fn new(
         device: Res<Device>,
+        pool: &ResourcePool,
         surface: Res<Surface>,
         graphics_queue: Res<Queue>,
         extent: vk::Extent2D,
@@ -1202,8 +1069,8 @@ impl Swapchain {
         let surface_format = surface_formats
             .iter()
             .find(|format| {
-                format.format == ash::vk::Format::B8G8R8A8_SRGB
-                    && format.color_space == ash::vk::ColorSpaceKHR::SRGB_NONLINEAR
+                format.format == vk::Format::B8G8R8A8_SRGB
+                    && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
             .or_else(|| surface_formats.first())
             .ok_or_else(|| anyhow!("can't find valid surface format"))?
@@ -1237,7 +1104,7 @@ impl Swapchain {
             .min_image_count(min_image_count)
             .image_format(surface_format.format)
             .image_color_space(surface_format.color_space)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .queue_family_indices(&queue_families)
             .pre_transform(surface_caps.current_transform)
@@ -1254,7 +1121,21 @@ impl Swapchain {
 
         let images: Result<Vec<_>> = images
             .into_iter()
-            .map(|image| SwapchainImage::new(&device, image, surface_format.format))
+            .map(|handle| {
+                let memory_flags = vk::MemoryPropertyFlags::empty();
+                let image = Image::from_device(device.clone(), pool, memory_flags, &ImageReq {
+                    kind: ImageKind::Swapchain { handle },
+                    format: surface_format.format,
+                    mip_levels: 1,
+                    extent: vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                })?;
+
+                ImageView::from_device(device.clone(), pool, image, vk::ImageViewType::TYPE_2D)
+            })
             .collect();
 
         Ok(Self {
@@ -1275,7 +1156,7 @@ impl Swapchain {
     /// `extent` must be valid here unlike in `Self::new`, otherwise it could end in and endless
     /// cycle if recreating the swapchain, if for some reason the surface continues to give us and
     /// invalid extent.
-    pub fn recreate(&mut self, extent: vk::Extent2D) -> Result<()> {
+    pub fn recreate(&mut self, pool: &ResourcePool, extent: vk::Extent2D) -> Result<()> {
         if extent.width == u32::MAX {
             return Err(anyhow!("`extent` must be valid when recreating swapchain"));
         }
@@ -1296,7 +1177,7 @@ impl Swapchain {
             .min_image_count(min_image_count)
             .image_format(self.surface_format.format)
             .image_color_space(self.surface_format.color_space)
-            .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+            .image_usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT)
             .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
             .queue_family_indices(&queue_families)
             .pre_transform(surface_caps.current_transform)
@@ -1309,9 +1190,7 @@ impl Swapchain {
 
         unsafe {
             self.loader.destroy_swapchain(self.handle, None);
-            for image in &self.images {
-                self.device.handle.destroy_image_view(image.view, None);
-            }
+            self.images.clear();
         }
 
         self.handle = new;
@@ -1320,7 +1199,21 @@ impl Swapchain {
         let images = unsafe { self.loader.get_swapchain_images(self.handle)? };
         let images: Result<Vec<_>> = images
             .into_iter()
-            .map(|image| SwapchainImage::new(&self.device, image, self.surface_format.format))
+            .map(|handle| {
+                let memory_flags = vk::MemoryPropertyFlags::empty();
+                let image = Image::from_device(self.device.clone(), pool, memory_flags, &ImageReq {
+                    kind: ImageKind::Swapchain { handle },
+                    format: self.surface_format.format,
+                    mip_levels: 1,
+                    extent: vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
+                    },
+                })?;
+
+                ImageView::from_device(self.device.clone(), pool, image, vk::ImageViewType::TYPE_2D)
+            })
             .collect();
 
         self.images = images?;
@@ -1328,8 +1221,8 @@ impl Swapchain {
         Ok(())
     }
 
-    fn image_count(&self) -> u32 {
-        self.images.len() as u32
+    fn image(&self, index: u32) -> &Res<ImageView> {
+        &self.images[index as usize]
     }
 
     fn get_next_image(&self, frame: &Frame) -> Result<NextSwapchainImage> {
@@ -1377,10 +1270,6 @@ impl Drop for Swapchain {
     fn drop(&mut self) {
         unsafe {
             self.loader.destroy_swapchain(self.handle, None);
-            
-            for image in &self.images {
-                self.device.handle.destroy_image_view(image.view, None);
-            }
         }
     }
 }
@@ -1860,21 +1749,24 @@ impl GraphicsPipeline {
         let viewport_info = vk::PipelineViewportStateCreateInfo::builder()
             .viewports(&viewports)
             .scissors(&scissors);
+
         let rasterize_info = vk::PipelineRasterizationStateCreateInfo::builder()
             .front_face(vk::FrontFace::CLOCKWISE)
             .cull_mode(req.cull_mode)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0);
+
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
             .rasterization_samples(renderer.render_targets.sample_count);
+
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
-            .blend_enable(true)
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
-            .color_blend_op(vk::BlendOp::ADD)
             .src_alpha_blend_factor(vk::BlendFactor::SRC_ALPHA)
             .dst_alpha_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA)
             .alpha_blend_op(vk::BlendOp::ADD)
+            .color_blend_op(vk::BlendOp::ADD)
+            .blend_enable(true)
             .color_write_mask(
                 vk::ColorComponentFlags::R
                     | vk::ColorComponentFlags::G
@@ -1889,6 +1781,13 @@ impl GraphicsPipeline {
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
+
+        let color_formats = [renderer.render_targets.color_resolve_format()];
+
+        let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
+            .color_attachment_formats(&color_formats)
+            .depth_attachment_format(renderer.render_targets.depth_format());
+
         let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
             .dynamic_state(&dynamic_state)
             .stages(&shader_stages)
@@ -1900,8 +1799,7 @@ impl GraphicsPipeline {
             .depth_stencil_state(&req.depth_stencil_info)
             .color_blend_state(&color_blend_info)
             .layout(req.layout.handle)
-            .render_pass(renderer.render_pass.handle)
-            .subpass(0);
+            .push_next(&mut rendering_info);
 
         let handle = unsafe {
             *device.handle
@@ -2076,10 +1974,27 @@ pub struct IndexedIndirectDrawReq {
 
 pub struct BufferBarrierReq {
     pub buffer: Res<Buffer>,
+
     pub src_mask: vk::AccessFlags,
     pub dst_mask: vk::AccessFlags,
     pub src_stage: vk::PipelineStageFlags,
     pub dst_stage: vk::PipelineStageFlags,
+}
+
+pub struct ImageBarrierReq {
+    pub image: Res<Image>,
+
+    pub src_mask: vk::AccessFlags,
+    pub dst_mask: vk::AccessFlags,
+    pub src_stage: vk::PipelineStageFlags,
+    pub dst_stage: vk::PipelineStageFlags,
+
+    pub new_layout: vk::ImageLayout,
+}
+
+pub struct ImageResolveReq {
+    pub src: Res<Image>,
+    pub dst: Res<Image>,
 }
 
 pub struct DescriptorBindReq<'a> {
@@ -2146,64 +2061,32 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(dst);
     }
 
-    /// Transition the layout of `image` to `new`.
-    pub fn transition_image_layout(&self, image: Res<Image>, new: vk::ImageLayout) {
+    pub fn image_barrier(&self, req: &ImageBarrierReq) {
         let subresource = vk::ImageSubresourceRange::builder()
-            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .aspect_mask(req.image.aspect_flags())
             .base_mip_level(0)
-            .level_count(image.mip_level_count())
+            .level_count(req.image.mip_level_count())
             .base_array_layer(0)
-            .layer_count(image.layer_count())
+            .layer_count(req.image.layer_count())
             .build();
-        let mut barrier = vk::ImageMemoryBarrier::builder()
-            .image(image.handle)
-            .old_layout(image.layout())
-            .new_layout(new)
+        let barrier = vk::ImageMemoryBarrier::builder()
+            .image(req.image.handle)
+            .old_layout(req.image.layout())
+            .new_layout(req.new_layout)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+            .src_access_mask(req.src_mask)
+            .dst_access_mask(req.dst_mask)
             .subresource_range(subresource);
 
-        let (src_stage, dst_stage) = match (image.layout(), new) {
-            (_, vk::ImageLayout::GENERAL) => {
-                barrier = barrier
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::SHADER_WRITE);
-                (
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::COMPUTE_SHADER,
-                )
-            }
-            (_, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => {
-                barrier = barrier
-                    .src_access_mask(vk::AccessFlags::empty())
-                    .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE);
-                (
-                    vk::PipelineStageFlags::TOP_OF_PIPE,
-                    vk::PipelineStageFlags::TRANSFER,
-                )
-            }
-            (_, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => {
-                barrier = barrier
-                    .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-                    .dst_access_mask(vk::AccessFlags::SHADER_READ);
-                (
-                    vk::PipelineStageFlags::TRANSFER,
-                    vk::PipelineStageFlags::FRAGMENT_SHADER,
-                )
-            }
-            _ => {
-                todo!()
-            }
-        };
-
-        image.layout.set(new);
+        req.image.layout.set(req.new_layout);
 
         unsafe {
             let barriers = [barrier.build()];
             self.device().handle.cmd_pipeline_barrier(
                 self.buffer.handle,
-                src_stage,
-                dst_stage,
+                req.src_stage,
+                req.dst_stage,
                 vk::DependencyFlags::empty(),
                 &[],
                 &[],
@@ -2211,7 +2094,75 @@ impl<'a> CommandRecorder<'a> {
             );
         }
 
-        self.buffer.bind_resource(image);
+        self.buffer.bind_resource(req.image.clone());
+
+    }
+
+    pub fn resolve_image(&self, req: &ImageResolveReq) {
+        let src_subresource = vk::ImageSubresourceLayers::builder()
+            .aspect_mask(req.src.aspect_flags())
+            .base_array_layer(0)
+            .layer_count(1)
+            .mip_level(0)
+            .build();
+        let dst_subresource = vk::ImageSubresourceLayers::builder()
+            .aspect_mask(req.dst.aspect_flags())
+            .base_array_layer(0)
+            .layer_count(1)
+            .mip_level(0)
+            .build();
+        let regions = [vk::ImageResolve2::builder()
+            .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
+            .src_subresource(src_subresource)
+            .dst_subresource(dst_subresource)
+            .extent(req.src.extent(0))
+            .build()];
+        let resolve_info = vk::ResolveImageInfo2::builder()
+           .src_image(req.src.handle)
+           .dst_image(req.dst.handle)
+           .src_image_layout(req.src.layout())
+           .dst_image_layout(req.dst.layout())
+           .regions(&regions);
+        unsafe {
+            self.device().handle.cmd_resolve_image2(self.buffer.handle, &resolve_info);
+        }
+    }
+
+    /// Transition the layout of `image` to `new`.
+    pub fn transition_image_layout(&self, image: Res<Image>, new: vk::ImageLayout) {
+        let (src_stage, dst_stage, src_mask, dst_mask) = match (image.layout(), new) {
+            (_, vk::ImageLayout::GENERAL) => (
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::COMPUTE_SHADER,
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::SHADER_WRITE,
+            ),
+            (_, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::PipelineStageFlags::TRANSFER,
+                vk::AccessFlags::empty(),
+                vk::AccessFlags::TRANSFER_WRITE,
+            ),
+            (_, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
+                vk::PipelineStageFlags::TRANSFER,
+                vk::PipelineStageFlags::FRAGMENT_SHADER,
+                vk::AccessFlags::TRANSFER_WRITE,
+                vk::AccessFlags::SHADER_READ,
+            ),
+            _ => {
+                todo!()
+            }
+        };
+
+        self.image_barrier(&ImageBarrierReq {
+            new_layout: new,
+            src_stage,
+            dst_stage,
+            src_mask,
+            dst_mask,
+            image,
+        });
     }
 
     pub fn dispatch(&self, pipeline: Res<ComputePipeline>, group_count: [u32; 3]) {
