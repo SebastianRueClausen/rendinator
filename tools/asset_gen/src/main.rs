@@ -101,10 +101,10 @@ fn main() -> Result<()> {
 fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels: usize) -> Image {
     match format {
         ImageFormat::Bc(bc) => {
-            use intel_tex_2::{RgbaSurface, divide_up_by_multiple};
+            use intel_tex_2::RgbaSurface;
 
-            // Subtract 2 from the mip count to exclude mip levels of size 1x1 and 2x2 , which
-            // isn't allowed for block compressed textures.
+            // Subtract 2 from the mip count to exclude mip levels of size 1x1 and 2x2, which
+            // aren't allowed for block compressed textures.
             let mip_levels = mip_levels - 2;
 
             let (width, height) = (image.width(), image.height());
@@ -131,18 +131,7 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
 
                     // Not effecient at all!
                     let mut mip = image.clone().into_rgba8();
-
-                    let block_bytes = bc.block_size();
-                    let (width, height, stride) = (
-                        mip.width(),
-                        mip.height(),
-                        mip.width() * 4,
-                    );
-
-                    let block_count =
-                        divide_up_by_multiple(width * height, block_bytes as u32) as usize;
-
-                    let mut compressed = vec![0x0; block_bytes * block_count];
+                    let (width, height, stride) = (mip.width(), mip.height(), mip.width() * 4);
 
                     match bc {
                         BcFormat::Bc5Unorm => {
@@ -150,13 +139,13 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
                             for px in mip.pixels_mut() {
                                 px.0[0] = px.0[1];
                                 px.0[1] = px.0[2];
-                                px.0[2] = px.0[0];
+                                px.0[2] = px.0[3];
                             } 
                       
                             let data = mip.into_raw();
                             let surface = RgbaSurface { width, height, stride, data: &data };
 
-                            bc5::compress_blocks_into(&surface, &mut compressed);
+                            bc5::compress_blocks(&surface)
                         }
                         BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => {
                             let settings = if mip.pixels().any(|px| px.0[3] != u8::MAX) {
@@ -168,11 +157,9 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
                             let data = mip.into_raw();
                             let surface = RgbaSurface { width, height, stride, data: &data };
 
-                            bc7::compress_blocks_into(&settings, &surface, &mut compressed);      
+                            bc7::compress_blocks(&settings, &surface)
                         }
                     }
-
-                    compressed
                 })
                 .collect();
 
@@ -199,9 +186,17 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
                         RawFormat::Rgba8Unorm | RawFormat::Rgba8Srgb => mip
                             .into_rgba8()
                             .into_raw(),
-                        RawFormat::Rg8Unorm => mip
-                            .into_luma_alpha8()
-                            .into_raw(),
+                        RawFormat::Rg8Unorm => {
+                            let mip = mip.into_rgba8();
+                            let mut data = Vec::with_capacity((mip.width() * mip.height() * 2) as usize);
+
+                            for px in mip.pixels() {
+                                data.push(px[1]);
+                                data.push(px[2]);
+                            } 
+                        
+                            data
+                        }
                         RawFormat::R8Unorm => mip
                             .into_luma8()
                             .into_raw(),

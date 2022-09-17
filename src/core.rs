@@ -8,7 +8,6 @@ use std::ffi::{self, CStr, CString};
 use std::{iter, mem, ops, slice, env};
 use std::cell::{UnsafeCell, Cell};
 use std::str::FromStr;
-
 use crate::resource::*;
 
 pub struct Renderer {
@@ -2138,9 +2137,13 @@ impl<'a> CommandRecorder<'a> {
            .src_image_layout(req.src.layout())
            .dst_image_layout(req.dst.layout())
            .regions(&regions);
+
         unsafe {
             self.device().handle.cmd_resolve_image2(self.buffer.handle, &resolve_info);
         }
+
+        self.buffer.bind_resource(req.src.clone());
+        self.buffer.bind_resource(req.dst.clone());
     }
 
     /// Transition the layout of `image` to `new`.

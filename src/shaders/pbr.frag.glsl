@@ -60,13 +60,13 @@ uvec3 cluster_coords(vec2 coords, float view_z) {
 
 void main() {
 	const vec4 color = texture(textures[in_textures.x], in_texcoord);
-	const vec2 specular_params = texture(textures[in_textures.y], in_texcoord).ba;
+	const vec2 specular_params = texture(textures[in_textures.y], in_texcoord).rg;
 	vec3 normal = texture(textures[in_textures.z], in_texcoord).rgb * 2.0 - 1.0;
 
 	const vec3 albedo = color.rgb;
 
-	const float metallic = specular_params.r;
-	const float rough = clamp(geometric_aa(normal, specular_params.g * specular_params.g), 0.05, 1.0);
+	const float metallic = specular_params.g;
+	const float rough = clamp(geometric_aa(normal, specular_params.r * specular_params.r), 0.05, 1.0);
 
 	normal = normalize(
 		normal.x * in_world_tangent.xyz
@@ -160,11 +160,11 @@ void main() {
 #endif
 
 #ifdef ROUGHNESS_DEBUG
-	out_color = vec4(vec3(rough * 0.5 + 0.5), 1.0);
+	out_color = vec4(vec3(specular_params.g), 1.0);
 #endif
 
 #ifdef METALLIC_DEBUG
-	out_color = vec4(vec3(metallic * 0.5 + 0.5), 1.0);
+	out_color = vec4(vec3(specular_params.r), 1.0);
 #endif
 
 #ifdef NORMAL_DEBUG

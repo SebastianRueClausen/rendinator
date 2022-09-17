@@ -171,8 +171,8 @@ impl Scene {
                             radius: prim.bounding_sphere.radius,
 
                             albedo_map: material.albedo_map as u32,
-                            normal_map: material.normal_map as u32,
                             specular_map: material.specular_map as u32,
+                            normal_map: material.normal_map as u32,
 
                             vertex_offset: prim.vertex_start,
                             instance: i as u32,
