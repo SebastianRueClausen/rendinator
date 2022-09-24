@@ -856,7 +856,7 @@ impl DescriptorPools {
         DescriptorPool::new(renderer, max_sets, &sizes).map(|pool| Rc::new(pool))
     }
 
-    fn alloc(
+    pub fn alloc(
         &mut self,
         renderer: &Renderer,
         layout: &DescriptorSetLayout,
@@ -973,14 +973,31 @@ impl ResourcePool {
     ) -> Result<(Rc<MemoryBlock>, MemoryRange)> {
         trace!("allocating {size} bytes on the GPU");
 
-        unsafe { (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment) }
+        unsafe {
+            (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment)
+        }
+    }
+
+    #[inline]
+    #[must_use]
+    pub fn descriptor_alloc(
+        &self,
+        renderer: &Renderer,
+        layout: &DescriptorSetLayout,
+    ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
+        unsafe {
+            (*self.shared.descriptor_pools.get()).alloc(renderer, layout)
+        }
     }
 
     #[inline]
     #[must_use]
     pub fn alloc<T>(&self, val: T) -> Res<T> {
         // SAFETY: `cpu_blocks` is only used here, and is therefore never borrowed.
-        let ptr = unsafe { (*self.shared.cpu_blocks.get()).alloc::<T>(val) };
+        let ptr = unsafe {
+            (*self.shared.cpu_blocks.get()).alloc::<T>(val)
+        };
+
         Res { ptr }
     }
 }
@@ -1137,6 +1154,10 @@ impl<T> PerFrame<T> {
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
         self.items.iter()
+    }
+
+    pub fn any(&self) -> &T {
+        &self[FrameIndex::Uno]
     }
 }
 

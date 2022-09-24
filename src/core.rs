@@ -2,11 +2,11 @@ use anyhow::Result;
 use ash::extensions::{ext, khr};
 use ash::vk;
 use smallvec::{SmallVec, smallvec};
-use arrayvec::ArrayVec;
 
 use std::ffi::{self, CStr, CString};
-use std::{iter, mem, ops, slice, env};
+use std::{mem, ops, slice, env};
 use std::cell::{UnsafeCell, RefCell, Cell};
+use std::rc::Rc;
 use std::str::FromStr;
 use crate::resource::*;
 
@@ -1207,13 +1207,13 @@ impl LayoutBindings {
     }
 }
 
-pub enum DescriptorBinding<'a, const N: usize> {
-    Buffer([Res<Buffer>; N]),
-    Image(Res<TextureSampler>, vk::ImageLayout, [Res<ImageView>; N]),
+pub enum DescriptorBinding<'a> {
+    Buffer(Res<Buffer>),
+    Image(Res<TextureSampler>, vk::ImageLayout, Res<ImageView>),
     VariableImageArray(
         Res<TextureSampler>,
         vk::ImageLayout,
-        [&'a [Res<ImageView>]; N]
+        &'a [Res<ImageView>],
     ),
 }
 
@@ -1279,10 +1279,10 @@ impl Drop for DescriptorPool {
 }
 
 pub struct DescriptorSet {
-    pub layout: Res<DescriptorSetLayout>,
+    pub handle: vk::DescriptorSet,
 
-    pub pool: vk::DescriptorPool,
-    pub sets: ArrayVec<vk::DescriptorSet, FRAMES_IN_FLIGHT>,
+    pub layout: Res<DescriptorSetLayout>,
+    pub pool: Rc<DescriptorPool>,
 
     #[allow(dead_code)]
     resources: SmallVec<[DummyRes; 32]>,
@@ -1290,192 +1290,101 @@ pub struct DescriptorSet {
     device: Res<Device>,
 }
 
-impl ops::Index<FrameIndex> for DescriptorSet {
-    type Output = vk::DescriptorSet;
-
-    fn index(&self, idx: FrameIndex) -> &Self::Output {
-        &self.sets[idx as usize % self.sets.len()]
-    }
-}
-
 impl DescriptorSet {
-    pub fn new_single(
+    pub fn new(
         renderer: &Renderer,
+        resource_pool: &ResourcePool,
         layout: Res<DescriptorSetLayout>,
-        bindings: &[DescriptorBinding<1>],
-    ) -> Result<Self> {
-        Self::new(renderer, layout, bindings)
-    }
-
-    pub fn new_per_frame(
-        renderer: &Renderer,
-        layout: Res<DescriptorSetLayout>,
-        bindings: &[DescriptorBinding<FRAMES_IN_FLIGHT>],
-    ) -> Result<Self> {
-        Self::new(renderer, layout, bindings)
-    }
-
-    fn new<const N: usize>(
-        renderer: &Renderer,
-        layout: Res<DescriptorSetLayout>,
-        bindings: &[DescriptorBinding<N>],
-    ) -> Result<Self> {
+        bindings: &[DescriptorBinding],
+    ) -> Result<Res<Self>> {
         let device = renderer.device.clone();
+        let (handle, pool) = resource_pool.descriptor_alloc(renderer, &layout)?;
 
-        let pool = unsafe {
-            let mut sizes = Vec::<vk::DescriptorPoolSize>::default();
-            
-            for layout_binding in layout.bindings.iter() {
-                match sizes.iter_mut().position(|size| size.ty == layout_binding.descriptor_type) {
-                    Some(pos) => sizes[pos].descriptor_count += N as u32,
-                    None => {
-                        sizes.push(vk::DescriptorPoolSize {
-                            ty: layout_binding.descriptor_type,
-                            descriptor_count: N as u32,
-                        });
-                    }
+        struct Info {
+            ty: vk::DescriptorType,
+            buffers: SmallVec<[vk::DescriptorBufferInfo; 1]>,
+            images: SmallVec<[vk::DescriptorImageInfo; 1]>,
+        }
+
+        let infos: SmallVec<[Info; 12]> = bindings.iter()
+            .zip(layout.bindings.iter())
+            .map(|(binding, layout_binding)| match &binding {
+                DescriptorBinding::Buffer(buffer) => Info {
+                    ty: layout_binding.descriptor_type,
+                    images: smallvec![vk::DescriptorImageInfo::default()],
+                    buffers: smallvec![vk::DescriptorBufferInfo {
+                        buffer: buffer.handle,
+                        range: buffer.size(),
+                        offset: 0,
+                    }],
+                },
+                DescriptorBinding::Image(sampler, layout, image) => Info {
+                    ty: layout_binding.descriptor_type,
+                    buffers: smallvec![vk::DescriptorBufferInfo::default()],
+                    images: smallvec![vk::DescriptorImageInfo {
+                        image_view: image.handle,
+                        sampler: sampler.handle,
+                        image_layout: *layout,
+                    }],
+                },
+                DescriptorBinding::VariableImageArray(sampler, layout, array) => Info {
+                    ty: layout_binding.descriptor_type,
+                    buffers: smallvec![vk::DescriptorBufferInfo::default()],
+                    images: array
+                        .iter()
+                        .map(|image| vk::DescriptorImageInfo {
+                            image_layout: *layout,
+                            image_view: image.handle,
+                            sampler: sampler.handle,
+                        })
+                        .collect(),
                 }
-            }
+            })
+            .collect();
 
-            let info = vk::DescriptorPoolCreateInfo::builder()
-                .pool_sizes(&sizes)
-                .max_sets(N as u32);
+        let writes: SmallVec<[vk::WriteDescriptorSet; 12]> = infos
+            .iter()
+            .enumerate()
+            .map(|(binding, info)| {
+                vk::WriteDescriptorSet::builder()
+                    .dst_binding(binding as u32)
+                    .descriptor_type(info.ty)
+                    .buffer_info(&info.buffers)
+                    .image_info(&info.images)
+                    .dst_set(handle)
+                    .build()
+            })
+            .collect();
 
-            device.handle.create_descriptor_pool(&info, None)?
-        };
-
-        let sets = unsafe {
-            let set_counts = [layout.bindings.variable_set_count; N];
-            let mut variable_count_info =
-                vk::DescriptorSetVariableDescriptorCountAllocateInfo::builder()
-                    .descriptor_counts(&set_counts)
-                    .build();
-            let layouts: SmallVec<[_; FRAMES_IN_FLIGHT]> = iter::repeat(layout.clone())
-                .take(N)
-                .map(|layout| layout.handle)
-                .collect();
-            let alloc_info = vk::DescriptorSetAllocateInfo::builder()
-                .descriptor_pool(pool)
-                .set_layouts(&layouts)
-                .push_next(&mut variable_count_info);
-
-            device.handle.allocate_descriptor_sets(&alloc_info)?
-        };
-
-        //
-        // Write descriptor sets.
-        //
-
-        for (n, set) in sets.iter().enumerate() {
-            struct Info {
-                ty: vk::DescriptorType,
-                buffers: SmallVec<[vk::DescriptorBufferInfo; 1]>,
-                images: SmallVec<[vk::DescriptorImageInfo; 1]>,
-            }
-
-            let infos: SmallVec<[Info; 12]> = bindings.iter()
-                .zip(layout.bindings.iter())
-                .map(|(binding, layout_binding)| {
-                    match &binding {
-                        DescriptorBinding::Buffer(buffers) => Info {
-                            ty: layout_binding.descriptor_type,
-                            images: smallvec![vk::DescriptorImageInfo::default()],
-                            buffers: smallvec![vk::DescriptorBufferInfo {
-                                buffer: buffers[n].handle,
-                                range: buffers[n].size(),
-                                offset: 0,
-                            }],
-                        },
-                        DescriptorBinding::Image(sampler, layout, images) => Info {
-                            ty: layout_binding.descriptor_type,
-                            buffers: smallvec![vk::DescriptorBufferInfo::default()],
-                            images: smallvec![vk::DescriptorImageInfo {
-                                image_view: images[n].handle,
-                                sampler: sampler.handle,
-                                image_layout: *layout,
-                            }],
-                        },
-                        DescriptorBinding::VariableImageArray(sampler, layout, arrays) => Info {
-                            ty: layout_binding.descriptor_type,
-                            buffers: smallvec![vk::DescriptorBufferInfo::default()],
-                            images: arrays[n]
-                                .iter()
-                                .map(|image| vk::DescriptorImageInfo {
-                                    image_layout: *layout,
-                                    image_view: image.handle,
-                                    sampler: sampler.handle,
-                                })
-                                .collect(),
-                        },
-                    }
-                })
-                .collect();
-
-            let writes: SmallVec<[vk::WriteDescriptorSet; 12]> = infos
-                .iter()
-                .enumerate()
-                .map(|(binding, info)| {
-                    vk::WriteDescriptorSet::builder()
-                        .dst_binding(binding as u32)
-                        .descriptor_type(info.ty)
-                        .buffer_info(&info.buffers)
-                        .image_info(&info.images)
-                        .dst_set(*set)
-                        .build()
-                })
-                .collect();
-
-            unsafe {
-                device.handle.update_descriptor_sets(&writes, &[])
-            }
+        unsafe {
+            device.handle.update_descriptor_sets(&writes, &[])
         }
 
         let mut resources: SmallVec<[_; 32]> = SmallVec::default();
         for binding in bindings {
             match &binding {
-                DescriptorBinding::Buffer(buffers) => {
-                    for buffer in buffers {
-                        resources.push(buffer.create_dummy());
-                    }
+                DescriptorBinding::Buffer(buffer) => {
+                    resources.push(buffer.create_dummy());
                 }
-                DescriptorBinding::Image(sampler, _, images) => {
+                DescriptorBinding::Image(sampler, _, image) => {
+                    resources.push(sampler.create_dummy());
+                    resources.push(image.create_dummy());
+                }
+                DescriptorBinding::VariableImageArray(sampler, _, array) => {
                     resources.push(sampler.create_dummy());
 
-                    for image in images {
-                        resources.push(image.create_dummy());
-                    }
-                }
-                DescriptorBinding::VariableImageArray(sampler, _, arrays) => {
-                    resources.push(sampler.create_dummy());
-
-                    for array in arrays {
-                        for image in *array {
-                            resources.push(image.create_dummy()); 
-                        }
+                    for image in *array {
+                        resources.push(image.create_dummy()); 
                     }
                 }
             }
         }
 
-        let sets = {
-            let mut array = ArrayVec::default();
-            for set in sets.into_iter() {
-                array.push(set);
-            }
-            array
-        };
-
-        Ok(Self { device, layout, pool, sets, resources })
+        Ok(resource_pool.alloc(Self { device, layout, pool, handle, resources }))
     }
 
     pub fn layout(&self) -> Res<DescriptorSetLayout> {
         self.layout.clone()
-    }
-}
-
-impl Drop for DescriptorSet {
-    fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_descriptor_pool(self.pool, None); }
     }
 }
 
@@ -1873,7 +1782,6 @@ pub struct ImageBlitReq {
 }
 
 pub struct DescriptorBindReq<'a> {
-    pub frame_index: Option<FrameIndex>,
     pub bind_point: vk::PipelineBindPoint,
     pub layout: Res<PipelineLayout>,
     pub descriptors: &'a [Res<DescriptorSet>],
@@ -2192,11 +2100,9 @@ impl<'a> CommandRecorder<'a> {
     }
 
     pub fn bind_descriptor_sets(&self, req: &DescriptorBindReq) {
-        let frame_index = req.frame_index.unwrap_or(FrameIndex::Uno);
-
         let descs: SmallVec<[_; 12]> = req.descriptors
             .iter()
-            .map(|desc| desc[frame_index])
+            .map(|desc| desc.handle)
             .collect();
 
         unsafe {

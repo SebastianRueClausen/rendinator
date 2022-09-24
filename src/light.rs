@@ -230,7 +230,7 @@ pub struct Lights {
     pub light_count: u32,
     pub cluster_info: ClusterInfoBuffer,
 
-    pub descriptor: Res<DescriptorSet>,
+    pub descriptors: PerFrame<Res<DescriptorSet>>,
 
     cluster_update: Res<ComputePipeline>,
     light_update: Res<ComputePipeline>,
@@ -321,27 +321,20 @@ impl Lights {
             },
         ])?);
 
-        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
-            DescriptorBinding::Buffer([
-                cluster_info.buffer.clone(),
-                cluster_info.buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer([
-                cluster_aabb_buffer.clone(),
-                cluster_aabb_buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer([
-                light_buffer.clone(),
-                light_buffer.clone(),
-            ]),
-            DescriptorBinding::Buffer(light_pos_buffers.clone().into()),
-            DescriptorBinding::Buffer(light_mask_buffers.clone().into()),
-        ])?);
+        let descriptors = PerFrame::try_from_fn(|frame_index| {
+            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+                DescriptorBinding::Buffer(cluster_info.buffer.clone()),
+                DescriptorBinding::Buffer(cluster_aabb_buffer.clone()),
+                DescriptorBinding::Buffer(light_buffer.clone()),
+                DescriptorBinding::Buffer(light_pos_buffers[frame_index].clone()),
+                DescriptorBinding::Buffer(light_mask_buffers[frame_index].clone()),
+            ])
+        })?;
 
         let layout = pool.alloc(
             PipelineLayout::new(&renderer, &[], &[
-                camera_uniforms.descriptor.layout(),
-                descriptor.layout(),
+                camera_uniforms.descriptors.any().layout(),
+                layout,
             ])?
         );
 
@@ -372,12 +365,11 @@ impl Lights {
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
             recorder.bind_descriptor_sets(&DescriptorBindReq {
-                frame_index: None,
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: cluster_build.layout(),
                 descriptors: &[
-                    camera_uniforms.descriptor.clone(),
-                    descriptor.clone()
+                    camera_uniforms.descriptors.any().clone(),
+                    descriptors.any().clone()
                 ],
             });
 
@@ -395,7 +387,7 @@ impl Lights {
             light_count,
             light_update,
             cluster_update,
-            descriptor,
+            descriptors,
         };
 
         lights.build_clusters()?;
@@ -414,12 +406,11 @@ impl Lights {
         recorder: &CommandRecorder,
     ) {
         recorder.bind_descriptor_sets(&DescriptorBindReq {
-            frame_index: Some(frame_index),
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.light_update.layout(),
             descriptors: &[
-                camera_uniforms.descriptor.clone(),
-                self.descriptor.clone(),
+                camera_uniforms.descriptors[frame_index].clone(),
+                self.descriptors[frame_index].clone(),
             ],
         });
 

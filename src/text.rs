@@ -106,13 +106,13 @@ impl TextPass {
             array_count: None,
         }])?);
 
-        let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout, &[
+        let descriptor = DescriptorSet::new(&renderer, pool, layout, &[
             DescriptorBinding::Image(
                 sampler.clone(),
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                [view.clone()]
+                view.clone()
             ),
-        ])?);
+        ])?;
 
         let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(false)
@@ -211,7 +211,6 @@ impl TextPass {
 
         recorder.bind_graphics_pipeline(self.pipeline.clone());
         recorder.bind_descriptor_sets(&DescriptorBindReq {
-            frame_index: Some(frame_index),
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
             descriptors: &[self.descriptor.clone()],

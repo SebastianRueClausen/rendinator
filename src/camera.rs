@@ -176,8 +176,7 @@ impl ProjUniform {
 pub struct CameraUniforms {
     pub view_buffers: PerFrame<Res<Buffer>>,
     pub proj_buffer: Res<Buffer>,
-
-    pub descriptor: Res<DescriptorSet>,
+    pub descriptors: PerFrame<Res<DescriptorSet>>,
 }
 
 impl CameraUniforms {
@@ -214,13 +213,15 @@ impl CameraUniforms {
                 array_count: None,
             },
         ])?);
+       
+        let descriptors = PerFrame::try_from_fn(|frame_index| {
+            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+                DescriptorBinding::Buffer(proj_buffer.clone()),
+                DescriptorBinding::Buffer(view_buffers[frame_index].clone()),
+            ])
+        })?;
 
-        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout, &[
-            DescriptorBinding::Buffer([proj_buffer.clone(), proj_buffer.clone()]),
-            DescriptorBinding::Buffer(view_buffers.clone().into()),
-        ])?);
-
-        let uniforms = Self { view_buffers, proj_buffer, descriptor };
+        let uniforms = Self { view_buffers, proj_buffer, descriptors };
 
         uniforms.update_proj(renderer, camera)?;
 

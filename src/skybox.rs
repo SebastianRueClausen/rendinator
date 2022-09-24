@@ -38,12 +38,14 @@ impl Generator {
             },
         ])?);
 
-        let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout.clone(), &[
+        let descriptor = DescriptorSet::new(&renderer, pool, layout.clone(), &[
             DescriptorBinding::Image(
-                sampler.clone(), vk::ImageLayout::GENERAL, [image_view.clone()]
+                sampler.clone(),
+                vk::ImageLayout::GENERAL,
+                image_view.clone(),
             ),
-            DescriptorBinding::Buffer([lights.light_buffer.clone()]),
-        ])?);
+            DescriptorBinding::Buffer(lights.light_buffer.clone()),
+        ])?;
 
         let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");
         let shader = ShaderModule::new(&renderer, "main", code)?;
@@ -61,7 +63,6 @@ impl Generator {
     fn generate(&self, renderer: &Renderer) -> Result<()> {
         renderer.compute_with(|recorder| {
             recorder.bind_descriptor_sets(&DescriptorBindReq {
-                frame_index: None,
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: self.pipeline.layout(),
                 descriptors: &[self.descriptor.clone()],
@@ -139,12 +140,13 @@ impl Skybox {
             },
         ])?);
 
-        let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout.clone(), &[
-            DescriptorBinding::Image(sampler, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, [
-                cube_view.clone(), 
-                cube_view.clone(), 
-            ]),
-        ])?);
+        let descriptor = DescriptorSet::new(&renderer, pool, layout.clone(), &[
+            DescriptorBinding::Image(
+                sampler,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                cube_view.clone(),
+            )
+        ])?;
 
         let push_consts = [vk::PushConstantRange::builder()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -200,7 +202,6 @@ impl Skybox {
         recorder.bind_graphics_pipeline(self.pipeline.clone());
 
         recorder.bind_descriptor_sets(&DescriptorBindReq {
-            frame_index: Some(frame_index),
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
             descriptors: &[self.descriptor.clone()],
