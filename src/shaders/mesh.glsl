@@ -21,7 +21,7 @@ struct Lod {
 };
 
 struct Primitive {
-	vec4 position;
+	vec4 center;
 	float radius;
 
 	uint _pad;
@@ -36,19 +36,6 @@ struct Primitive {
 	uint albedo_map;
 	uint specular_map;
 	uint normal_map;
-};
-
-struct CullInfo {
-	float z_near;
-	float z_far;
-
-	float frust_left;
-	float frust_right;
-	float frust_top;
-	float frust_bottom;
-
-	float lod_base;
-	float lod_step;
 };
 
 struct InstanceData {

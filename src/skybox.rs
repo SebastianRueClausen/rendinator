@@ -2,6 +2,7 @@ use anyhow::Result;
 use glam::{Mat3, Mat4, Vec3};
 use ash::vk;
 
+use crate::RenderTargets;
 use crate::core::*;
 use crate::resource::*;
 use crate::camera::Camera;
@@ -22,8 +23,8 @@ impl Generator {
         image_view: Res<ImageView>,
         sampler: Res<TextureSampler>,
         lights: &Lights,
-        pool: &ResourcePool,
     ) -> Result<Self> {
+        let pool = &renderer.static_pool;
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
             LayoutBinding {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
@@ -38,7 +39,9 @@ impl Generator {
         ])?);
 
         let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout.clone(), &[
-            DescriptorBinding::Image(sampler.clone(), [image_view.clone()]),
+            DescriptorBinding::Image(
+                sampler.clone(), vk::ImageLayout::GENERAL, [image_view.clone()]
+            ),
             DescriptorBinding::Buffer([lights.light_buffer.clone()]),
         ])?);
 
@@ -81,25 +84,38 @@ pub struct Skybox {
 }
 
 impl Skybox {
-    pub fn new(renderer: &Renderer, lights: &Lights, pool: &ResourcePool) -> Result<Self> {
+    pub fn new(
+        renderer: &Renderer,
+        render_targets: &RenderTargets,
+        lights: &Lights,
+    ) -> Result<Self> {
+        let pool = &renderer.static_pool;
         let size = 64;
 
         let image = Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageReq {
-            mip_levels: 1,
+            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
+            aspect_flags: vk::ImageAspectFlags::COLOR,
             extent: vk::Extent3D { width: size, height: size, depth: 1 },
             format: vk::Format::R16G16B16A16_SFLOAT,
             kind: ImageKind::CubeMap,
+            mip_levels: 1,
         })?;
 
         renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(image.clone(), vk::ImageLayout::GENERAL);
         })?;
 
-        let array_view =
-            ImageView::new(renderer, pool, image.clone(), vk::ImageViewType::TYPE_2D_ARRAY)?;
+        let array_view = ImageView::new(renderer, pool, &ImageViewReq {
+            view_type: vk::ImageViewType::TYPE_2D_ARRAY,
+            mips: image.mip_levels(),
+            image: image.clone(),
+        })?;
 
-        let sampler = pool.alloc(TextureSampler::new(renderer)?);
-        let generator = Generator::new(renderer, array_view, sampler.clone(), lights, pool)?;
+        let sampler = pool.alloc(
+            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+        );
+
+        let generator = Generator::new(renderer, array_view, sampler.clone(), lights)?;
 
         generator.generate(renderer)?;
 
@@ -107,7 +123,12 @@ impl Skybox {
             recorder.transition_image_layout(image.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 
-        let cube_view = ImageView::new(renderer, pool, image.clone(), vk::ImageViewType::CUBE)?;
+        let cube_view = ImageView::new(renderer, pool, &ImageViewReq {
+            view_type: vk::ImageViewType::CUBE,
+            mips: image.mip_levels(),
+            image: image.clone(),
+        })?;
+
         let cube_map = CubeMap::new(renderer, pool, cube_view.clone())?;
 
         let layout = pool.alloc(DescriptorSetLayout::new(renderer, &[
@@ -119,7 +140,7 @@ impl Skybox {
         ])?);
 
         let descriptor = pool.alloc(DescriptorSet::new_per_frame(&renderer, layout.clone(), &[
-            DescriptorBinding::Image(sampler, [
+            DescriptorBinding::Image(sampler, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, [
                 cube_view.clone(), 
                 cube_view.clone(), 
             ]),
@@ -147,17 +168,23 @@ impl Skybox {
         let cull_mode = vk::CullModeFlags::FRONT;
 
         let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+            color_format: render_targets.color_format(),
+            depth_format: render_targets.depth_format(),
+            sample_count: render_targets.sample_count(),
+
             vertex_attributes: &[vk::VertexInputAttributeDescription {
                 format: vk::Format::R32G32B32_SFLOAT,
                 binding: 0,
                 location: 0,
                 offset: 0,
             }],
+
             vertex_bindings: &[vk::VertexInputBindingDescription {
                 binding: 0,
                 stride: mem::size_of::<Vec3>() as u32,
                 input_rate: vk::VertexInputRate::VERTEX,
             }],
+
             vertex_shader: &vertex_module,
             fragment_shader: &fragment_module,
             depth_stencil_info,

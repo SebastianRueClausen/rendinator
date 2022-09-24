@@ -100,8 +100,8 @@ pub struct ClusterInfo {
 
 impl ClusterInfo {
     fn new(swapchain: &Swapchain, camera: &Camera) -> Self {
-        let width = swapchain.extent.width;
-        let height = swapchain.extent.height;
+        let width = swapchain.extent().width;
+        let height = swapchain.extent().height;
 
         let subdivisions = UVec4::new(12, 12, 24, 12 * 12 * 24);
         let cluster_size = UVec2::new(width / subdivisions.x, height / subdivisions.y);
@@ -130,7 +130,9 @@ pub struct ClusterInfoBuffer {
 }
 
 impl ClusterInfoBuffer {
-    fn new(renderer: &Renderer, pool: &ResourcePool, camera: &Camera) -> Result<Self> {
+    fn new(renderer: &Renderer, camera: &Camera) -> Result<Self> {
+        let pool = &renderer.static_pool;
+
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
@@ -239,12 +241,13 @@ pub struct Lights {
 impl Lights {
     pub fn new(
         renderer: &Renderer,
-        pool: &ResourcePool,
         camera_uniforms: &CameraUniforms,
         camera: &Camera,
         lights: &[PointLight],
     ) -> Result<Self> {
-        let cluster_info = ClusterInfoBuffer::new(renderer, pool, camera)?;
+        let pool = &renderer.static_pool;
+
+        let cluster_info = ClusterInfoBuffer::new(renderer, camera)?;
         let cluster_count = cluster_info.info.cluster_count() as usize;
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;

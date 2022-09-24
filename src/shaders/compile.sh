@@ -2,6 +2,8 @@ glslc pbr.vert.glsl -o ../../assets/shaders/pbr.vert.spv
 glslc pbr.frag.glsl -o ../../assets/shaders/pbr.frag.spv
 
 glslc draw_cull.comp.glsl -o ../../assets/shaders/draw_cull.comp.spv
+glslc depth_reduce.comp.glsl -o ../../assets/shaders/depth_reduce.comp.spv
+glslc depth_resolve.comp.glsl -o ../../assets/shaders/depth_resolve.comp.spv
 
 glslc sdf.vert.glsl -o ../../assets/shaders/sdf.vert.spv
 glslc sdf.frag.glsl -o ../../assets/shaders/sdf.frag.spv

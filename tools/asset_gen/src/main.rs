@@ -372,7 +372,7 @@ fn new(path: &Path) -> Result<Self> {
                         let min = Vec3::from(bounding_box.min);
                         let max = Vec3::from(bounding_box.max);
 
-                        let center = ((min - max) * 0.5) + max;
+                        let center = min + (max - min) * 0.5;
                         let radius = (center - max).length();
 
                         BoundingSphere { center, radius }

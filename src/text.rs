@@ -6,6 +6,7 @@ use nohash_hasher::NoHashHasher;
 use std::{mem, hash};
 use std::collections::HashMap;
 
+use crate::RenderTargets;
 use crate::core::*;
 use crate::resource::*;
 use asset::{Font, Glyph};
@@ -33,7 +34,8 @@ pub struct TextPass {
 }
 
 impl TextPass {
-    pub fn new(renderer: &Renderer, pool: &ResourcePool, font: &Font) -> Result<Self> {
+    pub fn new(renderer: &Renderer, render_targets: &RenderTargets, font: &Font) -> Result<Self> {
+        let pool = &renderer.static_pool;
         let text_objects = TextObjects::new(FontAtlas::new(font));
 
         let memory_flags =
@@ -63,17 +65,26 @@ impl TextPass {
         atlas_staging.get_mapped()?.fill(font.atlas.base_image_data());
 
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
-        let sampler = pool.alloc(TextureSampler::new(&renderer)?);
+
+        let sampler = pool.alloc(
+            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+        );
    
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
         let glyph_atlas = Image::new(&renderer, pool, memory_flags, &ImageReq {
-            mip_levels: 1,
-            format: font.atlas.format.into(),
+            usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
+            aspect_flags: vk::ImageAspectFlags::COLOR,
             kind: ImageKind::Texture, extent,
+            format: font.atlas.format.into(),
+            mip_levels: 1,
         })?;
 
-        let view = ImageView::new(renderer, pool, glyph_atlas.clone(), vk::ImageViewType::TYPE_2D)?;
+        let view = ImageView::new(renderer, pool, &ImageViewReq {
+            view_type: vk::ImageViewType::TYPE_2D,
+            mips: 0..glyph_atlas.mip_level_count(),
+            image: glyph_atlas.clone(),
+        })?;
 
         renderer.transfer_with(|recorder| {
             recorder.transition_image_layout(
@@ -96,7 +107,11 @@ impl TextPass {
         }])?);
 
         let descriptor = pool.alloc(DescriptorSet::new_single(&renderer, layout, &[
-            DescriptorBinding::Image(sampler.clone(), [view.clone()]),
+            DescriptorBinding::Image(
+                sampler.clone(),
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                [view.clone()]
+            ),
         ])?);
 
         let depth_stencil_info = vk::PipelineDepthStencilStateCreateInfo::builder()
@@ -121,7 +136,10 @@ impl TextPass {
         );
 
         let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
-            layout,
+            color_format: render_targets.color_format(),
+            depth_format: render_targets.depth_format(),
+            sample_count: render_targets.sample_count(),
+
             vertex_attributes: &[
                 vk::VertexInputAttributeDescription {
                     format: vk::Format::R32G32B32_SFLOAT,
@@ -136,27 +154,31 @@ impl TextPass {
                     offset: mem::size_of::<Vec3>() as u32,
                 },
             ],
+
             vertex_bindings: &[vk::VertexInputBindingDescription {
                 binding: 0,
                 stride: mem::size_of::<Vertex>() as u32,
                 input_rate: vk::VertexInputRate::VERTEX,
             }],
+
             depth_stencil_info: &depth_stencil_info,
             vertex_shader: &vertex_module,
             fragment_shader: &fragment_module,
             cull_mode: vk::CullModeFlags::BACK,
+            layout,
         })?);
 
-        let width = renderer.swapchain.extent.width as f32;
-        let height = renderer.swapchain.extent.height as f32;
+        let width = renderer.swapchain.extent().width as f32;
+        let height = renderer.swapchain.extent().height as f32;
+
         let proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
 
         Ok(Self { text_objects, proj, pipeline, descriptor, index_buffers, vertex_buffers })
     }
 
     pub fn handle_resize(&mut self, renderer: &Renderer) {
-        let width = renderer.swapchain.extent.width as f32;
-        let height = renderer.swapchain.extent.height as f32;
+        let width = renderer.swapchain.extent().width as f32;
+        let height = renderer.swapchain.extent().height as f32;
         self.proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
     }
 

@@ -45,8 +45,14 @@ impl MappedMemory {
         slice::from_raw_parts_mut(start, len as usize)
     }
 
-    unsafe fn as_slice(&self) -> &mut [u8] {
+    unsafe fn as_slice_mut(&self) -> &mut [u8] {
         slice::from_raw_parts_mut(self.ptr.as_ptr(), self.size as usize)
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe {
+            slice::from_raw_parts(self.ptr.as_ptr(), self.size as usize)
+        }
     }
 
     /// Fill memory with the memory of `bytes`.
@@ -60,7 +66,7 @@ impl MappedMemory {
             panic!("bytes is not the same size as the mapped memory range");
         }
     
-        unsafe { self.as_slice().copy_from_slice(bytes) };
+        unsafe { self.as_slice_mut().copy_from_slice(bytes) };
     }
 
     /// Fill memory in `range` with the memory of `bytes`.
@@ -218,11 +224,7 @@ impl Drop for Buffer {
 pub enum ImageKind {
     Texture,
     CubeMap,
-    Depth {
-        samples: vk::SampleCountFlags,
-        queue: Res<Queue>,
-    },
-    ColorResolve {
+    RenderTarget {
         samples: vk::SampleCountFlags,
         queue: Res<Queue>,
     },
@@ -231,6 +233,8 @@ pub enum ImageKind {
 
 pub struct ImageReq {
     pub kind: ImageKind,
+    pub usage: vk::ImageUsageFlags,
+    pub aspect_flags: vk::ImageAspectFlags,
     pub format: vk::Format,
     pub extent: vk::Extent3D,
     pub mip_levels: u32,
@@ -253,6 +257,7 @@ pub struct Image {
 
     kind: ImageKind,
 
+    aspect_flags: vk::ImageAspectFlags,
     extent: vk::Extent3D,
     format: vk::Format,
     mip_levels: u32,
@@ -285,30 +290,24 @@ impl Image {
 
         let layout = Cell::new(vk::ImageLayout::UNDEFINED);
 
-        let usage_flags = match req.kind {
-            ImageKind::CubeMap => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
-            ImageKind::Texture => vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
-            ImageKind::Depth { .. } => vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT,
-            ImageKind::ColorResolve { .. } => vk::ImageUsageFlags::COLOR_ATTACHMENT
-                | vk::ImageUsageFlags::TRANSFER_SRC,
-            ImageKind::Swapchain { handle } => {
-                return Ok(pool.alloc(Self {
-                    storage: ImageStorage::Swapchain,
-                    mip_levels: req.mip_levels,
-                    device: device.clone(),
-                    extent: req.extent,
-                    format: req.format,
-                    kind: req.kind.clone(),
-                    layout,
-                    handle,
-                }));
-            }
-        };
+        if let ImageKind::Swapchain { handle } = req.kind {
+            return Ok(pool.alloc(Self {
+                storage: ImageStorage::Swapchain,
+                mip_levels: req.mip_levels,
+                aspect_flags: req.aspect_flags,
+                device: device.clone(),
+                extent: req.extent,
+                format: req.format,
+                kind: req.kind.clone(),
+                layout,
+                handle,
+            }));
+        }
 
         let handle = {
             let info = vk::ImageCreateInfo::builder()
                 .image_type(vk::ImageType::TYPE_2D)
-                .usage(usage_flags)
+                .usage(req.usage)
                 .format(req.format)
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
@@ -320,15 +319,16 @@ impl Image {
                 .flags(flags);
 
             match &req.kind {
-                ImageKind::Depth { queue, samples }
-                | ImageKind::ColorResolve { queue, samples } => unsafe {
+                ImageKind::RenderTarget { queue, samples } => {
                     let queue_families = [queue.family_index()];
                     let info = info
                         .queue_family_indices(&queue_families)
                         .samples(*samples)
                         .clone();
-                    
-                    device.handle.create_image(&info, None)?
+                   
+                    unsafe {
+                        device.handle.create_image(&info, None)?
+                    }
                 }
                 _ => unsafe {
                     device.handle.create_image(&info, None)?
@@ -361,6 +361,7 @@ impl Image {
 
         Ok(pool.alloc(Self {
             mip_levels: req.mip_levels,
+            aspect_flags: req.aspect_flags,
             device: device.clone(),
             extent: req.extent,
             format: req.format,
@@ -369,6 +370,14 @@ impl Image {
             handle,
             kind,
         }))
+    }
+
+    pub fn sample_count(&self) -> vk::SampleCountFlags {
+        if let ImageKind::RenderTarget { samples, .. } = self.kind {
+            samples
+        } else {
+            vk::SampleCountFlags::TYPE_1
+        }
     }
 
     #[allow(dead_code)]
@@ -383,20 +392,16 @@ impl Image {
         self.layout.get()
     }
 
-    pub fn aspect_flags(&self) -> vk::ImageAspectFlags {
-        if let ImageKind::Depth { .. } = &self.kind {
-            vk::ImageAspectFlags::DEPTH
-        } else {
-            vk::ImageAspectFlags::COLOR
-        }
-    }
-
     pub fn layer_count(&self) -> u32 {
         if let ImageKind::CubeMap = &self.kind {
             6
         } else {
             1
         }
+    }
+    
+    pub fn aspect_flags(&self) -> vk::ImageAspectFlags {
+        self.aspect_flags
     }
 
     pub fn format(&self) -> vk::Format {
@@ -405,6 +410,10 @@ impl Image {
 
     pub fn mip_level_count(&self) -> u32 {
         self.mip_levels
+    }
+
+    pub fn mip_levels(&self) -> ops::Range<u32> {
+        0..self.mip_level_count()
     }
 
     pub fn extent(&self, mip_level: u32) -> vk::Extent3D {
@@ -427,46 +436,64 @@ impl Drop for Image {
     }
 }
 
+pub struct ImageViewReq {
+    pub image: Res<Image>,
+    pub view_type: vk::ImageViewType,
+    pub mips: ops::Range<u32>,
+}
+
 pub struct ImageView {
     pub handle: vk::ImageView,
+    mips: ops::Range<u32>,
     image: Res<Image>,
 }
 
 impl ImageView {
-    pub fn new(
-        renderer: &Renderer,
-        pool: &ResourcePool,
-        image: Res<Image>,
-        view_type: vk::ImageViewType,
-    ) -> Result<Res<Self>> {
-        Self::from_device(renderer.device.clone(), pool, image, view_type)
+    pub fn new(renderer: &Renderer, pool: &ResourcePool, req: &ImageViewReq) -> Result<Res<Self>> {
+        Self::from_device(renderer.device.clone(), pool, req)
     }
 
     pub fn from_device(
         device: Res<Device>,
         pool: &ResourcePool,
-        image: Res<Image>,
-        view_type: vk::ImageViewType,
+        req: &ImageViewReq,
     ) -> Result<Res<Self>> {
+        assert!(
+            req.image.mip_level_count() >= req.mips.end,
+            "mip levels outside range of image mips, is {} max is {}",
+            req.mips.end,
+            req.image.mip_level_count(),
+        ); 
+
+        let mip_count = req.mips.end - req.mips.start;
+
         let subresource_range = vk::ImageSubresourceRange::builder()
-            .aspect_mask(image.aspect_flags())
-            .base_mip_level(0)
-            .level_count(image.mip_level_count())
-            .base_array_layer(0)
-            .layer_count(image.layer_count());
+            .aspect_mask(req.image.aspect_flags())
+            .base_mip_level(req.mips.start)
+            .layer_count(req.image.layer_count())
+            .level_count(mip_count)
+            .base_array_layer(0);
 
         let view_info = vk::ImageViewCreateInfo::builder()
-            .view_type(view_type)
+            .view_type(req.view_type)
             .subresource_range(*subresource_range)
-            .format(image.format())
-            .image(image.handle)
+            .format(req.image.format())
+            .image(req.image.handle)
             .build();
 
         let handle = unsafe {
             device.handle.create_image_view(&view_info, None)?
         };
     
-        Ok(pool.alloc(Self { handle, image }))
+        Ok(pool.alloc(Self { handle, image: req.image.clone(), mips: req.mips.clone() }))
+    }
+
+    /// Get the extent of a given mip level.
+    ///
+    /// This is diffferent from [`Image::extent`] in that this gives the extent of the mip level
+    /// relative to the first level of the image view.
+    pub fn extent(&self, mip_level: u32) -> vk::Extent3D {
+        self.image.extent(self.mips.start + mip_level)
     }
 
     pub fn layout(&self) -> vk::ImageLayout {
@@ -490,9 +517,9 @@ pub struct TextureSampler {
 }
 
 impl TextureSampler {
-    pub fn new(renderer: &Renderer) -> Result<Self> {
+    pub fn new(renderer: &Renderer, reduction: vk::SamplerReductionMode) -> Result<Self> {
         let device = renderer.device.clone(); 
-        let create_info = vk::SamplerCreateInfo::builder()
+        let mut create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::REPEAT)
@@ -508,7 +535,18 @@ impl TextureSampler {
             .mip_lod_bias(0.0)
             .min_lod(0.0)
             .max_lod(vk::LOD_CLAMP_NONE);
-        let handle = unsafe { device.handle.create_sampler(&create_info, None)? };
+
+        let mut reduction_info = vk::SamplerReductionModeCreateInfo::default();
+
+        if reduction != vk::SamplerReductionMode::WEIGHTED_AVERAGE {
+            reduction_info.reduction_mode = reduction;
+            create_info = create_info.push_next(&mut reduction_info);
+        }
+
+        let handle = unsafe {
+            device.handle.create_sampler(&create_info, None)?
+        };
+
         Ok(Self { handle, device })
     }
 }

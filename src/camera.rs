@@ -58,6 +58,22 @@ impl Camera {
 
     }
 
+    pub fn frustrum_planes(&self) -> [Vec4; 6] {
+        let proj_view = self.proj * self.view;
+
+        let planes = [
+            proj_view.row(3) + proj_view.row(0),
+            proj_view.row(3) - proj_view.row(0),
+            proj_view.row(3) + proj_view.row(1),
+            proj_view.row(3) - proj_view.row(1),
+            proj_view.row(3) - proj_view.row(2),
+
+            Vec4::splat(0.0),
+        ];
+
+        planes.map(|plane| plane / plane.truncate().length())
+    }
+
     pub fn update(&mut self, input_state: &mut InputState, dt: Duration) {
         let speed = self.movement_speed * dt.as_secs_f32();
 
@@ -145,11 +161,13 @@ pub struct ProjUniform {
 impl ProjUniform {
     pub fn new(renderer: &Renderer, camera: &Camera) -> Self {
         let dimensions = Vec2::new(
-            renderer.swapchain.extent.width as f32,
-            renderer.swapchain.extent.height as f32,
+            renderer.swapchain.extent().width as f32,
+            renderer.swapchain.extent().height as f32,
         );
+
         let inverse_proj = camera.proj.inverse();
         let z_plane = Vec2::new(camera.z_near, camera.z_far);
+
         Self { proj: camera.proj.clone(), inverse_proj, dimensions, z_plane }
     }
 }
@@ -163,7 +181,8 @@ pub struct CameraUniforms {
 }
 
 impl CameraUniforms {
-    pub fn new(renderer: &Renderer, pool: &ResourcePool, camera: &Camera) -> Result<Self> {
+    pub fn new(renderer: &Renderer, camera: &Camera) -> Result<Self> {
+        let pool = &renderer.static_pool;
         let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
             | vk::MemoryPropertyFlags::HOST_COHERENT;
 
