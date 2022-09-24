@@ -825,10 +825,89 @@ impl GpuBlocks {
 
 }
 
+#[derive(Default)]
+struct DescriptorPools {
+    current_pool: Option<Rc<DescriptorPool>>, 
+}
+
+impl DescriptorPools {
+    fn new_pool(renderer: &Renderer, size_factor: f32) -> Result<Rc<DescriptorPool>> {
+        let sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                descriptor_count: (200.0 * size_factor) as u32,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                descriptor_count: (100.0 * size_factor) as u32,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                descriptor_count: (100.0 * size_factor) as u32,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: (200.0 * size_factor) as u32,
+            },
+        ];
+
+        let max_sets = (50.0 * size_factor) as u32;
+
+        DescriptorPool::new(renderer, max_sets, &sizes).map(|pool| Rc::new(pool))
+    }
+
+    fn alloc(
+        &mut self,
+        renderer: &Renderer,
+        layout: &DescriptorSetLayout,
+    ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
+        let layouts = [layout.handle];
+        let set_counts = [layout.bindings.variable_set_count];
+
+        let mut size_factor = 1.0;
+
+        let (handles, pool) = loop {
+            let Some(current_pool) = &self.current_pool else {
+                self.current_pool = Some(Self::new_pool(renderer, size_factor)?);
+
+                continue;
+            };
+
+            let handles = unsafe {
+                let mut variable_count_info =
+                    vk::DescriptorSetVariableDescriptorCountAllocateInfo::builder()
+                        .descriptor_counts(&set_counts)
+                        .build();
+                let alloc_info = vk::DescriptorSetAllocateInfo::builder()
+                    .descriptor_pool(current_pool.handle)
+                    .set_layouts(&layouts)
+                    .push_next(&mut variable_count_info);
+
+                renderer.device.handle.allocate_descriptor_sets(&alloc_info)
+            };
+
+            match handles {
+                Ok(handles) => break (handles, current_pool.clone()),
+                Err(vk::Result::ERROR_FRAGMENTED_POOL | vk::Result::ERROR_OUT_OF_POOL_MEMORY) => {
+                    self.current_pool = None;
+                    size_factor *= 2.0;
+                }
+                Err(err) => {
+                    return Err(err.into());
+                }
+            }
+        };
+
+        Ok((handles[0], pool))
+    }
+}
+
 struct SharedResources {
     /// The memory blocks where all the CPU resources are allocated.
     cpu_blocks: UnsafeCell<CpuBlocks>,
     gpu_blocks: UnsafeCell<GpuBlocks>,
+    descriptor_pools: UnsafeCell<DescriptorPools>,
+
 }
 
 impl SharedResources {
@@ -836,6 +915,7 @@ impl SharedResources {
         Self {
             cpu_blocks: UnsafeCell::new(CpuBlocks::new(cpu_block_size)),
             gpu_blocks: UnsafeCell::new(GpuBlocks::new(gpu_block_size)),
+            descriptor_pools: UnsafeCell::new(DescriptorPools::default()),
         }
     }
 }
@@ -882,6 +962,8 @@ impl ResourcePool {
         Self { shared: Rc::new(SharedResources::new(cpu_block_size, gpu_block_size)) }
     }
 
+    #[inline]
+    #[must_use]
     fn gpu_alloc(
         &self,
         device: Res<Device>,

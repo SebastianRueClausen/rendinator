@@ -891,7 +891,7 @@ impl Swapchain {
             }
         };
 
-        let preferred_present_mode = vk::PresentModeKHR::IMMEDIATE;
+        let preferred_present_mode = vk::PresentModeKHR::FIFO;
 
         let present_mode = _present_modes
             .iter()
@@ -1162,9 +1162,10 @@ pub struct LayoutBinding {
     pub array_count: Option<u32>,
 }
 
-struct LayoutBindings {
-    bindings: SmallVec<[vk::DescriptorSetLayoutBinding; 6]>,
-    flags: SmallVec<[vk::DescriptorBindingFlags; 6]>,
+pub struct LayoutBindings {
+    pub bindings: SmallVec<[vk::DescriptorSetLayoutBinding; 6]>,
+    pub flags: SmallVec<[vk::DescriptorBindingFlags; 6]>,
+    pub variable_set_count: u32,
 }
 
 impl LayoutBindings {
@@ -1181,6 +1182,11 @@ impl LayoutBindings {
                 flags
             })
             .collect();
+        let variable_set_count = bindings
+            .last()
+            .map(|b| b.array_count)
+            .flatten()
+            .unwrap_or(1);
         let bindings = bindings
             .iter()
             .enumerate()
@@ -1193,7 +1199,7 @@ impl LayoutBindings {
                     .build()
             })
             .collect();
-        Self { bindings, flags }
+        Self { bindings, flags, variable_set_count }
     }
 
     fn iter(&self) -> impl Iterator<Item = &vk::DescriptorSetLayoutBinding> {
@@ -1213,7 +1219,7 @@ pub enum DescriptorBinding<'a, const N: usize> {
 
 pub struct DescriptorSetLayout {
     pub handle: vk::DescriptorSetLayout,
-    bindings: LayoutBindings,
+    pub bindings: LayoutBindings,
     device: Res<Device>, 
 }
 
@@ -1239,6 +1245,36 @@ impl DescriptorSetLayout {
 impl Drop for DescriptorSetLayout {
     fn drop(&mut self) {
         unsafe { self.device.handle.destroy_descriptor_set_layout(self.handle, None); }
+    }
+}
+
+pub struct DescriptorPool {
+    pub handle: vk::DescriptorPool,
+
+    device: Res<Device>,
+}
+
+impl DescriptorPool {
+    pub fn new(
+        renderer: &Renderer,
+        max_sets: u32,
+        sizes: &[vk::DescriptorPoolSize],
+    ) -> Result<Self> {
+        let info = vk::DescriptorPoolCreateInfo::builder()
+            .pool_sizes(&sizes)
+            .max_sets(max_sets);
+
+        let handle = unsafe {
+            renderer.device.handle.create_descriptor_pool(&info, None)?
+        };
+
+        Ok(Self { handle, device: renderer.device.clone() })
+    }
+}
+
+impl Drop for DescriptorPool {
+    fn drop(&mut self) {
+        unsafe { self.device.handle.destroy_descriptor_pool(self.handle, None); }
     }
 }
 
@@ -1309,20 +1345,7 @@ impl DescriptorSet {
         };
 
         let sets = unsafe {
-            let set_counts: SmallVec<[u32; FRAMES_IN_FLIGHT]> = iter::repeat(bindings)
-                .take(N)
-                .enumerate()
-                .map(|(i, bindings)| {
-                    bindings
-                        .iter()
-                        .last()
-                        .map(|binding| match binding {
-                            DescriptorBinding::Buffer(_) | DescriptorBinding::Image(..) => 1,
-                            DescriptorBinding::VariableImageArray(_, _, array) => array[i].len() as u32,
-                        })
-                        .unwrap_or(1)
-                })
-                .collect();
+            let set_counts = [layout.bindings.variable_set_count; N];
             let mut variable_count_info =
                 vk::DescriptorSetVariableDescriptorCountAllocateInfo::builder()
                     .descriptor_counts(&set_counts)

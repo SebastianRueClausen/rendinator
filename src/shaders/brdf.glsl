@@ -10,29 +10,18 @@ float norm_dist(const float norm_dot_half, const float rough) {
 	return a / (PI * ggx * ggx);
 }
 
-#ifdef VISIBILITY_FAST
-
 float visibility(const float norm_dot_view, const float norm_dot_light, const float rough) {
+#ifdef VISIBILITY_FAST
 	const float a = rough;	
 
 	const float mask = norm_dot_view * (norm_dot_light * (1.0 - a) + a);
 	const float shadow = norm_dot_light * (norm_dot_view * (1.0 - a) + a);
-
-	return 0.5 / (mask + shadow);
-}
-
 #else
-
-float visibility(const float norm_dot_view, const float norm_dot_light, const float rough) {
-	const float a = rough * rough;
-
 	const float mask = norm_dot_view * sqrt(fma(fma(-norm_dot_light, a, norm_dot_light), norm_dot_light, a));
 	const float shadow = norm_dot_light * sqrt(fma(fma(-norm_dot_view, a, norm_dot_view), norm_dot_view, a));
-
+#endif
 	return 0.5 / (mask + shadow);
 }
-
-#endif
 
 // Faster than `pow(x, 5.0)`.
 float pow5(const float val) {
