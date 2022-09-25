@@ -17,6 +17,8 @@ float visibility(const float norm_dot_view, const float norm_dot_light, const fl
 	const float mask = norm_dot_view * (norm_dot_light * (1.0 - a) + a);
 	const float shadow = norm_dot_light * (norm_dot_view * (1.0 - a) + a);
 #else
+	const float a = rough * rough;
+
 	const float mask = norm_dot_view * sqrt(fma(fma(-norm_dot_light, a, norm_dot_light), norm_dot_light, a));
 	const float shadow = norm_dot_light * sqrt(fma(fma(-norm_dot_view, a, norm_dot_view), norm_dot_view, a));
 #endif

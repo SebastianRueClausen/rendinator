@@ -4,6 +4,7 @@
 #extension GL_EXT_shader_16bit_storage: require
 #extension GL_EXT_scalar_block_layout: require
 #extension GL_EXT_nonuniform_qualifier: require
+#extension GL_EXT_control_flow_attributes: require
 
 #define FRUSTRUM_CULL
 #define LOD
@@ -124,6 +125,7 @@ void main() {
 #ifdef FRUSTRUM_CULL
 	bool culled = false;
 
+	[[unroll]]
 	for (uint i = 0; i < 6; i++) {
 		culled = culled || dot(vec4(center, 1.0), cull_info.frust_planes[i]) + radius < 0.0;
 	}

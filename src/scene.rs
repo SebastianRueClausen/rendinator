@@ -122,27 +122,31 @@ struct DepthPyramid {
     ///
     /// This is used to resolve the multisampled depth image into. And it's the first level of the
     /// depth pyramid.
-    depth_staging: Res<ImageView>,
+    stagings: PerFrame<Res<ImageView>>,
 
     /// The depth pyramid image. It has the dimensions of `depth_image` rounded down to the
     /// previous power of 2.
-    pyramid: Res<Image>,
+    pyramids: PerFrame<Res<Image>>,
 
-    /// [`ImageView`] of all mips of `pyramid`.
-    mips: Vec<Res<ImageView>>,
+    /// Min sampled image array of each level in `mips`.
+    sampled: PerFrame<Res<DescriptorSet>>,
 
+    /// Storage image array of each level in `mips`, besides level 0.
+    storage: PerFrame<Res<DescriptorSet>>,
+
+    /// Descriptor of `depth_staging` and the depth image.
+    resolve_descs: PerFrame<Res<DescriptorSet>>,
+
+    // TODO: Remove.
     width: u32,
     height: u32,
 }
 
 impl DepthPyramid {
-    fn new(
-        renderer: &Renderer,
-        render_targets: &RenderTargets,
-        frame_index: FrameIndex,
-    ) -> Result<Self> {
-        let depth_image = render_targets.depth_images[frame_index].clone();
-        let depth_extent = depth_image.image().extent(0);
+    fn new(renderer: &Renderer, render_targets: &RenderTargets) -> Result<Self> {
+        let pool = &renderer.pool;
+
+        let depth_extent = render_targets.depth_images.any().image().extent(0);
 
         let width = prev_pow2(depth_extent.width);
         let height = prev_pow2(depth_extent.height);
@@ -152,9 +156,9 @@ impl DepthPyramid {
             | vk::ImageUsageFlags::SAMPLED
             | vk::ImageUsageFlags::TRANSFER_SRC;
 
-        let pyramid = {
-            let mip_levels = (height.max(height) as f32).log2().floor() as u32;
+        let mip_levels = (height.max(height) as f32).log2().floor() as u32;
 
+        let pyramids = PerFrame::try_from_fn(|_| {
             Image::new(renderer, &renderer.pool, memory_flags, &ImageReq {
                 extent: vk::Extent3D { width, height, depth: 1 },
                 aspect_flags: vk::ImageAspectFlags::COLOR,
@@ -162,10 +166,10 @@ impl DepthPyramid {
                 kind: ImageKind::Texture,
                 mip_levels,
                 usage,
-            })?
-        };
+            })
+        })?;
 
-        let depth_staging = {
+        let stagings = PerFrame::try_from_fn(|_| {
             let image = Image::new(renderer, &renderer.pool, memory_flags, &ImageReq {
                 format: vk::Format::R32_SFLOAT,
                 aspect_flags: vk::ImageAspectFlags::COLOR,
@@ -179,62 +183,135 @@ impl DepthPyramid {
                 view_type: vk::ImageViewType::TYPE_2D,
                 image: image.clone(),
                 mips: image.mip_levels(),
-            })?
-        };
-
-        renderer.transfer_with(|recorder| {
-            recorder.image_barrier(&ImageBarrierReq {
-                flags: vk::DependencyFlags::BY_REGION,
-                src_stage: vk::PipelineStageFlags2::empty(),
-                dst_stage: vk::PipelineStageFlags2::empty(),
-                src_mask: vk::AccessFlags2::empty(),
-                dst_mask: vk::AccessFlags2::empty(),
-                new_layout: vk::ImageLayout::GENERAL,
-                mips: pyramid.mip_levels(),
-                image: pyramid.clone(),
-            });
-
-            recorder.image_barrier(&ImageBarrierReq {
-                flags: vk::DependencyFlags::BY_REGION,
-                src_stage: vk::PipelineStageFlags2::empty(),
-                dst_stage: vk::PipelineStageFlags2::empty(),
-                src_mask: vk::AccessFlags2::empty(),
-                dst_mask: vk::AccessFlags2::empty(),
-                new_layout: vk::ImageLayout::GENERAL,
-                mips: depth_staging.image().mip_levels(),
-                image: depth_staging.image().clone(),
-            });
+            })
         })?;
 
-        let mut mips = vec![depth_staging.clone()];
-
-        for level in pyramid.mip_levels() {
-            mips.push(
-                ImageView::new(renderer, &renderer.pool, &ImageViewReq {
-                    view_type: vk::ImageViewType::TYPE_2D,
-                    mips: level..level + 1,
+        renderer.transfer_with(|recorder| {
+            for (pyramid, staging) in pyramids.iter().zip(stagings.iter()) {
+                recorder.image_barrier(&ImageBarrierReq {
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::empty(),
+                    dst_stage: vk::PipelineStageFlags2::empty(),
+                    src_mask: vk::AccessFlags2::empty(),
+                    dst_mask: vk::AccessFlags2::empty(),
+                    new_layout: vk::ImageLayout::GENERAL,
+                    mips: pyramid.mip_levels(),
                     image: pyramid.clone(),
-                })?
-            );
-        }
+                });
 
-        Ok(Self { pyramid, mips, depth_staging, width, height })
+                recorder.image_barrier(&ImageBarrierReq {
+                    flags: vk::DependencyFlags::BY_REGION,
+                    src_stage: vk::PipelineStageFlags2::empty(),
+                    dst_stage: vk::PipelineStageFlags2::empty(),
+                    src_mask: vk::AccessFlags2::empty(),
+                    dst_mask: vk::AccessFlags2::empty(),
+                    new_layout: vk::ImageLayout::GENERAL,
+                    mips: staging.image().mip_levels(),
+                    image: staging.image().clone(),
+                });
+            }
+        })?;
+
+        let mips = PerFrame::try_from_fn(|frame_index| {
+            let mut mips = vec![stagings[frame_index].clone()];
+            let pyramid = pyramids[frame_index].clone();
+
+            for level in pyramid.mip_levels() {
+                mips.push(
+                    ImageView::new(renderer, &renderer.pool, &ImageViewReq {
+                        view_type: vk::ImageViewType::TYPE_2D,
+                        mips: level..level + 1,
+                        image: pyramid.clone(),
+                    })?
+                );
+            }
+
+            Ok(mips)
+        })?;
+
+        let min_sampler = pool.alloc(
+            TextureSampler::new(renderer, vk::SamplerReductionMode::MIN)?
+        );
+
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: Some(mip_levels),
+            },
+        ])?);
+
+        let sampled = PerFrame::try_from_fn(|frame_index| {
+            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+                DescriptorBinding::VariableImageArray(
+                    min_sampler.clone(),
+                    vk::ImageLayout::GENERAL,
+                    &mips[frame_index],
+                ),
+            ])
+        })?;
+
+        let sampler = pool.alloc(
+            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+        );
+
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: Some(mip_levels - 1),
+            },
+        ])?);
+
+        let storage = PerFrame::try_from_fn(|frame_index| {
+            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+                DescriptorBinding::VariableImageArray(
+                    sampler.clone(),
+                    vk::ImageLayout::GENERAL,
+                    &mips[frame_index][1..],
+                ),
+            ])
+        })?;
+
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_IMAGE,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+        ])?);
+
+        let image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
+
+        let resolve_descs = PerFrame::try_from_fn(|frame_index| {
+            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+                DescriptorBinding::Image(sampler.clone(), image_layout,
+                    render_targets.depth_images[frame_index].clone(),
+                ),
+                DescriptorBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL,
+                    stagings[frame_index].clone(),
+                ),
+            ])
+        })?;
+
+        Ok(Self { pyramids, stagings, resolve_descs, storage, sampled, width, height })
     }
 }
 
 pub struct Scene {
-    render_pipeline: Res<GraphicsPipeline>,
+    render: Res<GraphicsPipeline>,
     cull_pipeline: Res<ComputePipeline>,
 
     descriptors: PerFrame<Res<DescriptorSet>>,
 
     primitive_count: u32,
 
-    depth_pyramids: PerFrame<DepthPyramid>,
-
-    sampled_pyramids: PerFrame<Res<DescriptorSet>>,
-    storage_pyramids: PerFrame<Res<DescriptorSet>>,
-    depth_resolve_descriptors: PerFrame<Res<DescriptorSet>>,
+    depth_pyramid: DepthPyramid,
 
     depth_reduce: Res<ComputePipeline>,
     depth_resolve: Res<ComputePipeline>,
@@ -573,7 +650,7 @@ impl Scene {
             ])
         })?;
 
-        let render_pipeline = {
+        let render = {
             let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
             let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.frag.spv");
 
@@ -605,21 +682,7 @@ impl Scene {
             })?)
         };
 
-        let depth_pyramids = PerFrame::try_from_fn(|frame_index| {
-            DepthPyramid::new(renderer, render_targets, frame_index)
-        })?;
-
-        let sampled_pyramids = create_sampled_pyramid_descriptors(renderer, &depth_pyramids)?;
-
-        let sampler = pool.alloc(
-            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
-        );
-
-        let storage_pyramids =
-            create_storage_pyramid_descriptors(renderer, sampler.clone(), &depth_pyramids)?;
-
-        let depth_resolve_descriptors =
-            create_depth_resolve_descriptors(renderer, render_targets, &depth_pyramids, sampler.clone())?;
+        let depth_pyramid = DepthPyramid::new(renderer, render_targets)?;
 
         let cull_pipeline = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
@@ -634,7 +697,7 @@ impl Scene {
             let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
                 camera_uniforms.descriptors.any().layout(),
                 descriptors.any().layout(),
-                sampled_pyramids.any().layout(),
+                depth_pyramid.sampled.any().layout(),
             ])?);
 
             pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
@@ -651,8 +714,8 @@ impl Scene {
                 .build()];
 
             let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
-                sampled_pyramids.any().layout(),
-                storage_pyramids.any().layout(),
+                depth_pyramid.sampled.any().layout(),
+                depth_pyramid.storage.any().layout(),
             ])?);
 
             pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
@@ -669,7 +732,7 @@ impl Scene {
                 .build()];
 
             let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
-                depth_resolve_descriptors.any().layout(),
+                depth_pyramid.resolve_descs.any().layout(),
             ])?);
 
             pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
@@ -688,15 +751,12 @@ impl Scene {
 
         Ok(Self {
             depth_resolve,
-            depth_resolve_descriptors,
-            sampled_pyramids,
-            storage_pyramids,
-            depth_pyramids,
             depth_reduce,
+            depth_pyramid,
             cull_pipeline,
             primitive_count,
             descriptors,
-            render_pipeline,
+            render,
             index_buffer,
             draw_buffers,
             draw_count_buffers,
@@ -705,25 +765,7 @@ impl Scene {
     }
 
     pub fn handle_resize(&mut self, renderer: &Renderer, render_targets: &RenderTargets) -> Result<()> {
-        self.depth_pyramids = PerFrame::try_from_fn(|frame_index| {
-            DepthPyramid::new(renderer, render_targets, frame_index)
-        })?;
-
-        self.sampled_pyramids = create_sampled_pyramid_descriptors(renderer, &self.depth_pyramids)?;
-
-        let sampler = renderer.pool.alloc(
-            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
-        );
-
-        self.storage_pyramids =
-            create_storage_pyramid_descriptors(renderer, sampler.clone(), &self.depth_pyramids)?;
-
-        self.depth_resolve_descriptors = create_depth_resolve_descriptors(
-            renderer,
-            render_targets,
-            &self.depth_pyramids,
-            sampler.clone(),
-        )?;
+        self.depth_pyramid = DepthPyramid::new(renderer, render_targets)?;
 
         Ok(())
     }
@@ -755,7 +797,6 @@ impl Scene {
         // Frustrum cull and generate draw buffers.
         //
 
-        let pyramid = &self.depth_pyramids[frame_index];
         let depth_image = &render_targets.depth_images[frame_index];
 
         recorder.bind_descriptor_sets(&DescriptorBindReq {
@@ -764,7 +805,7 @@ impl Scene {
             descriptors: &[
                 camera_uniforms.descriptors[frame_index].clone(),
                 self.descriptors[frame_index].clone(),
-                self.sampled_pyramids[frame_index].clone(),
+                self.depth_pyramid.sampled[frame_index].clone(),
             ],
         });
 
@@ -774,8 +815,8 @@ impl Scene {
 
             frustrum_planes: camera.frustrum_planes(),
 
-            pyramid_width: pyramid.width as f32,
-            pyramid_height: pyramid.height as f32,
+            pyramid_width: self.depth_pyramid.width as f32,
+            pyramid_height: self.depth_pyramid.height as f32,
 
             lod_base: 10.0,
             lod_step: 2.0,
@@ -818,6 +859,8 @@ impl Scene {
             mips: depth_image.image().mip_levels(),
         });
 
+        let depth_staging = &self.depth_pyramid.stagings[frame_index];
+
         recorder.image_barrier(&ImageBarrierReq {
             flags: vk::DependencyFlags::BY_REGION,
             src_stage: vk::PipelineStageFlags2::empty(),
@@ -825,17 +868,20 @@ impl Scene {
             src_mask: vk::AccessFlags2::empty(),
             dst_mask: vk::AccessFlags2::SHADER_WRITE,
             new_layout: vk::ImageLayout::GENERAL,
-            image: pyramid.depth_staging.image().clone(),
-            mips: pyramid.depth_staging.image().mip_levels(),
+            image: depth_staging.image().clone(),
+            mips: depth_staging.image().mip_levels(),
         });
 
         recorder.bind_descriptor_sets(&DescriptorBindReq {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.depth_resolve.layout(),
-            descriptors: &[self.depth_resolve_descriptors[frame_index].clone()],
+            descriptors: &[
+                self.depth_pyramid.resolve_descs[frame_index].clone()
+            ],
         });
 
-        let vk::Extent3D { width, height, .. } = pyramid.depth_staging.image().extent(0);
+        let vk::Extent3D { width, height, .. } = depth_staging.image().extent(0);
+
         let info = DepthResolveInfo {
             image_size: UVec2::new(width, height),
             // `vk::SampleCountFlags` as raw maps to the amount of samples.
@@ -858,8 +904,8 @@ impl Scene {
             src_mask: vk::AccessFlags2::SHADER_WRITE,
             dst_mask: vk::AccessFlags2::SHADER_READ,
             new_layout: vk::ImageLayout::GENERAL,
-            image: pyramid.depth_staging.image().clone(),
-            mips: pyramid.depth_staging.image().mip_levels(),
+            image: depth_staging.image().clone(),
+            mips: depth_staging.image().mip_levels(),
         });
 
         //
@@ -870,13 +916,15 @@ impl Scene {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.depth_reduce.layout(),
             descriptors: &[
-                self.sampled_pyramids[frame_index].clone(),
-                self.storage_pyramids[frame_index].clone(),
+                self.depth_pyramid.sampled[frame_index].clone(),
+                self.depth_pyramid.storage[frame_index].clone(),
             ],
         });
 
-        for target in pyramid.pyramid.mip_levels() {
-            let vk::Extent3D { width, height, .. } = pyramid.pyramid.extent(target);
+        let pyramid = &self.depth_pyramid.pyramids[frame_index];
+
+        for target in pyramid.mip_levels() {
+            let vk::Extent3D { width, height, .. } = pyramid.extent(target);
             let info = DepthReduceInfo {
                 image_size: UVec2::new(width, height),
                 target,
@@ -894,7 +942,7 @@ impl Scene {
                 src_mask: vk::AccessFlags2::SHADER_WRITE,
                 dst_mask: vk::AccessFlags2::SHADER_READ,
                 new_layout: vk::ImageLayout::GENERAL,
-                image: pyramid.pyramid.clone(),
+                image: pyramid.clone(),
                 mips: target..target + 1,
             });
         }
@@ -908,11 +956,11 @@ impl Scene {
         recorder: &CommandRecorder,
     ) {
         recorder.bind_index_buffer(self.index_buffer.clone(), vk::IndexType::UINT32);
-        recorder.bind_graphics_pipeline(self.render_pipeline.clone());
+        recorder.bind_graphics_pipeline(self.render.clone());
 
         recorder.bind_descriptor_sets(&DescriptorBindReq {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
-            layout: self.render_pipeline.layout(),
+            layout: self.render.layout(),
             descriptors: &[
                 camera_uniforms.descriptors[frame_index].clone(),
                 lights.descriptors[frame_index].clone(),
@@ -937,10 +985,10 @@ impl Scene {
         recorder: &CommandRecorder,
         level: u32,
     ) {
-        let pyramid = &self.depth_pyramids[frame_index];
+        let pyramid = &self.depth_pyramid.pyramids[frame_index];
 
         recorder.blit_image(&ImageBlitReq {
-            src: pyramid.pyramid.clone(),
+            src: pyramid.clone(),
             dst: swapchain_image,
             filter: vk::Filter::NEAREST,
             src_mip: level,
@@ -961,98 +1009,6 @@ impl Scene {
 
         Ok(count.command_count)
     }
-}
-
-fn create_sampled_pyramid_descriptors(
-    renderer: &Renderer,
-    depth_pyramids: &PerFrame<DepthPyramid>,
-) -> Result<PerFrame<Res<DescriptorSet>>> {
-    let pool = &renderer.pool;
-
-    let sampler = pool.alloc(
-        TextureSampler::new(renderer, vk::SamplerReductionMode::MIN)?
-    );
-
-    let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-        LayoutBinding {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            stage: vk::ShaderStageFlags::COMPUTE,
-            array_count: Some(depth_pyramids[FrameIndex::Uno].mips.len() as u32),
-        },
-    ])?);
-
-    PerFrame::try_from_fn(|frame_index| {
-        DescriptorSet::new(&renderer, pool, layout.clone(), &[
-            DescriptorBinding::VariableImageArray(
-                sampler.clone(),
-                vk::ImageLayout::GENERAL,
-                &depth_pyramids[frame_index].mips,
-            ),
-        ])
-    })
-}
-
-fn create_storage_pyramid_descriptors(
-    renderer: &Renderer,
-    sampler: Res<TextureSampler>,
-    depth_pyramids: &PerFrame<DepthPyramid>,
-) -> Result<PerFrame<Res<DescriptorSet>>> {
-    let pool = &renderer.pool;
-
-    let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-        LayoutBinding {
-            ty: vk::DescriptorType::STORAGE_IMAGE,
-            stage: vk::ShaderStageFlags::COMPUTE,
-            array_count: Some(
-                depth_pyramids[FrameIndex::Uno].mips.len() as u32 - 1
-            ),
-        },
-    ])?);
-
-    PerFrame::try_from_fn(|frame_index| {
-        DescriptorSet::new(&renderer, pool, layout.clone(), &[
-            DescriptorBinding::VariableImageArray(
-                sampler.clone(),
-                vk::ImageLayout::GENERAL,
-                &depth_pyramids[frame_index].mips[1..],
-            ),
-        ])
-    })
-}
-
-fn create_depth_resolve_descriptors(
-    renderer: &Renderer,
-    render_targets: &RenderTargets,
-    depth_pyramids: &PerFrame<DepthPyramid>,
-    sampler: Res<TextureSampler>,
-) -> Result<PerFrame<Res<DescriptorSet>>> {
-    let pool = &renderer.pool;
-
-    let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-        LayoutBinding {
-            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            stage: vk::ShaderStageFlags::COMPUTE,
-            array_count: None,
-        },
-        LayoutBinding {
-            ty: vk::DescriptorType::STORAGE_IMAGE,
-            stage: vk::ShaderStageFlags::COMPUTE,
-            array_count: None,
-        },
-    ])?);
-
-    let image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
-
-    PerFrame::try_from_fn(|frame_index| {
-        DescriptorSet::new(&renderer, pool, layout.clone(), &[
-            DescriptorBinding::Image(sampler.clone(), image_layout,
-                render_targets.depth_images[frame_index].clone(),
-            ),
-            DescriptorBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL,
-                depth_pyramids[frame_index].depth_staging.clone(),
-            ),
-        ])
-    })
 }
 
 const MAX_LOD_COUNT: usize = 8;
