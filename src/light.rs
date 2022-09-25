@@ -29,14 +29,19 @@ impl Default for DirLight {
 pub struct PointLight {
     world_position: Vec4,
     lum: Vec3,
-    // Used to determine the which clusters are effected by the light.
-    //
-    // TODO: Could perhaps be calculated from `lum`?.
     radius: f32,
 }
 
 impl PointLight {
-    pub fn new(pos: Vec3, lum: Vec3, radius: f32) -> Self {
+    pub fn new(pos: Vec3, lum: Vec3) -> Self {
+        const POW_CUTOFF: f32 = 0.6;
+
+        // Calculate the radius effected by the light.
+        //
+        // More specifically calculate distance from the light where the irradiance hits
+        // `POW_CUTOFF`.
+        let radius = (2.82095 * lum.max_element().sqrt()) / POW_CUTOFF.sqrt();
+
         Self { world_position: Vec4::from((pos, 1.0)), lum, radius }
     }
 }

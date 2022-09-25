@@ -144,7 +144,7 @@ fn main() -> Result<()> {
                     });
 
                     scene.draw(frame_index, &camera_uniforms, &lights, recorder);
-                    skybox.draw(&camera, frame_index, recorder); 
+                    skybox.draw(&camera, recorder); 
 
                     text_pass.draw_text(recorder, frame_index, |texts| {
                         let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
@@ -369,7 +369,6 @@ fn debug_lights() -> Vec<PointLight> {
         lights.push(PointLight::new(
             position,
             Vec3::new(red, 1.0, blue) * 6.0,
-            8.0,
         ));
     }
 

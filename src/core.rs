@@ -1286,8 +1286,6 @@ pub struct DescriptorSet {
 
     #[allow(dead_code)]
     resources: SmallVec<[DummyRes; 32]>,
-
-    device: Res<Device>,
 }
 
 impl DescriptorSet {
@@ -1380,7 +1378,7 @@ impl DescriptorSet {
             }
         }
 
-        Ok(resource_pool.alloc(Self { device, layout, pool, handle, resources }))
+        Ok(resource_pool.alloc(Self { layout, pool, handle, resources }))
     }
 
     pub fn layout(&self) -> Res<DescriptorSetLayout> {

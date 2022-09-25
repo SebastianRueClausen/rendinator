@@ -197,7 +197,7 @@ impl Skybox {
         Ok(Self { cube_map, descriptor, pipeline, generator })
     }
 
-    pub fn draw(&self, camera: &Camera, frame_index: FrameIndex, recorder: &CommandRecorder) {
+    pub fn draw(&self, camera: &Camera, recorder: &CommandRecorder) {
         recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
         recorder.bind_graphics_pipeline(self.pipeline.clone());
 
