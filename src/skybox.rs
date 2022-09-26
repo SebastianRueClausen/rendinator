@@ -71,7 +71,7 @@ impl CubeMap {
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
+            let buffer = pool.create_buffer(memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::TRANSFER_SRC,
                 size: vertex_data.len() as u64
             })?;
@@ -84,7 +84,7 @@ impl CubeMap {
         let vertex_buffer = {
             let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-            pool.create_buffer(renderer, memory_flags, &BufferInfo {
+            pool.create_buffer(memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
                 size: vertex_data.len() as u64
             })?
@@ -113,7 +113,7 @@ impl Generator {
         lights: &Lights,
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
-        let layout = pool.create_descriptor_layout(&renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
                 stage: vk::ShaderStageFlags::COMPUTE,
@@ -126,16 +126,16 @@ impl Generator {
             },
         ])?;
 
-        let descriptor = pool.create_descriptor_set(&renderer, layout.clone(), &[
+        let descriptor = pool.create_descriptor_set(layout.clone(), &[
             DescriptorBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL, image_view.clone()),
             DescriptorBinding::Buffer(lights.light_buffer.clone()),
         ])?;
 
         let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");
-        let shader = pool.create_shader_module(&renderer, "main", code)?;
+        let shader = pool.create_shader_module("main", code)?;
 
-        let layout = pool.create_pipeline_layout(&renderer, &[], &[layout])?;
-        let pipeline = pool.create_compute_pipeline(&renderer, layout, shader)?;
+        let layout = pool.create_pipeline_layout(&[], &[layout])?;
+        let pipeline = pool.create_compute_pipeline(layout, shader)?;
 
         let size = image_view.image().extent(0).width;
 
@@ -175,7 +175,7 @@ impl Skybox {
         let pool = &renderer.static_pool;
         let size = 64;
 
-        let image = pool.create_image(renderer, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageInfo {
+        let image = pool.create_image(vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             extent: vk::Extent3D { width: size, height: size, depth: 1 },
@@ -188,13 +188,13 @@ impl Skybox {
             recorder.transition_image_layout(image.clone(), vk::ImageLayout::GENERAL);
         })?;
 
-        let array_view = pool.create_image_view(renderer, &ImageViewInfo {
+        let array_view = pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D_ARRAY,
             mips: image.mip_levels(),
             image: image.clone(),
         })?;
 
-        let sampler = pool.create_sampler(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
         let generator = Generator::new(renderer, array_view, sampler.clone(), lights)?;
 
         generator.generate(renderer)?;
@@ -203,7 +203,7 @@ impl Skybox {
             recorder.transition_image_layout(image.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 
-        let cube_view = pool.create_image_view(renderer, &ImageViewInfo {
+        let cube_view = pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::CUBE,
             mips: image.mip_levels(),
             image: image.clone(),
@@ -211,7 +211,7 @@ impl Skybox {
 
         let cube_map = CubeMap::new(renderer, pool, cube_view.clone())?;
 
-        let layout = pool.create_descriptor_layout(renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
@@ -219,7 +219,7 @@ impl Skybox {
             },
         ])?;
 
-        let descriptor = pool.create_descriptor_set(&renderer, layout.clone(), &[
+        let descriptor = pool.create_descriptor_set(layout.clone(), &[
             DescriptorBinding::Image(
                 sampler, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, cube_view.clone(),
             )
@@ -231,7 +231,7 @@ impl Skybox {
             .offset(0)
             .build()];
 
-        let layout = pool.create_pipeline_layout(renderer, &push_consts, &[layout.clone()])?;
+        let layout = pool.create_pipeline_layout(&push_consts, &[layout.clone()])?;
 
         let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)
@@ -241,8 +241,8 @@ impl Skybox {
         let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.vert.spv");
         let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.frag.spv");
 
-        let vertex_shader = pool.create_shader_module(&renderer, "main", vertex_code)?;
-        let fragment_shader = pool.create_shader_module(&renderer, "main", fragment_code)?;
+        let vertex_shader = pool.create_shader_module("main", vertex_code)?;
+        let fragment_shader = pool.create_shader_module("main", fragment_code)?;
 
         let cull_mode = vk::CullModeFlags::FRONT;
 

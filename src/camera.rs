@@ -186,18 +186,18 @@ impl CameraUniforms {
             | vk::MemoryPropertyFlags::HOST_COHERENT;
 
         let view_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(renderer, memory_flags, &BufferInfo {
+            pool.create_buffer(memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                 size: mem::size_of::<ViewUniform>() as u64,
             })
         })?;
 
-        let proj_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let proj_buffer = pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<ProjUniform>() as u64,
         })?;
 
-        let layout = pool.create_descriptor_layout(&renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE
@@ -215,7 +215,7 @@ impl CameraUniforms {
         ])?;
        
         let descriptors = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(&renderer, layout.clone(), &[
+            pool.create_descriptor_set(layout.clone(), &[
                 DescriptorBinding::Buffer(proj_buffer.clone()),
                 DescriptorBinding::Buffer(view_buffers[frame_index].clone()),
             ])

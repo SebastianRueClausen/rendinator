@@ -6,11 +6,14 @@ use std::ffi::{self, CStr, CString};
 use std::env;
 use std::cell::{RefCell, Cell};
 use std::str::FromStr;
+use std::rc::Rc;
+
 use crate::resource::*;
 use crate::command::*;
 
 pub struct Renderer {
-    pub device: Res<Device>,
+    pub device: Rc<Device>,
+
     pub swapchain: Res<Swapchain>,
 
     frame_queue: FrameQueue,
@@ -30,17 +33,15 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(window: &winit::window::Window) -> Result<Self> {
-        let static_pool = ResourcePool::with_block_size(50 * 1024 * 1024, 1024 * 1024);
-        let pool = ResourcePool::with_block_size(10 * 1024 * 1024, 1024 * 1024);
-
         let validate = env::var("RENDINATOR_VALIDATE")
             .as_ref()
             .map(|var| bool::from_str(var).unwrap_or(false))
             .unwrap_or(false);
 
-        let instance = pool.alloc(Instance::new(validate)?);
+        let instance = Rc::new(Instance::new(validate)?);
         let physical = PhysicalDevice::select(&instance)?;
-        let surface = pool.alloc(Surface::new(instance.clone(), window)?);
+
+        let surface = Rc::new(Surface::new(instance.clone(), window)?);
 
         let graphics_queue_req = physical
             .get_queue_req(QueueRequestKind::Graphics(surface.clone()))
@@ -52,11 +53,14 @@ impl Renderer {
             .get_queue_req(QueueRequestKind::Compute)
             .ok_or_else(|| anyhow!("can't find valid compute queue"))?;
 
-        let device = pool.alloc(Device::new(instance, physical, &[
+        let device = Rc::new(Device::new(instance, physical, &[
             &graphics_queue_req,
             &transfer_queue_req,
             &compute_queue_req,
         ])?);
+
+        let static_pool = ResourcePool::with_block_size(device.clone(), 50 * 1024 * 1024, 1024 * 1024);
+        let pool = ResourcePool::with_block_size(device.clone(), 10 * 1024 * 1024, 1024 * 1024);
 
         let graphics_queue = pool.alloc(Queue::new(device.clone(), &graphics_queue_req)?);
         let transfer_queue = pool.alloc(Queue::new(device.clone(), &transfer_queue_req)?);
@@ -451,12 +455,12 @@ pub struct Device {
     pub handle: ash::Device,
     pub physical: PhysicalDevice,
 
-    instance: Res<Instance>,
+    instance: Rc<Instance>,
 }
 
 impl Device {
     pub fn new(
-        instance: Res<Instance>,
+        instance: Rc<Instance>,
         physical: PhysicalDevice,
         queue_reqs: &[&QueueRequest],
     ) -> Result<Self> {
@@ -587,7 +591,7 @@ impl DebugMessenger {
 
 #[derive(Clone)]
 pub enum QueueRequestKind {
-    Graphics(Res<Surface>),
+    Graphics(Rc<Surface>),
     Transfer,
     Compute,
 }
@@ -608,11 +612,11 @@ pub struct Queue {
 
     family_index: u32,
 
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl Queue {
-    pub fn new(device: Res<Device>, req: &QueueRequest) -> Result<Self> {
+    pub fn new(device: Rc<Device>, req: &QueueRequest) -> Result<Self> {
         let (pool, handle) = unsafe {
             let info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(req.family_index)
@@ -689,14 +693,14 @@ struct FrameQueue {
     /// rendering of the next image begins.
     frame_index: Cell<FrameIndex>,
 
-    device: Res<Device>,
+    device: Rc<Device>,
 
     #[allow(dead_code)]
     graphics_queue: Res<Queue>,
 }
 
 impl FrameQueue {
-    pub fn new(device: Res<Device>, graphics_queue: Res<Queue>) -> Result<Self> {
+    pub fn new(device: Rc<Device>, graphics_queue: Res<Queue>) -> Result<Self> {
         let frames = PerFrame::try_from_fn(|index| {
             let buffer = CommandBuffer::new(device.clone(), graphics_queue.clone())?;
             Frame::new(&device, index, buffer)
@@ -741,11 +745,11 @@ pub struct Surface {
     loader: khr::Surface,
 
     #[allow(dead_code)]
-    instance: Res<Instance>,
+    instance: Rc<Instance>,
 }
 
 impl Surface {
-    fn new(instance: Res<Instance>, window: &winit::window::Window) -> Result<Self> {
+    fn new(instance: Rc<Instance>, window: &winit::window::Window) -> Result<Self> {
         let loader = khr::Surface::new(&instance.entry, &instance.handle);
 
         use raw_window_handle::{HasRawWindowHandle, RawWindowHandle};
@@ -828,8 +832,9 @@ pub struct Swapchain {
 
     images: RefCell<Vec<Res<ImageView>>>,
 
-    device: Res<Device>,
-    surface: Res<Surface>,
+    device: Rc<Device>,
+    surface: Rc<Surface>,
+
     graphics_queue: Res<Queue>,
 }
 
@@ -842,9 +847,9 @@ impl Swapchain {
     /// Create a new swapchain. `extent` is used to determine the size of the swapchain images only
     /// if it aren't able to determine it from `surface`.
     pub fn new(
-        device: Res<Device>,
+        device: Rc<Device>,
         pool: &ResourcePool,
-        surface: Res<Surface>,
+        surface: Rc<Surface>,
         graphics_queue: Res<Queue>,
         extent: vk::Extent2D,
     ) -> Result<Self> {
@@ -930,23 +935,21 @@ impl Swapchain {
             .into_iter()
             .map(|handle| {
                 let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = pool.create_image_from_device(device.clone(), memory_flags,
-                    &ImageInfo {
-                        usage: vk::ImageUsageFlags::TRANSFER_DST
-                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                        aspect_flags: vk::ImageAspectFlags::COLOR,
-                        kind: ImageKind::Swapchain { handle },
-                        format: surface_format.format,
-                        mip_levels: 1,
-                        extent: vk::Extent3D {
-                            width: extent.width,
-                            height: extent.height,
-                            depth: 1,
-                        },
+                let image = pool.create_image(memory_flags, &ImageInfo {
+                    usage: vk::ImageUsageFlags::TRANSFER_DST
+                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                    aspect_flags: vk::ImageAspectFlags::COLOR,
+                    kind: ImageKind::Swapchain { handle },
+                    format: surface_format.format,
+                    mip_levels: 1,
+                    extent: vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
                     },
-                )?;
+                })?;
 
-                pool.create_image_view_from_device(device.clone(), &ImageViewInfo {
+                pool.create_image_view(&ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     image: image.clone(),
                     mips: 0..1,
@@ -1017,23 +1020,21 @@ impl Swapchain {
             .into_iter()
             .map(|handle| {
                 let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = pool.create_image_from_device(self.device.clone(), memory_flags,
-                    &ImageInfo {
-                        usage: vk::ImageUsageFlags::TRANSFER_DST
-                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                        aspect_flags: vk::ImageAspectFlags::COLOR,
-                        kind: ImageKind::Swapchain { handle },
-                        format: self.surface_format.format,
-                        mip_levels: 1,
-                        extent: vk::Extent3D {
-                            width: extent.width,
-                            height: extent.height,
-                            depth: 1,
-                        },
+                let image = pool.create_image(memory_flags, &ImageInfo {
+                    usage: vk::ImageUsageFlags::TRANSFER_DST
+                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                    aspect_flags: vk::ImageAspectFlags::COLOR,
+                    kind: ImageKind::Swapchain { handle },
+                    format: self.surface_format.format,
+                    mip_levels: 1,
+                    extent: vk::Extent3D {
+                        width: extent.width,
+                        height: extent.height,
+                        depth: 1,
                     },
-                )?;
+                })?;
 
-                pool.create_image_view_from_device(self.device.clone(), &ImageViewInfo {
+                pool.create_image_view(&ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     image: image.clone(),
                     mips: 0..1,

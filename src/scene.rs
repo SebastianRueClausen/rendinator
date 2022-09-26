@@ -162,7 +162,7 @@ impl DepthPyramid {
         let mip_levels = (height.max(height) as f32).log2().floor() as u32;
 
         let pyramids = PerFrame::try_from_fn(|_| {
-            renderer.pool.create_image(renderer, memory_flags, &ImageInfo {
+            renderer.pool.create_image(memory_flags, &ImageInfo {
                 extent: vk::Extent3D { width, height, depth: 1 },
                 aspect_flags: vk::ImageAspectFlags::COLOR,
                 format: vk::Format::R32_SFLOAT,
@@ -173,7 +173,7 @@ impl DepthPyramid {
         })?;
 
         let stagings = PerFrame::try_from_fn(|_| {
-            let image = renderer.pool.create_image(renderer, memory_flags, &ImageInfo {
+            let image = renderer.pool.create_image(memory_flags, &ImageInfo {
                 format: vk::Format::R32_SFLOAT,
                 aspect_flags: vk::ImageAspectFlags::COLOR,
                 kind: ImageKind::Texture,
@@ -182,7 +182,7 @@ impl DepthPyramid {
                 usage,
             })?;
 
-            renderer.pool.create_image_view(renderer, &ImageViewInfo {
+            renderer.pool.create_image_view(&ImageViewInfo {
                 view_type: vk::ImageViewType::TYPE_2D,
                 image: image.clone(),
                 mips: image.mip_levels(),
@@ -221,7 +221,7 @@ impl DepthPyramid {
 
             for level in pyramid.mip_levels() {
                 mips.push(
-                    renderer.pool.create_image_view(renderer, &ImageViewInfo {
+                    renderer.pool.create_image_view(&ImageViewInfo {
                         view_type: vk::ImageViewType::TYPE_2D,
                         mips: level..level + 1,
                         image: pyramid.clone(),
@@ -232,9 +232,9 @@ impl DepthPyramid {
             Ok(mips)
         })?;
 
-        let min_sampler = pool.create_sampler(renderer, vk::SamplerReductionMode::MIN)?;
+        let min_sampler = pool.create_sampler(vk::SamplerReductionMode::MIN)?;
 
-        let layout = pool.create_descriptor_layout(&renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::COMPUTE,
@@ -243,7 +243,7 @@ impl DepthPyramid {
         ])?;
 
         let sampled = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(&renderer, layout.clone(), &[
+            pool.create_descriptor_set(layout.clone(), &[
                 DescriptorBinding::VariableImageArray(
                     min_sampler.clone(),
                     vk::ImageLayout::GENERAL,
@@ -252,9 +252,9 @@ impl DepthPyramid {
             ])
         })?;
 
-        let sampler = pool.create_sampler(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
 
-        let layout = pool.create_descriptor_layout(&renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
                 stage: vk::ShaderStageFlags::COMPUTE,
@@ -263,7 +263,7 @@ impl DepthPyramid {
         ])?;
 
         let storage = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(&renderer, layout.clone(), &[
+            pool.create_descriptor_set(layout.clone(), &[
                 DescriptorBinding::VariableImageArray(
                     sampler.clone(),
                     vk::ImageLayout::GENERAL,
@@ -272,7 +272,7 @@ impl DepthPyramid {
             ])
         })?;
 
-        let layout = pool.create_descriptor_layout(&renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::COMPUTE,
@@ -288,7 +288,7 @@ impl DepthPyramid {
         let image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
 
         let resolve_descs = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(&renderer, layout.clone(), &[
+            pool.create_descriptor_set(layout.clone(), &[
                 DescriptorBinding::Image(sampler.clone(), image_layout,
                     depth_images[frame_index].clone(),
                 ),
@@ -300,7 +300,7 @@ impl DepthPyramid {
 
         let resolve = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_resolve.comp.spv");
-            let shader = pool.create_shader_module(&renderer, "main", code)?;
+            let shader = pool.create_shader_module("main", code)?;
 
             let push_consts = [vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -308,16 +308,16 @@ impl DepthPyramid {
                 .offset(0)
                 .build()];
 
-            let layout = pool.create_pipeline_layout(&renderer, &push_consts, &[
+            let layout = pool.create_pipeline_layout(&push_consts, &[
                 resolve_descs.any().layout(),
             ])?;
 
-            pool.create_compute_pipeline(&renderer, layout, shader)?
+            pool.create_compute_pipeline(layout, shader)?
         };
 
         let reduce = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_reduce.comp.spv");
-            let shader = pool.create_shader_module(&renderer, "main", code)?;
+            let shader = pool.create_shader_module("main", code)?;
 
             let push_consts = [vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -325,12 +325,12 @@ impl DepthPyramid {
                 .offset(0)
                 .build()];
 
-            let layout = pool.create_pipeline_layout(&renderer, &push_consts, &[
+            let layout = pool.create_pipeline_layout(&push_consts, &[
                 sampled.any().layout(),
                 storage.any().layout(),
             ])?;
 
-            pool.create_compute_pipeline(&renderer, layout, shader)?
+            pool.create_compute_pipeline(layout, shader)?
         };
 
 
@@ -499,7 +499,7 @@ impl ForwardPass {
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         let draw_count_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(renderer, memory_flags, &BufferInfo {
+            pool.create_buffer(memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
                     | vk::BufferUsageFlags::INDIRECT_BUFFER
@@ -512,7 +512,7 @@ impl ForwardPass {
             let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
                 | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            pool.create_buffer(renderer, memory_flags, &BufferInfo {
+            pool.create_buffer(memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
                 size: mem::size_of::<DrawCount>() as vk::DeviceSize,
             })
@@ -530,7 +530,7 @@ impl ForwardPass {
         })?;
 
         let draw_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(renderer, memory_flags, &BufferInfo {
+            pool.create_buffer(memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::TRANSFER_DST
                     | vk::BufferUsageFlags::INDIRECT_BUFFER,
@@ -538,9 +538,9 @@ impl ForwardPass {
             })
         })?;
 
-        let sampler = pool.create_sampler(&renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
 
-        let layout = pool.create_descriptor_layout(&renderer, &[
+        let layout = pool.create_descriptor_layout(&[
             LayoutBinding {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::VERTEX
@@ -575,7 +575,7 @@ impl ForwardPass {
         ])?;
 
         let descriptors = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(&renderer, layout.clone(), &[
+            pool.create_descriptor_set(layout.clone(), &[
                 DescriptorBinding::Buffer(scene.instance_buffer.clone()),
                 DescriptorBinding::Buffer(draw_buffers[frame_index].clone()),
                 DescriptorBinding::Buffer(scene.primitive_buffer.clone()),
@@ -599,15 +599,15 @@ impl ForwardPass {
             let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
             let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.frag.spv");
 
-            let vertex_shader = pool.create_shader_module(&renderer, "main", vertex_code)?;
-            let fragment_shader = pool.create_shader_module(&renderer, "main", fragment_code)?;
+            let vertex_shader = pool.create_shader_module("main", vertex_code)?;
+            let fragment_shader = pool.create_shader_module("main", fragment_code)?;
 
             let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .depth_write_enable(true)
                 .depth_test_enable(true);
 
-            let layout = pool.create_pipeline_layout(&renderer, &[], &[
+            let layout = pool.create_pipeline_layout(&[], &[
                 camera_uniforms.descriptors.any().layout(),
                 lights.descriptors.any().layout(),
                 descriptors.any().layout(),
@@ -627,7 +627,7 @@ impl ForwardPass {
 
         let cull = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
-            let shader = pool.create_shader_module(&renderer, "main", code)?;
+            let shader = pool.create_shader_module("main", code)?;
 
             let push_consts = [vk::PushConstantRange::builder()
                 .stage_flags(vk::ShaderStageFlags::COMPUTE)
@@ -635,13 +635,13 @@ impl ForwardPass {
                 .offset(0)
                 .build()];
 
-            let layout = pool.create_pipeline_layout(&renderer, &push_consts, &[
+            let layout = pool.create_pipeline_layout(&push_consts, &[
                 camera_uniforms.descriptors.any().layout(),
                 descriptors.any().layout(),
                 depth_pyramid.sampled.any().layout(),
             ])?;
 
-            pool.create_compute_pipeline(&renderer, layout, shader)?
+            pool.create_compute_pipeline(layout, shader)?
         };
 
         Ok(Self {
@@ -823,7 +823,7 @@ fn create_depth_images(
             | vk::ImageUsageFlags::TRANSFER_SRC
             | vk::ImageUsageFlags::SAMPLED;
 
-        let image = renderer.pool.create_image(renderer, memory_flags, &ImageInfo {
+        let image = renderer.pool.create_image(memory_flags, &ImageInfo {
             aspect_flags: vk::ImageAspectFlags::DEPTH,
             format: DEPTH_IMAGE_FORMAT,
             kind: ImageKind::RenderTarget {
@@ -835,7 +835,7 @@ fn create_depth_images(
             usage,
         })?;
 
-        renderer.pool.create_image_view(renderer, &ImageViewInfo {
+        renderer.pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
             mips: image.mip_levels(),
             image,
@@ -854,7 +854,7 @@ fn create_forward_color_images(
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
             | vk::ImageUsageFlags::TRANSFER_SRC;
 
-        let image = renderer.pool.create_image(renderer, memory_flags, &ImageInfo {
+        let image = renderer.pool.create_image(memory_flags, &ImageInfo {
             aspect_flags: vk::ImageAspectFlags::COLOR,
             format: renderer.swapchain.format(),
             kind: ImageKind::RenderTarget {
@@ -866,7 +866,7 @@ fn create_forward_color_images(
             usage,
         })?;
 
-        renderer.pool.create_image_view(renderer, &ImageViewInfo {
+        renderer.pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
             mips: 0..1,
             image,
@@ -943,31 +943,31 @@ impl Scene {
             })
             .collect();
 
-        let staging_pool = ResourcePool::new();
+        let staging_pool = ResourcePool::new(renderer.device.clone());
 
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
         let primitive_data = bytemuck::cast_slice(primitives.as_slice());
-        let primitive_staging = staging_pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let primitive_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: primitive_data.len() as vk::DeviceSize,
         })?;
 
         let instance_data = bytemuck::cast_slice(instance_data.as_slice());
-        let instance_staging = staging_pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let instance_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: instance_data.len() as vk::DeviceSize,
         })?;
 
         let vertex_data = bytemuck::cast_slice(scene.vertices.as_slice());
-        let vertex_staging = staging_pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let vertex_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: vertex_data.len() as vk::DeviceSize,
         })?;
 
         let index_data = bytemuck::cast_slice(scene.indices.as_slice());
-        let index_staging = staging_pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let index_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: index_data.len() as vk::DeviceSize,
         })?;
@@ -980,25 +980,25 @@ impl Scene {
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let instance_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let instance_buffer = pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: instance_data.len() as vk::DeviceSize,
         })?;
 
-        let primitive_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let primitive_buffer = pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: primitive_data.len() as vk::DeviceSize,
         })?;
 
-        let vertex_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let vertex_buffer = pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: vertex_data.len() as vk::DeviceSize,
         })?;
 
-        let index_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
+        let index_buffer = pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::INDEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: index_data.len() as vk::DeviceSize,
@@ -1026,7 +1026,7 @@ impl Scene {
                 texture.mips
                     .iter()
                     .map(|data| {
-                        let buffer = staging_pool.create_buffer(renderer, memory_flags, &BufferInfo {
+                        let buffer = staging_pool.create_buffer(memory_flags, &BufferInfo {
                             usage: vk::BufferUsageFlags::TRANSFER_SRC,
                             size: data.len() as vk::DeviceSize,
                         })?;
@@ -1046,7 +1046,7 @@ impl Scene {
         let images: Result<Vec<_>> = scene.textures
             .iter()
             .map(|texture| {
-                pool.create_image(renderer, memory_flags, &ImageInfo {
+                pool.create_image(memory_flags, &ImageInfo {
                     mip_levels: texture.mip_levels(),
                     format: texture.format.into(),
                     kind: ImageKind::Texture,
@@ -1089,7 +1089,7 @@ impl Scene {
         let textures: Result<Vec<_>> = images
             .into_iter()
             .map(|image| {
-                pool.create_image_view(renderer, &ImageViewInfo {
+                pool.create_image_view(&ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     mips: image.mip_levels(),
                     image: image.clone(),

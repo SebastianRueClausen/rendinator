@@ -4,6 +4,7 @@ use smallvec::SmallVec;
 
 use std::{mem, ops};
 use std::cell::UnsafeCell;
+use std::rc::Rc;
 
 use crate::core::*;
 use crate::resource::*;
@@ -18,7 +19,7 @@ pub struct CommandBuffer {
     bound_resources: UnsafeCell<Vec<DummyRes>>,
 
     queue: Res<Queue>,
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 pub enum SubmitCount {
@@ -27,7 +28,7 @@ pub enum SubmitCount {
 }
 
 impl CommandBuffer {
-    pub fn new(device: Res<Device>, queue: Res<Queue>) -> Result<Self> {
+    pub fn new(device: Rc<Device>, queue: Res<Queue>) -> Result<Self> {
         let info = vk::CommandBufferAllocateInfo::builder()
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_pool(queue.pool)

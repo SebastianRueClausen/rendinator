@@ -103,11 +103,11 @@ pub struct MemoryBlock {
     /// this buffer.
     mapped: Cell<Option<NonNull<u8>>>,
 
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl MemoryBlock {
-    fn new(device: Res<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
+    fn new(device: Rc<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
         let handle = unsafe { device.handle.allocate_memory(info, None)? };
         let size = info.allocation_size;
         let mapped = Cell::new(None);
@@ -165,13 +165,12 @@ pub struct Buffer {
     pub block: Rc<MemoryBlock>,
     pub range: MemoryRange,
 
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_buffer(
         &self,
-        renderer: &Renderer,
         memory_flags: vk::MemoryPropertyFlags,
         info: &BufferInfo,
     ) -> Result<Res<Buffer>> {
@@ -182,25 +181,20 @@ impl ResourcePool {
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .build();
 
-            let handle = renderer.device.handle.create_buffer(&info, None)?;
-            let req = renderer.device.handle.get_buffer_memory_requirements(handle);
+            let handle = self.device.handle.create_buffer(&info, None)?;
+            let req = self.device.handle.get_buffer_memory_requirements(handle);
 
-            let memory_type = renderer.device.physical
+            let memory_type = self.device.physical
                 .get_memory_type_index(req.memory_type_bits, memory_flags)
                 .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
-            let (block, range) = self.gpu_alloc(
-                renderer.device.clone(),
-                memory_type,
-                req.size,
-                req.alignment,
-            )?;
+            let (block, range) = self.gpu_alloc(memory_type, req.size, req.alignment)?;
 
             let range = range.start..range.start + info.size;
 
-            renderer.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
+            self.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
 
-            self.alloc(Buffer { handle, range, block, device: renderer.device.clone() })
+            self.alloc(Buffer { handle, range, block, device: self.device.clone() })
         };
 
         Ok(pool)
@@ -280,22 +274,12 @@ pub struct Image {
     mip_levels: u32,
 
     storage: ImageStorage,
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_image(
         &self,
-        renderer: &Renderer,
-        memory_flags: vk::MemoryPropertyFlags,
-        info: &ImageInfo,
-    ) -> Result<Res<Image>> {
-        self.create_image_from_device(renderer.device.clone(), memory_flags, info)
-    }
-
-    pub fn create_image_from_device(
-        &self,
-        device: Res<Device>,
         memory_flags: vk::MemoryPropertyFlags,
         info: &ImageInfo,
     ) -> Result<Res<Image>> {
@@ -312,7 +296,7 @@ impl ResourcePool {
                 storage: ImageStorage::Swapchain,
                 mip_levels: info.mip_levels,
                 aspect_flags: info.aspect_flags,
-                device: device.clone(),
+                device: self.device.clone(),
                 extent: info.extent,
                 format: info.format,
                 kind: info.kind.clone(),
@@ -344,32 +328,27 @@ impl ResourcePool {
                         .clone();
                    
                     unsafe {
-                        device.handle.create_image(&create_info, None)?
+                        self.device.handle.create_image(&create_info, None)?
                     }
                 }
                 _ => unsafe {
-                    device.handle.create_image(&create_info, None)?
+                    self.device.handle.create_image(&create_info, None)?
                 }
             }
         };
 
         let memory_req = unsafe {
-            device.handle.get_image_memory_requirements(handle)
+            self.device.handle.get_image_memory_requirements(handle)
         };
          
-        let memory_type = device.physical
+        let memory_type = self.device.physical
             .get_memory_type_index(memory_req.memory_type_bits, memory_flags)
             .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
-        let (block, range) = self.gpu_alloc(
-            device.clone(),
-            memory_type,
-            memory_req.size,
-            memory_req.alignment,
-        )?;
+        let (block, range) = self.gpu_alloc(memory_type, memory_req.size, memory_req.alignment)?;
 
         unsafe {
-            device.handle.bind_image_memory(handle, block.handle, range.start)?;
+            self.device.handle.bind_image_memory(handle, block.handle, range.start)?;
         }
 
         let kind = info.kind.clone();
@@ -379,7 +358,7 @@ impl ResourcePool {
         Ok(self.alloc(Image {
             mip_levels: info.mip_levels,
             aspect_flags: info.aspect_flags,
-            device: device.clone(),
+            device: self.device.clone(),
             extent: info.extent,
             format: info.format,
             storage,
@@ -468,19 +447,7 @@ pub struct ImageView {
 }
 
 impl ResourcePool {
-    pub fn create_image_view(
-        &self,
-        renderer: &Renderer,
-        info: &ImageViewInfo,
-    ) -> Result<Res<ImageView>> {
-        self.create_image_view_from_device(renderer.device.clone(), info)
-    }
-
-    pub fn create_image_view_from_device(
-        &self,
-        device: Res<Device>,
-        info: &ImageViewInfo,
-    ) -> Result<Res<ImageView>> {
+    pub fn create_image_view(&self, info: &ImageViewInfo) -> Result<Res<ImageView>> {
         assert!(
             info.image.mip_level_count() >= info.mips.end,
             "mip levels outside range of image mips, is {} max is {}",
@@ -505,7 +472,7 @@ impl ResourcePool {
             .build();
 
         let handle = unsafe {
-            device.handle.create_image_view(&view_info, None)?
+            self.device.handle.create_image_view(&view_info, None)?
         };
     
         Ok(self.alloc(ImageView { handle, image: info.image.clone(), mips: info.mips.clone() }))
@@ -540,16 +507,16 @@ impl Drop for ImageView {
 
 pub struct Sampler {
     pub handle: vk::Sampler,
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_sampler(
         &self,
-        renderer: &Renderer,
         reduction: vk::SamplerReductionMode,
     ) -> Result<Res<Sampler>> {
-        let device = renderer.device.clone(); 
+        let device = self.device.clone(); 
+
         let mut create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
@@ -592,17 +559,16 @@ pub struct ShaderModule {
     pub handle: vk::ShaderModule,
     entry: CString,
 
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_shader_module(
         &self,
-        renderer: &Renderer,
         entry: &str,
         code: &[u8],
     ) -> Result<Res<ShaderModule>> {
-        let device = renderer.device.clone();
+        let device = self.device.clone();
 
         if code.len() % mem::size_of::<u32>() != 0 {
             return Err(anyhow!("shader code size must be a multiple of 4"));
@@ -651,17 +617,16 @@ pub struct PipelineLayout {
     #[allow(dead_code)]
     descriptor_layouts: SmallVec<[Res<DescriptorLayout>; 2]>,
 
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_pipeline_layout(
         &self,
-        renderer: &Renderer,
         consts: &[vk::PushConstantRange],
         layouts: &[Res<DescriptorLayout>],
     ) -> Result<Res<PipelineLayout>> {
-        let device = renderer.device.clone();
+        let device = self.device.clone();
 
         let handle = unsafe {
             let layouts: SmallVec<[_; 12]> = layouts
@@ -692,22 +657,22 @@ impl Drop for PipelineLayout {
 pub struct ComputePipeline {
     pub handle: vk::Pipeline,
     layout: Res<PipelineLayout>,
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_compute_pipeline(
         &self,
-        renderer: &Renderer,
         layout: Res<PipelineLayout>,
         shader: Res<ShaderModule>,
     ) -> Result<Res<ComputePipeline>> {
-        let device = renderer.device.clone();
+        let device = self.device.clone();
         let stage = shader.stage_create_info(vk::ShaderStageFlags::COMPUTE);
         let create_infos = [vk::ComputePipelineCreateInfo::builder()
             .layout(layout.handle)
             .stage(*stage)
             .build()];
+
         let handle = unsafe {
             device.handle
                 .create_compute_pipelines(vk::PipelineCache::null(), &create_infos, None)
@@ -757,7 +722,7 @@ pub struct GraphicsPipelineInfo<'a> {
 pub struct GraphicsPipeline {
     pub handle: vk::Pipeline,
     layout: Res<PipelineLayout>,
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl ResourcePool {
@@ -766,7 +731,7 @@ impl ResourcePool {
         renderer: &Renderer,
         info: GraphicsPipelineInfo,
     ) -> Result<Res<GraphicsPipeline>> {
-        let device = renderer.device.clone();
+        let device = self.device.clone();
 
         let shader_stages = [
             *info.vertex_shader.stage_create_info(vk::ShaderStageFlags::VERTEX),
@@ -868,12 +833,12 @@ impl Drop for GraphicsPipeline {
 
 pub struct DescriptorPool {
     pub handle: vk::DescriptorPool,
-    device: Res<Device>,
+    device: Rc<Device>,
 }
 
 impl DescriptorPool {
     pub fn new(
-        renderer: &Renderer,
+        device: Rc<Device>,
         max_sets: u32,
         sizes: &[vk::DescriptorPoolSize],
     ) -> Result<Self> {
@@ -882,10 +847,10 @@ impl DescriptorPool {
             .max_sets(max_sets);
 
         let handle = unsafe {
-            renderer.device.handle.create_descriptor_pool(&info, None)?
+            device.handle.create_descriptor_pool(&info, None)?
         };
 
-        Ok(Self { handle, device: renderer.device.clone() })
+        Ok(Self { handle, device })
     }
 }
 
@@ -949,16 +914,15 @@ impl LayoutBindings {
 pub struct DescriptorLayout {
     pub handle: vk::DescriptorSetLayout,
     bindings: LayoutBindings,
-    device: Res<Device>, 
+    device: Rc<Device>, 
 }
 
 impl ResourcePool {
     pub fn create_descriptor_layout(
         &self,
-        renderer: &Renderer,
         bindings: &[LayoutBinding],
     ) -> Result<Res<DescriptorLayout>> {
-        let device = renderer.device.clone();
+        let device = self.device.clone();
         let bindings = LayoutBindings::new(bindings);
 
         let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
@@ -999,12 +963,11 @@ pub struct DescriptorSet {
 impl ResourcePool {
     pub fn create_descriptor_set(
         &self,
-        renderer: &Renderer,
         layout: Res<DescriptorLayout>,
         bindings: &[DescriptorBinding],
     ) -> Result<Res<DescriptorSet>> {
-        let device = renderer.device.clone();
-        let (handle, pool) = self.descriptor_alloc(renderer, &layout)?;
+        let device = self.device.clone();
+        let (handle, pool) = self.descriptor_alloc(&layout)?;
 
         struct Info {
             ty: vk::DescriptorType,
@@ -1233,7 +1196,7 @@ impl GpuBlocks {
 
     fn alloc(
         &mut self,
-        device: Res<Device>,
+        device: Rc<Device>,
         memory_type: u32,
         size: vk::DeviceSize,
         aligment: vk::DeviceSize,
@@ -1282,7 +1245,7 @@ struct DescriptorPools {
 }
 
 impl DescriptorPools {
-    fn new_pool(renderer: &Renderer, size_factor: f32) -> Result<Rc<DescriptorPool>> {
+    fn new_pool(device: Rc<Device>, size_factor: f32) -> Result<Rc<DescriptorPool>> {
         let sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -1304,12 +1267,12 @@ impl DescriptorPools {
 
         let max_sets = (50.0 * size_factor) as u32;
 
-        DescriptorPool::new(renderer, max_sets, &sizes).map(|pool| Rc::new(pool))
+        DescriptorPool::new(device, max_sets, &sizes).map(|pool| Rc::new(pool))
     }
 
     pub fn alloc(
         &mut self,
-        renderer: &Renderer,
+        device: Rc<Device>,
         layout: &DescriptorLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
         let layouts = [layout.handle];
@@ -1319,7 +1282,7 @@ impl DescriptorPools {
 
         let (handles, pool) = loop {
             let Some(current_pool) = &self.current_pool else {
-                self.current_pool = Some(Self::new_pool(renderer, size_factor)?);
+                self.current_pool = Some(Self::new_pool(device.clone(), size_factor)?);
 
                 continue;
             };
@@ -1334,7 +1297,7 @@ impl DescriptorPools {
                     .set_layouts(&layouts)
                     .push_next(&mut variable_count_info);
 
-                renderer.device.handle.allocate_descriptor_sets(&alloc_info)
+                device.handle.allocate_descriptor_sets(&alloc_info)
             };
 
             match handles {
@@ -1358,7 +1321,6 @@ struct SharedResources {
     cpu_blocks: UnsafeCell<CpuBlocks>,
     gpu_blocks: UnsafeCell<GpuBlocks>,
     descriptor_pools: UnsafeCell<DescriptorPools>,
-
 }
 
 impl SharedResources {
@@ -1384,6 +1346,7 @@ impl SharedResources {
 #[derive(Clone)]
 pub struct ResourcePool {
     shared: Rc<SharedResources>,
+    device: Rc<Device>,
 }
 
 impl PartialEq for ResourcePool {
@@ -1404,15 +1367,19 @@ impl ResourcePool {
     /// Create new resource pool with default pool sizes.
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
-        Self::with_block_size(CpuBlock::DEFAULT_BLOCK_SIZE, GpuBlock::DEFAULT_BLOCK_SIZE)
+    pub fn new(device: Rc<Device>) -> Self {
+        Self::with_block_size(device, CpuBlock::DEFAULT_BLOCK_SIZE, GpuBlock::DEFAULT_BLOCK_SIZE)
     }
 
     /// Create new resource pool with custom block sizes.
     #[inline]
     #[must_use]
-    pub fn with_block_size(cpu_block_size: usize, gpu_block_size: vk::DeviceSize) -> Self {
-        Self { shared: Rc::new(SharedResources::new(cpu_block_size, gpu_block_size)) }
+    pub fn with_block_size(
+        device: Rc<Device>,
+        cpu_block_size: usize,
+        gpu_block_size: vk::DeviceSize,
+    ) -> Self {
+        Self { device, shared: Rc::new(SharedResources::new(cpu_block_size, gpu_block_size)) }
     }
 
     /// Allocate block of GPU memory.
@@ -1420,7 +1387,6 @@ impl ResourcePool {
     #[must_use]
     fn gpu_alloc(
         &self,
-        device: Res<Device>,
         memory_type: u32,
         size: vk::DeviceSize,
         alignment: vk::DeviceSize,
@@ -1428,7 +1394,8 @@ impl ResourcePool {
         trace!("allocating {size} bytes on the GPU");
 
         unsafe {
-            (*self.shared.gpu_blocks.get()).alloc(device, memory_type, size, alignment)
+            (*self.shared.gpu_blocks.get())
+                .alloc(self.device.clone(), memory_type, size, alignment)
         }
     }
 
@@ -1437,11 +1404,10 @@ impl ResourcePool {
     #[must_use]
     pub fn descriptor_alloc(
         &self,
-        renderer: &Renderer,
         layout: &DescriptorLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
         unsafe {
-            (*self.shared.descriptor_pools.get()).alloc(renderer, layout)
+            (*self.shared.descriptor_pools.get()).alloc(self.device.clone(), layout)
         }
     }
 
@@ -1680,7 +1646,11 @@ pub fn align_up_to(a: u64, alignment: u64) -> u64 {
 
 #[test]
 fn res_simple_alloc() {
-    let p1 = ResourcePool::new();
+    let instance = Rc::new(Instance::new(false).unwrap());
+    let physical = PhysicalDevice::select(&instance).unwrap();
+
+    let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+    let p1 = ResourcePool::new(device);
 
     let nums: Vec<_> = (0..2048)
         .map(|i| p1.alloc(i as usize))
@@ -1693,7 +1663,11 @@ fn res_simple_alloc() {
 
 #[test]
 fn res_big_alloc() {
-    let p1 = ResourcePool::new();
+    let instance = Rc::new(Instance::new(false).unwrap());
+    let physical = PhysicalDevice::select(&instance).unwrap();
+
+    let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+    let p1 = ResourcePool::new(device);
 
     let _ = p1.alloc([0_u32; 1024]);
     let _ = p1.alloc([0_u32; 2048]);
@@ -1711,7 +1685,11 @@ fn res_drop() {
     }
     
     {
-        let p1 = ResourcePool::new();
+        let instance = Rc::new(Instance::new(false).unwrap());
+        let physical = PhysicalDevice::select(&instance).unwrap();
+
+        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+        let p1 = ResourcePool::new(device);
 
         let _ = p1.alloc(Test(0));
         let _ = p1.alloc(Test(0));
@@ -1736,7 +1714,11 @@ fn res_with_inter_block_ref() {
     }
     
     {
-        let p1 = ResourcePool::new();
+        let instance = Rc::new(Instance::new(false).unwrap());
+        let physical = PhysicalDevice::select(&instance).unwrap();
+
+        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+        let p1 = ResourcePool::new(device);
 
         let val = p1.alloc(0_usize);
 
@@ -1750,7 +1732,11 @@ fn res_with_inter_block_ref() {
 /// Just test it doesn't crash.
 #[test]
 fn dummy_res() {
-    let p1 = ResourcePool::new();
+    let instance = Rc::new(Instance::new(false).unwrap());
+    let physical = PhysicalDevice::select(&instance).unwrap();
+
+    let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+    let p1 = ResourcePool::new(device);
 
     let res = p1.alloc(0);
 
@@ -1771,7 +1757,11 @@ fn dummy_res_drop() {
     }
     
     let _dummy = {
-        let p1 = ResourcePool::new();
+        let instance = Rc::new(Instance::new(false).unwrap());
+        let physical = PhysicalDevice::select(&instance).unwrap();
+
+        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+        let p1 = ResourcePool::new(device);
 
         let res = p1.alloc(Test(0));
         res.create_dummy()
