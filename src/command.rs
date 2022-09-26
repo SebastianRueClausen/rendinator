@@ -681,4 +681,3 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(info.buffer.clone());
     }
 }
-

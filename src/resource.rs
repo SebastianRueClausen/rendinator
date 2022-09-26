@@ -168,13 +168,13 @@ pub struct Buffer {
     device: Res<Device>,
 }
 
-impl Buffer {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_buffer(
+        &self,
         renderer: &Renderer,
-        pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
         info: &BufferInfo,
-    ) -> Result<Res<Self>> {
+    ) -> Result<Res<Buffer>> {
         let pool = unsafe {
             let info = vk::BufferCreateInfo::builder()
                 .usage(info.usage)
@@ -189,7 +189,7 @@ impl Buffer {
                 .get_memory_type_index(req.memory_type_bits, memory_flags)
                 .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
-            let (block, range) = pool.gpu_alloc(
+            let (block, range) = self.gpu_alloc(
                 renderer.device.clone(),
                 memory_type,
                 req.size,
@@ -200,12 +200,14 @@ impl Buffer {
 
             renderer.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
 
-            pool.alloc(Self { handle, range, block, device: renderer.device.clone() })
+            self.alloc(Buffer { handle, range, block, device: renderer.device.clone() })
         };
 
         Ok(pool)
     }
+}
 
+impl Buffer {
     pub fn size(&self) -> vk::DeviceSize {
         range_length(&self.range)
     }
@@ -281,22 +283,22 @@ pub struct Image {
     device: Res<Device>,
 }
 
-impl Image {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_image(
+        &self,
         renderer: &Renderer,
-        pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
         info: &ImageInfo,
-    ) -> Result<Res<Self>> {
-        Self::from_device(renderer.device.clone(), pool, memory_flags, info)
+    ) -> Result<Res<Image>> {
+        self.create_image_from_device(renderer.device.clone(), memory_flags, info)
     }
 
-    pub fn from_device(
+    pub fn create_image_from_device(
+        &self,
         device: Res<Device>,
-        pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
         info: &ImageInfo,
-    ) -> Result<Res<Self>> {
+    ) -> Result<Res<Image>> {
         let (array_layers, flags) = if let ImageKind::CubeMap = info.kind {
             (6, vk::ImageCreateFlags::CUBE_COMPATIBLE)
         } else {
@@ -306,7 +308,7 @@ impl Image {
         let layout = Cell::new(vk::ImageLayout::UNDEFINED);
 
         if let ImageKind::Swapchain { handle } = info.kind {
-            return Ok(pool.alloc(Self {
+            return Ok(self.alloc(Image {
                 storage: ImageStorage::Swapchain,
                 mip_levels: info.mip_levels,
                 aspect_flags: info.aspect_flags,
@@ -359,7 +361,7 @@ impl Image {
             .get_memory_type_index(memory_req.memory_type_bits, memory_flags)
             .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
-        let (block, range) = pool.gpu_alloc(
+        let (block, range) = self.gpu_alloc(
             device.clone(),
             memory_type,
             memory_req.size,
@@ -374,7 +376,7 @@ impl Image {
 
         let storage = ImageStorage::Block { range: 0..memory_req.size, block };
 
-        Ok(pool.alloc(Self {
+        Ok(self.alloc(Image {
             mip_levels: info.mip_levels,
             aspect_flags: info.aspect_flags,
             device: device.clone(),
@@ -386,7 +388,9 @@ impl Image {
             kind,
         }))
     }
+}
 
+impl Image {
     pub fn sample_count(&self) -> vk::SampleCountFlags {
         if let ImageKind::RenderTarget { samples, .. } = self.kind {
             samples
@@ -463,20 +467,20 @@ pub struct ImageView {
     image: Res<Image>,
 }
 
-impl ImageView {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_image_view(
+        &self,
         renderer: &Renderer,
-        pool: &ResourcePool,
         info: &ImageViewInfo,
-    ) -> Result<Res<Self>> {
-        Self::from_device(renderer.device.clone(), pool, info)
+    ) -> Result<Res<ImageView>> {
+        self.create_image_view_from_device(renderer.device.clone(), info)
     }
 
-    pub fn from_device(
+    pub fn create_image_view_from_device(
+        &self,
         device: Res<Device>,
-        pool: &ResourcePool,
         info: &ImageViewInfo,
-    ) -> Result<Res<Self>> {
+    ) -> Result<Res<ImageView>> {
         assert!(
             info.image.mip_level_count() >= info.mips.end,
             "mip levels outside range of image mips, is {} max is {}",
@@ -504,9 +508,11 @@ impl ImageView {
             device.handle.create_image_view(&view_info, None)?
         };
     
-        Ok(pool.alloc(Self { handle, image: info.image.clone(), mips: info.mips.clone() }))
+        Ok(self.alloc(ImageView { handle, image: info.image.clone(), mips: info.mips.clone() }))
     }
+}
 
+impl ImageView {
     /// Get the extent of a given mip level.
     ///
     /// This is diffferent from [`Image::extent`] in that this gives the extent of the mip level
@@ -537,8 +543,12 @@ pub struct Sampler {
     device: Res<Device>,
 }
 
-impl Sampler {
-    pub fn new(renderer: &Renderer, reduction: vk::SamplerReductionMode) -> Result<Self> {
+impl ResourcePool {
+    pub fn create_sampler(
+        &self,
+        renderer: &Renderer,
+        reduction: vk::SamplerReductionMode,
+    ) -> Result<Res<Sampler>> {
         let device = renderer.device.clone(); 
         let mut create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(vk::Filter::LINEAR)
@@ -568,7 +578,7 @@ impl Sampler {
             device.handle.create_sampler(&create_info, None)?
         };
 
-        Ok(Self { handle, device })
+        Ok(self.alloc(Sampler { handle, device }))
     }
 }
 
@@ -585,12 +595,13 @@ pub struct ShaderModule {
     device: Res<Device>,
 }
 
-impl ShaderModule {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_shader_module(
+        &self,
         renderer: &Renderer,
         entry: &str,
         code: &[u8],
-    ) -> Result<Self> {
+    ) -> Result<Res<ShaderModule>> {
         let device = renderer.device.clone();
 
         if code.len() % mem::size_of::<u32>() != 0 {
@@ -609,10 +620,12 @@ impl ShaderModule {
             return Err(anyhow!("invalid entry name `entry`"));
         };
 
-        Ok(ShaderModule { device, handle, entry })
+        Ok(self.alloc(ShaderModule { device, handle, entry }))
     }
+}
 
-    pub fn stage_create_info(
+impl ShaderModule {
+    fn stage_create_info(
         &self,
         stage: vk::ShaderStageFlags,
     ) -> impl ops::Deref<Target = vk::PipelineShaderStageCreateInfo> + '_ {
@@ -636,17 +649,18 @@ pub struct PipelineLayout {
     pub handle: vk::PipelineLayout,
 
     #[allow(dead_code)]
-    descriptor_layouts: SmallVec<[Res<DescriptorSetLayout>; 2]>,
+    descriptor_layouts: SmallVec<[Res<DescriptorLayout>; 2]>,
 
     device: Res<Device>,
 }
 
-impl PipelineLayout {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_pipeline_layout(
+        &self,
         renderer: &Renderer,
         consts: &[vk::PushConstantRange],
-        layouts: &[Res<DescriptorSetLayout>],
-    ) -> Result<Self> {
+        layouts: &[Res<DescriptorLayout>],
+    ) -> Result<Res<PipelineLayout>> {
         let device = renderer.device.clone();
 
         let handle = unsafe {
@@ -665,7 +679,7 @@ impl PipelineLayout {
             descriptor_layouts.push(layout.clone());
         }
 
-        Ok(Self { handle, descriptor_layouts, device })
+        Ok(self.alloc(PipelineLayout { handle, descriptor_layouts, device }))
     }
 }
 
@@ -677,17 +691,17 @@ impl Drop for PipelineLayout {
 
 pub struct ComputePipeline {
     pub handle: vk::Pipeline,
-
     layout: Res<PipelineLayout>,
     device: Res<Device>,
 }
 
-impl ComputePipeline {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_compute_pipeline(
+        &self,
         renderer: &Renderer,
         layout: Res<PipelineLayout>,
-        shader: &ShaderModule,
-    ) -> Result<Self> {
+        shader: Res<ShaderModule>,
+    ) -> Result<Res<ComputePipeline>> {
         let device = renderer.device.clone();
         let stage = shader.stage_create_info(vk::ShaderStageFlags::COMPUTE);
         let create_infos = [vk::ComputePipelineCreateInfo::builder()
@@ -702,9 +716,11 @@ impl ComputePipeline {
                 .unwrap()
                 .clone()
         };
-        Ok(Self { device, handle, layout })
+        Ok(self.alloc(ComputePipeline { device, handle, layout }))
     }
+}
 
+impl ComputePipeline {
     pub fn layout(&self) -> Res<PipelineLayout> {
         self.layout.clone()
     }
@@ -732,21 +748,24 @@ pub struct GraphicsPipelineInfo<'a> {
 
     pub render_target_info: RenderTargetInfo,
 
-    pub vertex_shader: &'a ShaderModule,
-    pub fragment_shader: &'a ShaderModule,
+    pub vertex_shader: Res<ShaderModule>,
+    pub fragment_shader: Res<ShaderModule>,
 
     pub cull_mode: vk::CullModeFlags,
 }
 
 pub struct GraphicsPipeline {
     pub handle: vk::Pipeline,
-
     layout: Res<PipelineLayout>,
     device: Res<Device>,
 }
 
-impl GraphicsPipeline {
-    pub fn new(renderer: &Renderer, info: GraphicsPipelineInfo) -> Result<Self> {
+impl ResourcePool {
+    pub fn create_graphics_pipeline(
+        &self,
+        renderer: &Renderer,
+        info: GraphicsPipelineInfo,
+    ) -> Result<Res<GraphicsPipeline>> {
         let device = renderer.device.clone();
 
         let shader_stages = [
@@ -831,9 +850,11 @@ impl GraphicsPipeline {
                 .unwrap()
         };
 
-        Ok(Self { device, handle, layout: info.layout })
+        Ok(self.alloc(GraphicsPipeline { device, handle, layout: info.layout }))
     }
+}
 
+impl GraphicsPipeline {
     pub fn layout(&self) -> Res<PipelineLayout> {
         self.layout.clone()
     }
@@ -847,7 +868,6 @@ impl Drop for GraphicsPipeline {
 
 pub struct DescriptorPool {
     pub handle: vk::DescriptorPool,
-
     device: Res<Device>,
 }
 
@@ -926,19 +946,21 @@ impl LayoutBindings {
     }
 }
 
-pub struct DescriptorSetLayout {
+pub struct DescriptorLayout {
     pub handle: vk::DescriptorSetLayout,
     bindings: LayoutBindings,
     device: Res<Device>, 
 }
 
-impl DescriptorSetLayout {
-    pub fn new(renderer: &Renderer, bindings: &[LayoutBinding]) -> Result<Self> {
-        Self::create(renderer, LayoutBindings::new(bindings))
-    }
-
-    fn create(renderer: &Renderer, bindings: LayoutBindings) -> Result<Self> {
+impl ResourcePool {
+    pub fn create_descriptor_layout(
+        &self,
+        renderer: &Renderer,
+        bindings: &[LayoutBinding],
+    ) -> Result<Res<DescriptorLayout>> {
         let device = renderer.device.clone();
+        let bindings = LayoutBindings::new(bindings);
+
         let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
             .binding_flags(&bindings.flags)
             .build();
@@ -947,11 +969,12 @@ impl DescriptorSetLayout {
             .push_next(&mut binding_flags)
             .build();
         let handle = unsafe { device.handle.create_descriptor_set_layout(&layout_info, None)? };
-        Ok(Self { handle, bindings, device })
+
+        Ok(self.alloc(DescriptorLayout { handle, bindings, device }))
     }
 }
 
-impl Drop for DescriptorSetLayout {
+impl Drop for DescriptorLayout {
     fn drop(&mut self) {
         unsafe { self.device.handle.destroy_descriptor_set_layout(self.handle, None); }
     }
@@ -966,22 +989,22 @@ pub enum DescriptorBinding<'a> {
 pub struct DescriptorSet {
     pub handle: vk::DescriptorSet,
 
-    pub layout: Res<DescriptorSetLayout>,
+    pub layout: Res<DescriptorLayout>,
     pub pool: Rc<DescriptorPool>,
 
     #[allow(dead_code)]
     resources: SmallVec<[DummyRes; 32]>,
 }
 
-impl DescriptorSet {
-    pub fn new(
+impl ResourcePool {
+    pub fn create_descriptor_set(
+        &self,
         renderer: &Renderer,
-        resource_pool: &ResourcePool,
-        layout: Res<DescriptorSetLayout>,
+        layout: Res<DescriptorLayout>,
         bindings: &[DescriptorBinding],
-    ) -> Result<Res<Self>> {
+    ) -> Result<Res<DescriptorSet>> {
         let device = renderer.device.clone();
-        let (handle, pool) = resource_pool.descriptor_alloc(renderer, &layout)?;
+        let (handle, pool) = self.descriptor_alloc(renderer, &layout)?;
 
         struct Info {
             ty: vk::DescriptorType,
@@ -1063,10 +1086,12 @@ impl DescriptorSet {
             }
         }
 
-        Ok(resource_pool.alloc(Self { layout, pool, handle, resources }))
+        Ok(self.alloc(DescriptorSet { layout, pool, handle, resources }))
     }
+}
 
-    pub fn layout(&self) -> Res<DescriptorSetLayout> {
+impl DescriptorSet {
+    pub fn layout(&self) -> Res<DescriptorLayout> {
         self.layout.clone()
     }
 }
@@ -1285,7 +1310,7 @@ impl DescriptorPools {
     pub fn alloc(
         &mut self,
         renderer: &Renderer,
-        layout: &DescriptorSetLayout,
+        layout: &DescriptorLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
         let layouts = [layout.handle];
         let set_counts = [layout.bindings.variable_set_count];
@@ -1376,18 +1401,21 @@ impl Hash for ResourcePool {
 }
 
 impl ResourcePool {
+    /// Create new resource pool with default pool sizes.
     #[inline]
     #[must_use]
     pub fn new() -> Self {
         Self::with_block_size(CpuBlock::DEFAULT_BLOCK_SIZE, GpuBlock::DEFAULT_BLOCK_SIZE)
     }
 
+    /// Create new resource pool with custom block sizes.
     #[inline]
     #[must_use]
     pub fn with_block_size(cpu_block_size: usize, gpu_block_size: vk::DeviceSize) -> Self {
         Self { shared: Rc::new(SharedResources::new(cpu_block_size, gpu_block_size)) }
     }
 
+    /// Allocate block of GPU memory.
     #[inline]
     #[must_use]
     fn gpu_alloc(
@@ -1404,18 +1432,20 @@ impl ResourcePool {
         }
     }
 
+    /// Allocate descriptor set.
     #[inline]
     #[must_use]
     pub fn descriptor_alloc(
         &self,
         renderer: &Renderer,
-        layout: &DescriptorSetLayout,
+        layout: &DescriptorLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
         unsafe {
             (*self.shared.descriptor_pools.get()).alloc(renderer, layout)
         }
     }
 
+    /// Allocate item from CPU memory pool.
     #[inline]
     #[must_use]
     pub fn alloc<T>(&self, val: T) -> Res<T> {

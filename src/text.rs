@@ -46,14 +46,14 @@ impl TextPass {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
         let vertex_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
+            pool.create_buffer(renderer, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::VERTEX_BUFFER,
                 size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as vk::DeviceSize,
             })
         })?;
 
         let index_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
+            pool.create_buffer(renderer, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::INDEX_BUFFER,
                 size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as vk::DeviceSize,
             })
@@ -61,7 +61,7 @@ impl TextPass {
 
         let staging_pool = ResourcePool::with_block_size(128, 1024);
 
-        let atlas_staging = Buffer::new(&renderer, &staging_pool, memory_flags, &BufferInfo {
+        let atlas_staging = staging_pool.create_buffer(&renderer, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: font.atlas.base_image_data().len() as vk::DeviceSize,
         })?;
@@ -70,13 +70,11 @@ impl TextPass {
 
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
 
-        let sampler = pool.alloc(
-            Sampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
-        );
+        let sampler = pool.create_sampler(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
    
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let glyph_atlas = Image::new(&renderer, pool, memory_flags, &ImageInfo {
+        let glyph_atlas = pool.create_image(&renderer, memory_flags, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             kind: ImageKind::Texture, extent,
@@ -84,7 +82,7 @@ impl TextPass {
             mip_levels: 1,
         })?;
 
-        let view = ImageView::new(renderer, pool, &ImageViewInfo {
+        let view = pool.create_image_view(renderer, &ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
             mips: 0..glyph_atlas.mip_level_count(),
             image: glyph_atlas.clone(),
@@ -104,13 +102,13 @@ impl TextPass {
             );
         })?;
 
-        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[LayoutBinding {
+        let layout = pool.create_descriptor_layout(&renderer, &[LayoutBinding {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             stage: vk::ShaderStageFlags::FRAGMENT,
             array_count: None,
-        }])?);
+        }])?;
 
-        let descriptor = DescriptorSet::new(&renderer, pool, layout, &[
+        let descriptor = pool.create_descriptor_set(&renderer, layout.clone(), &[
             DescriptorBinding::Image(
                 sampler.clone(),
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
@@ -126,8 +124,8 @@ impl TextPass {
         let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/sdf.vert.spv");
         let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/sdf.frag.spv");
 
-        let vertex_module = ShaderModule::new(&renderer, "main", vertex_code)?;
-        let fragment_module = ShaderModule::new(&renderer, "main", fragment_code)?;
+        let vertex_shader = pool.create_shader_module(&renderer, "main", vertex_code)?;
+        let fragment_shader = pool.create_shader_module(&renderer, "main", fragment_code)?;
 
         let push_consts = [vk::PushConstantRange::builder()
             .stage_flags(vk::ShaderStageFlags::VERTEX)
@@ -135,11 +133,11 @@ impl TextPass {
             .offset(0)
             .build()];
 
-        let layout = pool.alloc(
-            PipelineLayout::new(&renderer, &push_consts, &[descriptor.layout.clone()])?
-        );
+        let layout = pool.create_pipeline_layout(&renderer, &push_consts, &[
+            descriptor.layout.clone(),
+        ])?;
 
-        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineInfo {
+        let pipeline = pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
             render_target_info,
 
             vertex_attributes: &[
@@ -164,11 +162,11 @@ impl TextPass {
             }],
 
             depth_stencil_info: &depth_stencil_info,
-            vertex_shader: &vertex_module,
-            fragment_shader: &fragment_module,
+            vertex_shader,
+            fragment_shader,
             cull_mode: vk::CullModeFlags::BACK,
             layout,
-        })?);
+        })?;
 
         let width = renderer.swapchain.extent().width as f32;
         let height = renderer.swapchain.extent().height as f32;

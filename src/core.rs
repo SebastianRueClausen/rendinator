@@ -930,20 +930,23 @@ impl Swapchain {
             .into_iter()
             .map(|handle| {
                 let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = Image::from_device(device.clone(), pool, memory_flags, &ImageInfo {
-                    usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    aspect_flags: vk::ImageAspectFlags::COLOR,
-                    kind: ImageKind::Swapchain { handle },
-                    format: surface_format.format,
-                    mip_levels: 1,
-                    extent: vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
-                        depth: 1,
+                let image = pool.create_image_from_device(device.clone(), memory_flags,
+                    &ImageInfo {
+                        usage: vk::ImageUsageFlags::TRANSFER_DST
+                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                        aspect_flags: vk::ImageAspectFlags::COLOR,
+                        kind: ImageKind::Swapchain { handle },
+                        format: surface_format.format,
+                        mip_levels: 1,
+                        extent: vk::Extent3D {
+                            width: extent.width,
+                            height: extent.height,
+                            depth: 1,
+                        },
                     },
-                })?;
+                )?;
 
-                ImageView::from_device(device.clone(), pool, &ImageViewInfo {
+                pool.create_image_view_from_device(device.clone(), &ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     image: image.clone(),
                     mips: 0..1,
@@ -1014,20 +1017,23 @@ impl Swapchain {
             .into_iter()
             .map(|handle| {
                 let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = Image::from_device(self.device.clone(), pool, memory_flags, &ImageInfo {
-                    usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    aspect_flags: vk::ImageAspectFlags::COLOR,
-                    kind: ImageKind::Swapchain { handle },
-                    format: self.surface_format.format,
-                    mip_levels: 1,
-                    extent: vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
-                        depth: 1,
+                let image = pool.create_image_from_device(self.device.clone(), memory_flags,
+                    &ImageInfo {
+                        usage: vk::ImageUsageFlags::TRANSFER_DST
+                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                        aspect_flags: vk::ImageAspectFlags::COLOR,
+                        kind: ImageKind::Swapchain { handle },
+                        format: self.surface_format.format,
+                        mip_levels: 1,
+                        extent: vk::Extent3D {
+                            width: extent.width,
+                            height: extent.height,
+                            depth: 1,
+                        },
                     },
-                })?;
+                )?;
 
-                ImageView::from_device(self.device.clone(), pool, &ImageViewInfo {
+                pool.create_image_view_from_device(self.device.clone(), &ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     image: image.clone(),
                     mips: 0..1,

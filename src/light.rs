@@ -142,7 +142,7 @@ impl ClusterInfoBuffer {
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let buffer = Buffer::new(&renderer, pool, memory_flags, &BufferInfo {
+        let buffer = pool.create_buffer(&renderer, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<ClusterInfo>() as u64,
         })?;
@@ -258,25 +258,25 @@ impl Lights {
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let light_buffer = Buffer::new(renderer, pool, memory_flags, &BufferInfo {
+        let light_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
         })?;
 
-        let cluster_aabb_buffer = Buffer::new(renderer, pool, memory_flags, &BufferInfo {
+        let cluster_aabb_buffer = pool.create_buffer(renderer, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
             size: (cluster_count * mem::size_of::<Aabb>()) as vk::DeviceSize,
         })?;
 
         let light_mask_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
+            pool.create_buffer(renderer, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: (cluster_count * mem::size_of::<LightMask>()) as vk::DeviceSize,
             })
         })?;
 
         let light_pos_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
+            pool.create_buffer(renderer, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as vk::DeviceSize,
             })
@@ -287,7 +287,7 @@ impl Lights {
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let light_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferInfo {
+        let light_staging = staging_pool.create_buffer(renderer, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
             size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
         })?;
@@ -299,7 +299,7 @@ impl Lights {
             recorder.copy_buffers(light_staging.clone(), light_buffer.clone())
         })?;
 
-        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+        let layout = pool.create_descriptor_layout(&renderer, &[
             LayoutBinding {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
@@ -325,10 +325,10 @@ impl Lights {
                 stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
-        ])?);
+        ])?;
 
         let descriptors = PerFrame::try_from_fn(|frame_index| {
-            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+            pool.create_descriptor_set(&renderer, layout.clone(), &[
                 DescriptorBinding::Buffer(cluster_info.buffer.clone()),
                 DescriptorBinding::Buffer(cluster_aabb_buffer.clone()),
                 DescriptorBinding::Buffer(light_buffer.clone()),
@@ -337,32 +337,30 @@ impl Lights {
             ])
         })?;
 
-        let layout = pool.alloc(
-            PipelineLayout::new(&renderer, &[], &[
-                camera_uniforms.descriptors.any().layout(),
-                layout,
-            ])?
-        );
+        let layout = pool.create_pipeline_layout(&renderer, &[], &[
+            camera_uniforms.descriptors.any().layout(),
+            layout,
+        ])?;
 
         let cluster_build = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_build.comp.spv");
-            let shader = ShaderModule::new(&renderer, "main", code)?;
+            let shader = pool.create_shader_module(&renderer, "main", code)?;
 
-            pool.alloc(ComputePipeline::new(&renderer, layout.clone(), &shader)?)
+            pool.create_compute_pipeline(&renderer, layout.clone(), shader)?
         };
 
         let light_update = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/light_update.comp.spv");
-            let shader = ShaderModule::new(&renderer, "main", code)?;
+            let shader = pool.create_shader_module(&renderer, "main", code)?;
 
-            pool.alloc(ComputePipeline::new(&renderer, layout.clone(), &shader)?)
+            pool.create_compute_pipeline(&renderer, layout.clone(), shader)?
         };
 
         let cluster_update = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_update.comp.spv");
-            let shader = ShaderModule::new(&renderer, "main", code)?;
+            let shader = pool.create_shader_module(&renderer, "main", code)?;
 
-            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
+            pool.create_compute_pipeline(&renderer, layout, shader)?
         };
 
         let light_count = lights.len() as u32;
