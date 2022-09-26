@@ -26,9 +26,8 @@ use std::time::Instant;
 use std::path::Path;
 
 use crate::core::*;
-use crate::resource::*;
 use crate::text::TextPass;
-use crate::scene::Scene;
+use crate::scene::{ForwardPass, Scene};
 use crate::light::{Lights, PointLight};
 use crate::camera::{Camera, CameraUniforms};
 use crate::skybox::Skybox;
@@ -53,27 +52,28 @@ fn main() -> Result<()> {
     let mut renderer = Renderer::new(&window)?;
     let mut input_state = InputState::default();
 
-    let mut render_targets = RenderTargets::new(&mut renderer)?;
-
-    let font = asset::Font::load(Path::new("assets/fonts/source_code_pro.font"))?;
-    let mut text_pass = TextPass::new(&renderer, &render_targets, &font)?;
-
     let mut camera = Camera::new(renderer.swapchain.aspect_ratio());
     let camera_uniforms = CameraUniforms::new(&renderer, &camera)?;
 
     let lights = debug_lights();
     let mut lights = Lights::new(&renderer, &camera_uniforms, &camera, &lights)?;
 
-    let skybox = Skybox::new(&renderer, &render_targets, &lights)?;
-
     let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
-    let mut scene = Scene::from_scene_asset(
+    let scene = Scene::from_scene_asset(&renderer, &scene)?;
+
+    let mut forward_pass = ForwardPass::new(
         &renderer,
-        &render_targets,
         &camera_uniforms,
-        &lights,
         &scene,
+        &lights,
     )?;
+
+    let render_target_info = forward_pass.render_target_info();
+
+    let skybox = Skybox::new(&renderer, render_target_info, &lights)?;
+
+    let font = asset::Font::load(Path::new("assets/fonts/source_code_pro.font"))?;
+    let mut text_pass = TextPass::new(&renderer, render_target_info, &font)?;
 
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
@@ -97,8 +97,7 @@ fn main() -> Result<()> {
                 minimized = false;
                 renderer.resize(&window).expect("failed to resize window");
 
-                render_targets = RenderTargets::new(&mut renderer)
-                    .expect("failed creating new render targets");
+                forward_pass.handle_resize(&mut renderer).expect("failed to resize forward pass");
 
                 text_pass.handle_resize(&renderer);
                 camera.update_proj(renderer.swapchain.aspect_ratio());
@@ -110,8 +109,6 @@ fn main() -> Result<()> {
                 lights
                     .handle_resize(&renderer, &camera)
                     .expect("failed to resize lights");
-
-                scene.handle_resize(&renderer, &render_targets).expect("failed to resize scene");
             }
         }
         Event::MainEventsCleared => {
@@ -129,21 +126,20 @@ fn main() -> Result<()> {
                         .expect("failed to update view");
 
                     lights.prepare_lights(frame_index, &camera_uniforms, recorder);
-                    scene.prepare_draw_buffers(
+                    forward_pass.prepare_draw_buffers(
                         frame_index,
-                        &render_targets,
-                        &camera_uniforms,
                         &camera,
+                        &camera_uniforms,
                         recorder,
                     );
 
                     recorder.begin_rendering(&BeginRenderingReq {
-                        color_target: render_targets.color_images[frame_index].clone(),
-                        depth_target: render_targets.depth_images[frame_index].clone(),
+                        color_target: forward_pass.color_images[frame_index].clone(),
+                        depth_target: forward_pass.depth_images[frame_index].clone(),
                         swapchain: swapchain.clone(),
                     });
 
-                    scene.draw(frame_index, &camera_uniforms, &lights, recorder);
+                    forward_pass.draw(frame_index, &scene, &camera_uniforms, &lights, recorder);
                     skybox.draw(&camera, recorder); 
 
                     text_pass.draw_text(recorder, frame_index, |texts| {
@@ -157,7 +153,7 @@ fn main() -> Result<()> {
 
                         let primitives_drawn = format!(
                             "primitives: {}",
-                            scene.primitives_drawn(&renderer, frame_index.last())
+                            forward_pass.primitives_drawn(&renderer, frame_index.last())
                                 .expect("failed to get amount of primitives drawn"),
                         );
 
@@ -169,7 +165,7 @@ fn main() -> Result<()> {
 
                     recorder.end_rendering();
 
-                    let color_image = render_targets.color_images[frame_index].image().clone();
+                    let color_image = forward_pass.color_images[frame_index].image().clone();
                     let swapchain_image = swapchain.image(image_index).image().clone();
 
                     recorder.image_barrier(&ImageBarrierReq {
@@ -202,7 +198,7 @@ fn main() -> Result<()> {
                     });
 
                     if false {
-                        scene.pyramid_debug(frame_index, swapchain_image.clone(), recorder, 4);
+                        forward_pass.pyramid_debug(frame_index, swapchain_image.clone(), recorder, 4);
                     }
                 });
 
@@ -211,95 +207,6 @@ fn main() -> Result<()> {
         }
         _ => {}
     });
-}
-
-pub struct RenderTargets {
-    pub depth_images: PerFrame<Res<ImageView>>,
-    pub color_images: PerFrame<Res<ImageView>>,
-
-    samples: vk::SampleCountFlags,
-}
-
-impl RenderTargets {
-    fn new(renderer: &mut Renderer) -> Result<Self> {
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-        let extent = renderer.swapchain.extent_3d();
-        let samples = renderer.device.sample_count();
-        
-        let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
-            | vk::ImageUsageFlags::TRANSFER_SRC
-            | vk::ImageUsageFlags::SAMPLED;
-
-        let depth_images = PerFrame::try_from_fn(|_| {
-            let image = Image::new(renderer, &renderer.pool, memory_flags, &ImageReq {
-                aspect_flags: vk::ImageAspectFlags::DEPTH,
-                format: DEPTH_IMAGE_FORMAT,
-                kind: ImageKind::RenderTarget {
-                    queue: renderer.graphics_queue(),
-                    samples,
-                },
-                mip_levels: 1,
-                extent,
-                usage,
-            })?;
-
-            ImageView::new(renderer, &renderer.pool, &ImageViewReq {
-                view_type: vk::ImageViewType::TYPE_2D,
-                mips: image.mip_levels(),
-                image,
-            })
-        })?;
-
-        renderer.transfer_with(|recorder| {
-            for image in &depth_images {
-                recorder.image_barrier(&ImageBarrierReq {
-                    flags: vk::DependencyFlags::BY_REGION,
-                    src_stage: vk::PipelineStageFlags2::empty(),
-                    dst_stage: vk::PipelineStageFlags2::empty(),
-                    src_mask: vk::AccessFlags2::empty(),
-                    dst_mask: vk::AccessFlags2::empty(),
-                    new_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL,
-                    image: image.image().clone(),
-                    mips: image.image().mip_levels(),
-                });
-            }
-        })?;
-
-        let color_images = PerFrame::try_from_fn(|_| {
-            let image = Image::new(renderer, &renderer.pool, memory_flags, &ImageReq {
-                usage: vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
-                aspect_flags: vk::ImageAspectFlags::COLOR,
-                format: renderer.swapchain.format(),
-                kind: ImageKind::RenderTarget {
-                    queue: renderer.graphics_queue(),
-                    samples,
-                },
-                mip_levels: 1,
-                extent,
-            })?;
-
-            ImageView::new(renderer, &renderer.pool, &ImageViewReq {
-                view_type: vk::ImageViewType::TYPE_2D,
-                mips: 0..1,
-                image,
-            })
-        })?;
-
-        Ok(Self { depth_images, color_images, samples })
-    }
-
-    pub fn color_format(&self) -> vk::Format {
-        self.color_images[FrameIndex::Uno].image().format()
-    }
-
-    pub fn depth_format(&self) -> vk::Format {
-        self.depth_images[FrameIndex::Uno].image().format()
-    }
-
-    pub fn sample_count(&self) -> vk::SampleCountFlags {
-        self.samples
-    }
 }
 
 #[derive(Default)]
@@ -374,5 +281,3 @@ fn debug_lights() -> Vec<PointLight> {
 
     lights 
 }
-
-const DEPTH_IMAGE_FORMAT: vk::Format = vk::Format::D32_SFLOAT;

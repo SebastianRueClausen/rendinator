@@ -4,7 +4,6 @@ use ash::vk;
 
 use std::mem;
 
-use crate::RenderTargets;
 use crate::light::Lights;
 use crate::core::*;
 use crate::resource::*;
@@ -137,16 +136,19 @@ struct DepthPyramid {
     /// Descriptor of `depth_staging` and the depth image.
     resolve_descs: PerFrame<Res<DescriptorSet>>,
 
+    reduce: Res<ComputePipeline>,
+    resolve: Res<ComputePipeline>,
+
     // TODO: Remove.
     width: u32,
     height: u32,
 }
 
 impl DepthPyramid {
-    fn new(renderer: &Renderer, render_targets: &RenderTargets) -> Result<Self> {
+    fn new(renderer: &Renderer, depth_images: &PerFrame<Res<ImageView>>) -> Result<Self> {
         let pool = &renderer.pool;
 
-        let depth_extent = render_targets.depth_images.any().image().extent(0);
+        let depth_extent = depth_images.any().image().extent(0);
 
         let width = prev_pow2(depth_extent.width);
         let height = prev_pow2(depth_extent.height);
@@ -291,7 +293,7 @@ impl DepthPyramid {
         let resolve_descs = PerFrame::try_from_fn(|frame_index| {
             DescriptorSet::new(&renderer, pool, layout.clone(), &[
                 DescriptorBinding::Image(sampler.clone(), image_layout,
-                    render_targets.depth_images[frame_index].clone(),
+                    depth_images[frame_index].clone(),
                 ),
                 DescriptorBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL,
                     stagings[frame_index].clone(),
@@ -299,43 +301,595 @@ impl DepthPyramid {
             ])
         })?;
 
-        Ok(Self { pyramids, stagings, resolve_descs, storage, sampled, width, height })
+        let resolve = {
+            let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_resolve.comp.spv");
+            let shader = ShaderModule::new(&renderer, "main", code)?;
+
+            let push_consts = [vk::PushConstantRange::builder()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .size(mem::size_of::<DepthResolveInfo>() as u32)
+                .offset(0)
+                .build()];
+
+            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
+                resolve_descs.any().layout(),
+            ])?);
+
+            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
+        };
+
+        let reduce = {
+            let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_reduce.comp.spv");
+            let shader = ShaderModule::new(&renderer, "main", code)?;
+
+            let push_consts = [vk::PushConstantRange::builder()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .size(mem::size_of::<DepthReduceInfo>() as u32)
+                .offset(0)
+                .build()];
+
+            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
+                sampled.any().layout(),
+                storage.any().layout(),
+            ])?);
+
+            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
+        };
+
+
+        Ok(Self {
+            resolve,
+            reduce,
+            pyramids,
+            stagings,
+            resolve_descs,
+            storage,
+            sampled,
+            width,
+            height,
+        })
+    }
+
+    fn update(
+        &self,
+        frame_index: FrameIndex,
+        depth_images: &PerFrame<Res<ImageView>>,
+        recorder: &CommandRecorder,
+    ) {
+        let depth_image = depth_images[frame_index].clone();
+
+        recorder.image_barrier(&ImageBarrierReq {
+            flags: vk::DependencyFlags::BY_REGION,
+            src_stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            src_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_READ,
+            new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            image: depth_image.image().clone(),
+            mips: depth_image.image().mip_levels(),
+        });
+
+        recorder.image_barrier(&ImageBarrierReq {
+            flags: vk::DependencyFlags::BY_REGION,
+            src_stage: vk::PipelineStageFlags2::empty(),
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            src_mask: vk::AccessFlags2::empty(),
+            dst_mask: vk::AccessFlags2::SHADER_WRITE,
+            new_layout: vk::ImageLayout::GENERAL,
+            image: self.stagings[frame_index].image().clone(),
+            mips: self.stagings[frame_index].image().mip_levels(),
+        });
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            bind_point: vk::PipelineBindPoint::COMPUTE,
+            layout: self.resolve.layout(),
+            descriptors: &[
+                self.resolve_descs[frame_index].clone()
+            ],
+        });
+
+        let vk::Extent3D { width, height, .. } =
+            self.stagings[frame_index].image().extent(0);
+
+        let info = DepthResolveInfo {
+            image_size: UVec2::new(width, height),
+            // `vk::SampleCountFlags` as raw maps to the amount of samples.
+            sample: depth_image.image().sample_count().as_raw(),
+        };
+
+        recorder.push_constants(
+            self.resolve.layout(),
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &info,
+        );
+       
+        recorder.dispatch(self.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
+
+        recorder.image_barrier(&ImageBarrierReq {
+            flags: vk::DependencyFlags::BY_REGION,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            src_mask: vk::AccessFlags2::SHADER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_READ,
+            new_layout: vk::ImageLayout::GENERAL,
+            image: self.stagings[frame_index].image().clone(),
+            mips: self.stagings[frame_index].image().mip_levels(),
+        });
+
+        //
+        // Reduce from each level to the next in depth pyramid.
+        //
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            bind_point: vk::PipelineBindPoint::COMPUTE,
+            layout: self.reduce.layout(),
+            descriptors: &[
+                self.sampled[frame_index].clone(),
+                self.storage[frame_index].clone(),
+            ],
+        });
+
+        let pyramid = &self.pyramids[frame_index];
+
+        for target in pyramid.mip_levels() {
+            let vk::Extent3D { width, height, .. } = pyramid.extent(target);
+            let info = DepthReduceInfo {
+                image_size: UVec2::new(width, height),
+                target,
+            };
+
+            let layout = self.reduce.layout();
+
+            recorder.push_constants(layout, vk::ShaderStageFlags::COMPUTE, 0, &info);
+            recorder.dispatch(self.reduce.clone(), [width / 32, height / 32, 1]);
+
+            recorder.image_barrier(&ImageBarrierReq {
+                flags: vk::DependencyFlags::BY_REGION,
+                src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+                dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+                src_mask: vk::AccessFlags2::SHADER_WRITE,
+                dst_mask: vk::AccessFlags2::SHADER_READ,
+                new_layout: vk::ImageLayout::GENERAL,
+                image: pyramid.clone(),
+                mips: target..target + 1,
+            });
+        }
+
     }
 }
 
-pub struct Scene {
-    render: Res<GraphicsPipeline>,
-    cull_pipeline: Res<ComputePipeline>,
-
+pub struct ForwardPass {
     descriptors: PerFrame<Res<DescriptorSet>>,
 
-    primitive_count: u32,
+    pub depth_images: PerFrame<Res<ImageView>>,
+    pub color_images: PerFrame<Res<ImageView>>,
+
+    render: Res<GraphicsPipeline>, 
+    cull: Res<ComputePipeline>,
 
     depth_pyramid: DepthPyramid,
 
-    depth_reduce: Res<ComputePipeline>,
-    depth_resolve: Res<ComputePipeline>,
-
-    /// Index buffer containing all vertex data for objects in the scene.
-    index_buffer: Res<Buffer>,
-
-    /// [`DrawCommand`] for each primitive that should be drawn.
+    /// Contains [`DrawCommand`] used for draw indirect count commands.
     draw_buffers: PerFrame<Res<Buffer>>,
 
-    /// [`DrawCount`] for each frame in flight.
+    /// Contains [`DrawCount`] used for draw indirect count commands.
     draw_count_buffers: PerFrame<Res<Buffer>>,
 
+    /// Small host buffer to copy `draw_count_buffers` into to access amount of primitives drawn.
     draw_count_host_buffers: PerFrame<Res<Buffer>>,
+
+    render_target_info: RenderTargetInfo,
+    primitive_count: u32,
+}
+
+impl ForwardPass {
+    pub fn new(
+        renderer: &Renderer,
+        camera_uniforms: &CameraUniforms,
+        scene: &Scene,
+        lights: &Lights,
+    ) -> Result<Self> {
+        let pool = &renderer.pool;
+
+        let extent = renderer.swapchain.extent_3d();
+        let samples = renderer.device.sample_count();
+
+        let depth_images = create_depth_images(renderer, extent, samples)?;
+        let color_images = create_forward_color_images(renderer, extent, samples)?;
+
+        let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
+
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let draw_count_buffers = PerFrame::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+            })
+        })?;
+
+        let draw_count_host_buffers = PerFrame::try_from_fn(|_| {
+            let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
+                | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+            })
+        })?;
+
+        renderer.transfer_with(|recorder| {
+            let draw_count = DrawCount {
+                command_count: 0,
+                primitive_count: scene.primitive_count(),
+            };
+
+            for buffer in &draw_count_buffers {
+                recorder.update_buffer(buffer.clone(), &draw_count);
+            }
+        })?;
+
+        let draw_buffers = PerFrame::try_from_fn(|_| {
+            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
+            })
+        })?;
+
+        let sampler = pool.alloc(
+            TextureSampler::new(&renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+        );
+
+        let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX
+                    | vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+            LayoutBinding {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage: vk::ShaderStageFlags::FRAGMENT,
+                array_count: Some(scene.textures.len() as u32),
+            },
+        ])?);
+
+        let descriptors = PerFrame::try_from_fn(|frame_index| {
+            DescriptorSet::new(&renderer, pool, layout.clone(), &[
+                DescriptorBinding::Buffer(scene.instance_buffer.clone()),
+                DescriptorBinding::Buffer(draw_buffers[frame_index].clone()),
+                DescriptorBinding::Buffer(scene.primitive_buffer.clone()),
+                DescriptorBinding::Buffer(draw_count_buffers[frame_index].clone()),
+                DescriptorBinding::Buffer(scene.vertex_buffer.clone()),
+                DescriptorBinding::VariableImageArray(
+                    sampler.clone(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    &scene.textures,
+                ),
+            ])
+        })?;
+
+        let render_target_info = RenderTargetInfo {
+            color_format: color_images.any().image().format(),
+            depth_format: depth_images.any().image().format(),
+            sample_count: samples,
+        };
+
+        let render = {
+            let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
+            let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.frag.spv");
+
+            let vertex_module = ShaderModule::new(&renderer, "main", vertex_code)?;
+            let fragment_module = ShaderModule::new(&renderer, "main", fragment_code)?;
+
+            let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
+                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
+                .depth_write_enable(true)
+                .depth_test_enable(true);
+
+            let layout = pool.alloc(PipelineLayout::new(&renderer, &[], &[
+                camera_uniforms.descriptors.any().layout(),
+                lights.descriptors.any().layout(),
+                descriptors.any().layout(),
+            ])?);
+
+            pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+                render_target_info,
+                cull_mode: vk::CullModeFlags::BACK,
+                fragment_shader: &fragment_module,
+                vertex_shader: &vertex_module,
+                vertex_attributes: &[],
+                vertex_bindings: &[],
+                depth_stencil_info,
+                layout,
+            })?)
+        };
+
+        let cull = {
+            let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
+            let shader = ShaderModule::new(&renderer, "main", code)?;
+
+            let push_consts = [vk::PushConstantRange::builder()
+                .stage_flags(vk::ShaderStageFlags::COMPUTE)
+                .size(mem::size_of::<CullInfo>() as u32)
+                .offset(0)
+                .build()];
+
+            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
+                camera_uniforms.descriptors.any().layout(),
+                descriptors.any().layout(),
+                depth_pyramid.sampled.any().layout(),
+            ])?);
+
+            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
+        };
+
+        Ok(Self {
+            primitive_count: scene.primitive_count(),
+            depth_images,
+            color_images,
+            depth_pyramid,
+            draw_buffers,
+            draw_count_buffers,
+            draw_count_host_buffers,
+            descriptors,
+            render_target_info,
+            cull,
+            render,
+        })
+    }
+
+    pub fn render_target_info(&self) -> RenderTargetInfo {
+        self.render_target_info
+    }
+
+    pub fn prepare_draw_buffers(
+        &self,
+        frame_index: FrameIndex,
+        camera: &Camera,
+        camera_uniforms: &CameraUniforms,
+        recorder: &CommandRecorder,
+    ) {
+        let draw_count = DrawCount {
+            command_count: 0,
+            primitive_count: self.primitive_count,
+        };
+
+        recorder.update_buffer(self.draw_count_buffers[frame_index].clone(), &draw_count);
+
+        recorder.buffer_barrier(&BufferBarrierReq {
+            buffer: self.draw_count_buffers[frame_index].clone(),
+            src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+            src_stage: vk::PipelineStageFlags2::TRANSFER,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        });
+
+        //
+        // Frustrum cull and generate draw buffers.
+        //
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            bind_point: vk::PipelineBindPoint::COMPUTE,
+            layout: self.cull.layout(),
+            descriptors: &[
+                camera_uniforms.descriptors[frame_index].clone(),
+                self.descriptors[frame_index].clone(),
+                self.depth_pyramid.sampled[frame_index].clone(),
+            ],
+        });
+
+        let cull_info = CullInfo {
+            z_near: camera.z_near,
+            z_far: camera.z_far,
+
+            frustrum_planes: camera.frustrum_planes(),
+
+            pyramid_width: self.depth_pyramid.width as f32,
+            pyramid_height: self.depth_pyramid.height as f32,
+
+            lod_base: 10.0,
+            lod_step: 2.0,
+
+            _pad1: 0.0,
+            _pad2: 0.0,
+        };
+
+        recorder.push_constants(
+            self.cull.layout(),
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &cull_info,
+        );
+
+        recorder.dispatch(self.cull.clone(), [
+            self.primitive_count.div_ceil(64), 1, 1,
+        ]);
+
+        recorder.buffer_barrier(&BufferBarrierReq {
+            buffer: self.draw_buffers[frame_index].clone(),
+            src_mask: vk::AccessFlags2::SHADER_WRITE,
+            dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
+        });
+
+        self.depth_pyramid.update(frame_index, &self.depth_images, recorder);
+    }
+
+    pub fn draw(
+        &self,
+        frame_index: FrameIndex,
+        scene: &Scene,
+        camera_uniforms: &CameraUniforms,
+        lights: &Lights,
+        recorder: &CommandRecorder,
+    ) {
+        recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
+        recorder.bind_graphics_pipeline(self.render.clone());
+
+        recorder.bind_descriptor_sets(&DescriptorBindReq {
+            bind_point: vk::PipelineBindPoint::GRAPHICS,
+            layout: self.render.layout(),
+            descriptors: &[
+                camera_uniforms.descriptors[frame_index].clone(),
+                lights.descriptors[frame_index].clone(),
+                self.descriptors[frame_index].clone(),
+            ],
+        });
+        
+        recorder.draw_indexed_indirect_count(&IndexedIndirectDrawReq {
+            draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
+            draw_buffer: self.draw_buffers[frame_index].clone(),
+            count_buffer: self.draw_count_buffers[frame_index].clone(),
+            max_draw_count: self.primitive_count,
+            count_offset: 0,
+            draw_offset: 0,
+        });
+    }
+
+    pub fn pyramid_debug(
+        &self,
+        frame_index: FrameIndex,
+        swapchain_image: Res<Image>,
+        recorder: &CommandRecorder,
+        level: u32,
+    ) {
+        let pyramid = &self.depth_pyramid.pyramids[frame_index];
+
+        recorder.blit_image(&ImageBlitReq {
+            src: pyramid.clone(),
+            dst: swapchain_image,
+            filter: vk::Filter::NEAREST,
+            src_mip: level,
+            dst_mip: 0,
+        });
+    }
+
+    pub fn primitives_drawn(&self, renderer: &Renderer, frame_index: FrameIndex) -> Result<u32> {
+        let src = self.draw_count_buffers[frame_index].clone();
+        let dst = self.draw_count_host_buffers[frame_index].clone();
+
+        renderer.transfer_with(|recorder| recorder.copy_buffers(src.clone(), dst.clone()))?;
+
+        let mapped = dst.get_mapped()?;
+        let count: &DrawCount = bytemuck::from_bytes(mapped.as_slice());
+
+        Ok(count.command_count)
+    }
+
+    pub fn handle_resize(&mut self, renderer: &Renderer) -> Result<()> {
+        let extent = renderer.swapchain.extent_3d();
+        let samples = renderer.device.sample_count();
+
+        self.depth_images = create_depth_images(renderer, extent, samples)?;
+        self.color_images = create_forward_color_images(renderer, extent, samples)?;
+
+        self.depth_pyramid = DepthPyramid::new(renderer, &self.depth_images)?;
+
+        Ok(())
+    }
+}
+
+fn create_depth_images(
+    renderer: &Renderer,
+    extent: vk::Extent3D,
+    samples: vk::SampleCountFlags,
+) -> Result<PerFrame<Res<ImageView>>> {
+    let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+    PerFrame::try_from_fn(|_| {
+        let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+            | vk::ImageUsageFlags::TRANSFER_SRC
+            | vk::ImageUsageFlags::SAMPLED;
+
+        let image = Image::new(renderer, &renderer.pool, memory_flags, &ImageReq {
+            aspect_flags: vk::ImageAspectFlags::DEPTH,
+            format: DEPTH_IMAGE_FORMAT,
+            kind: ImageKind::RenderTarget {
+                queue: renderer.graphics_queue(),
+                samples,
+            },
+            mip_levels: 1,
+            extent,
+            usage,
+        })?;
+
+        ImageView::new(renderer, &renderer.pool, &ImageViewReq {
+            view_type: vk::ImageViewType::TYPE_2D,
+            mips: image.mip_levels(),
+            image,
+        })
+    })
+}
+
+fn create_forward_color_images(
+    renderer: &Renderer,
+    extent: vk::Extent3D,
+    samples: vk::SampleCountFlags,
+) -> Result<PerFrame<Res<ImageView>>> {
+    let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+    PerFrame::try_from_fn(|_| {
+        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
+            | vk::ImageUsageFlags::TRANSFER_SRC;
+
+        let image = Image::new(renderer, &renderer.pool, memory_flags, &ImageReq {
+            aspect_flags: vk::ImageAspectFlags::COLOR,
+            format: renderer.swapchain.format(),
+            kind: ImageKind::RenderTarget {
+                queue: renderer.graphics_queue(),
+                samples,
+            },
+            mip_levels: 1,
+            extent,
+            usage,
+        })?;
+
+        ImageView::new(renderer, &renderer.pool, &ImageViewReq {
+            view_type: vk::ImageViewType::TYPE_2D,
+            mips: 0..1,
+            image,
+        })
+    })
+}
+
+pub struct Scene {
+    primitives: Vec<Primitive>,
+    textures: Vec<Res<ImageView>>,
+    index_buffer: Res<Buffer>,
+    vertex_buffer: Res<Buffer>, 
+    instance_buffer: Res<Buffer>,
+    primitive_buffer: Res<Buffer>,
 }
 
 impl Scene {
-    pub fn from_scene_asset(
-        renderer: &Renderer,
-        render_targets: &RenderTargets,
-        camera_uniforms: &CameraUniforms,
-        lights: &Lights,
-        scene: &asset::Scene,
-    ) -> Result<Self> {
+    pub fn from_scene_asset(renderer: &Renderer, scene: &asset::Scene) -> Result<Self> {
         let pool = &renderer.static_pool;
 
         let instance_data: Vec<_> = scene.instances
@@ -394,61 +948,40 @@ impl Scene {
             })
             .collect();
 
-        let draw_count = DrawCount {
-            // Filled out in cull shader.
-            command_count: 0,
-            primitive_count: primitives.len() as u32,
-        };
-
-        //
-        // Create staging buffers.
-        //
-
-        let vertex_data = bytemuck::cast_slice(scene.vertices.as_slice());
-        let index_data = bytemuck::cast_slice(scene.indices.as_slice());
-        let instance_data = bytemuck::cast_slice(instance_data.as_slice());
-        let primitive_data = bytemuck::cast_slice(primitives.as_slice());
-        let draw_count_data = bytemuck::bytes_of(&draw_count);
-
         let staging_pool = ResourcePool::new();
 
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
+        let primitive_data = bytemuck::cast_slice(primitives.as_slice());
         let primitive_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: primitive_data.len() as vk::DeviceSize,
         })?;
 
+        let instance_data = bytemuck::cast_slice(instance_data.as_slice());
         let instance_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: instance_data.len() as vk::DeviceSize,
         })?;
 
+        let vertex_data = bytemuck::cast_slice(scene.vertices.as_slice());
         let vertex_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: vertex_data.len() as vk::DeviceSize,
         })?;
 
+        let index_data = bytemuck::cast_slice(scene.indices.as_slice());
         let index_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: index_data.len() as vk::DeviceSize,
-        })?;
-
-        let draw_count_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: draw_count_data.len() as vk::DeviceSize,
         })?;
 
         primitive_staging.get_mapped()?.fill(primitive_data);
         instance_staging.get_mapped()?.fill(instance_data);
         vertex_staging.get_mapped()?.fill(vertex_data);
         index_staging.get_mapped()?.fill(index_data);
-        draw_count_staging.get_mapped()?.fill(draw_count_data);
 
-        //
-        // Create device buffers and copy staging buffers.
-        //
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
@@ -476,16 +1009,6 @@ impl Scene {
             size: index_data.len() as vk::DeviceSize,
         })?;
 
-        let draw_count_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_DST
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC,
-                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
-            })
-        })?;
-
         renderer.transfer_with(|recorder| {
             let buffers = [
                 (instance_staging.clone(), instance_buffer.clone()),
@@ -497,24 +1020,7 @@ impl Scene {
             for (staging, buffer) in buffers {
                 recorder.copy_buffers(staging, buffer);
             }
-
-            for buffer in &draw_count_buffers {
-                recorder.copy_buffers(draw_count_staging.clone(), buffer.clone());
-            }
         })?;
-
-        let draw_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_DST
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
-                size: (primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
-            })
-        })?;
-
-        //
-        // Create staging buffer for textures and upload the raw texture data.
-        //
 
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
@@ -585,7 +1091,7 @@ impl Scene {
             }
         })?;
 
-        let views: Result<Vec<_>> = images
+        let textures: Result<Vec<_>> = images
             .into_iter()
             .map(|image| {
                 ImageView::new(renderer, pool, &ImageViewReq {
@@ -596,422 +1102,25 @@ impl Scene {
             })
             .collect();
     
-        let views = views?;
-
-        let sampler = pool.alloc(
-            TextureSampler::new(&renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
-        );
-
-        let descriptor_layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-            LayoutBinding {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
-                array_count: Some(views.len() as u32),
-            },
-        ])?);
-
-        let descriptors = PerFrame::try_from_fn(|frame_index| {
-            DescriptorSet::new(&renderer, pool, descriptor_layout.clone(), &[
-                DescriptorBinding::Buffer(instance_buffer.clone()),
-                DescriptorBinding::Buffer(draw_buffers[frame_index].clone()),
-                DescriptorBinding::Buffer(primitive_buffer.clone()),
-                DescriptorBinding::Buffer(draw_count_buffers[frame_index].clone()),
-                DescriptorBinding::Buffer(vertex_buffer.clone()),
-                DescriptorBinding::VariableImageArray(
-                    sampler.clone(),
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    &views,
-                ),
-            ])
-        })?;
-
-        let render = {
-            let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
-            let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.frag.spv");
-
-            let vertex_module = ShaderModule::new(&renderer, "main", vertex_code)?;
-            let fragment_module = ShaderModule::new(&renderer, "main", fragment_code)?;
-
-            let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
-                .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
-                .depth_write_enable(true)
-                .depth_test_enable(true);
-
-            let layout = pool.alloc(PipelineLayout::new(&renderer, &[], &[
-                camera_uniforms.descriptors.any().layout(),
-                lights.descriptors.any().layout(),
-                descriptors.any().layout(),
-            ])?);
-
-            pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
-                color_format: render_targets.color_format(),
-                depth_format: render_targets.depth_format(),
-                sample_count: render_targets.sample_count(),
-                cull_mode: vk::CullModeFlags::BACK,
-                fragment_shader: &fragment_module,
-                vertex_shader: &vertex_module,
-                vertex_attributes: &[],
-                vertex_bindings: &[],
-                depth_stencil_info,
-                layout,
-            })?)
-        };
-
-        let depth_pyramid = DepthPyramid::new(renderer, render_targets)?;
-
-        let cull_pipeline = {
-            let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
-            let shader = ShaderModule::new(&renderer, "main", code)?;
-
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<CullInfo>() as u32)
-                .offset(0)
-                .build()];
-
-            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
-                camera_uniforms.descriptors.any().layout(),
-                descriptors.any().layout(),
-                depth_pyramid.sampled.any().layout(),
-            ])?);
-
-            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
-        };
-
-        let depth_reduce = {
-            let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_reduce.comp.spv");
-            let shader = ShaderModule::new(&renderer, "main", code)?;
-
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<DepthReduceInfo>() as u32)
-                .offset(0)
-                .build()];
-
-            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
-                depth_pyramid.sampled.any().layout(),
-                depth_pyramid.storage.any().layout(),
-            ])?);
-
-            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
-        };
-
-        let depth_resolve = {
-            let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_resolve.comp.spv");
-            let shader = ShaderModule::new(&renderer, "main", code)?;
-
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<DepthResolveInfo>() as u32)
-                .offset(0)
-                .build()];
-
-            let layout = pool.alloc(PipelineLayout::new(&renderer, &push_consts, &[
-                depth_pyramid.resolve_descs.any().layout(),
-            ])?);
-
-            pool.alloc(ComputePipeline::new(&renderer, layout, &shader)?)
-        };
-
-        let draw_count_host_buffers = PerFrame::try_from_fn(|_| {
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
-            })
-        })?;
-
-        let primitive_count = primitives.len() as u32;
+        let textures = textures?;
 
         Ok(Self {
-            depth_resolve,
-            depth_reduce,
-            depth_pyramid,
-            cull_pipeline,
-            primitive_count,
-            descriptors,
-            render,
+            primitives,
+            textures,
             index_buffer,
-            draw_buffers,
-            draw_count_buffers,
-            draw_count_host_buffers,
+            vertex_buffer,
+            instance_buffer,
+            primitive_buffer,
         })
     }
 
-    pub fn handle_resize(&mut self, renderer: &Renderer, render_targets: &RenderTargets) -> Result<()> {
-        self.depth_pyramid = DepthPyramid::new(renderer, render_targets)?;
-
-        Ok(())
-    }
-
-    pub fn prepare_draw_buffers(
-        &self,
-        frame_index: FrameIndex,
-        render_targets: &RenderTargets,
-        camera_uniforms: &CameraUniforms,
-        camera: &Camera,
-        recorder: &CommandRecorder,
-    ) {
-        let draw_count = DrawCount {
-            command_count: 0,
-            primitive_count: self.primitive_count,
-        };
-
-        recorder.update_buffer(self.draw_count_buffers[frame_index].clone(), &draw_count);
-
-        recorder.buffer_barrier(&BufferBarrierReq {
-            buffer: self.draw_count_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags2::TRANSFER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
-            src_stage: vk::PipelineStageFlags2::TRANSFER,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        });
-
-        //
-        // Frustrum cull and generate draw buffers.
-        //
-
-        let depth_image = &render_targets.depth_images[frame_index];
-
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.cull_pipeline.layout(),
-            descriptors: &[
-                camera_uniforms.descriptors[frame_index].clone(),
-                self.descriptors[frame_index].clone(),
-                self.depth_pyramid.sampled[frame_index].clone(),
-            ],
-        });
-
-        let cull_info = CullInfo {
-            z_near: camera.z_near,
-            z_far: camera.z_far,
-
-            frustrum_planes: camera.frustrum_planes(),
-
-            pyramid_width: self.depth_pyramid.width as f32,
-            pyramid_height: self.depth_pyramid.height as f32,
-
-            lod_base: 10.0,
-            lod_step: 2.0,
-
-            _pad1: 0.0,
-            _pad2: 0.0,
-        };
-
-        recorder.push_constants(
-            self.cull_pipeline.layout(),
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &cull_info,
-        );
-
-        recorder.dispatch(self.cull_pipeline.clone(), [
-            self.primitive_count.div_ceil(64), 1, 1,
-        ]);
-
-        recorder.buffer_barrier(&BufferBarrierReq {
-            buffer: self.draw_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags2::SHADER_WRITE,
-            dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
-        });
-
-        //
-        // Resolve from depth image to depth staging image.
-        //
-       
-        recorder.image_barrier(&ImageBarrierReq {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            src_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            image: depth_image.image().clone(),
-            mips: depth_image.image().mip_levels(),
-        });
-
-        let depth_staging = &self.depth_pyramid.stagings[frame_index];
-
-        recorder.image_barrier(&ImageBarrierReq {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::empty(),
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            src_mask: vk::AccessFlags2::empty(),
-            dst_mask: vk::AccessFlags2::SHADER_WRITE,
-            new_layout: vk::ImageLayout::GENERAL,
-            image: depth_staging.image().clone(),
-            mips: depth_staging.image().mip_levels(),
-        });
-
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.depth_resolve.layout(),
-            descriptors: &[
-                self.depth_pyramid.resolve_descs[frame_index].clone()
-            ],
-        });
-
-        let vk::Extent3D { width, height, .. } = depth_staging.image().extent(0);
-
-        let info = DepthResolveInfo {
-            image_size: UVec2::new(width, height),
-            // `vk::SampleCountFlags` as raw maps to the amount of samples.
-            sample: depth_image.image().sample_count().as_raw(),
-        };
-
-        recorder.push_constants(
-            self.depth_resolve.layout(),
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            &info,
-        );
-       
-        recorder.dispatch(self.depth_resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
-
-        recorder.image_barrier(&ImageBarrierReq {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            src_mask: vk::AccessFlags2::SHADER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            new_layout: vk::ImageLayout::GENERAL,
-            image: depth_staging.image().clone(),
-            mips: depth_staging.image().mip_levels(),
-        });
-
-        //
-        // Reduce from each level to the next in depth pyramid.
-        //
-
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.depth_reduce.layout(),
-            descriptors: &[
-                self.depth_pyramid.sampled[frame_index].clone(),
-                self.depth_pyramid.storage[frame_index].clone(),
-            ],
-        });
-
-        let pyramid = &self.depth_pyramid.pyramids[frame_index];
-
-        for target in pyramid.mip_levels() {
-            let vk::Extent3D { width, height, .. } = pyramid.extent(target);
-            let info = DepthReduceInfo {
-                image_size: UVec2::new(width, height),
-                target,
-            };
-
-            let layout = self.depth_reduce.layout();
-
-            recorder.push_constants(layout, vk::ShaderStageFlags::COMPUTE, 0, &info);
-            recorder.dispatch(self.depth_reduce.clone(), [width / 32, height / 32, 1]);
-
-            recorder.image_barrier(&ImageBarrierReq {
-                flags: vk::DependencyFlags::BY_REGION,
-                src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                src_mask: vk::AccessFlags2::SHADER_WRITE,
-                dst_mask: vk::AccessFlags2::SHADER_READ,
-                new_layout: vk::ImageLayout::GENERAL,
-                image: pyramid.clone(),
-                mips: target..target + 1,
-            });
-        }
-    }
-
-    pub fn draw(
-        &self,
-        frame_index: FrameIndex,
-        camera_uniforms: &CameraUniforms,
-        lights: &Lights,
-        recorder: &CommandRecorder,
-    ) {
-        recorder.bind_index_buffer(self.index_buffer.clone(), vk::IndexType::UINT32);
-        recorder.bind_graphics_pipeline(self.render.clone());
-
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-            layout: self.render.layout(),
-            descriptors: &[
-                camera_uniforms.descriptors[frame_index].clone(),
-                lights.descriptors[frame_index].clone(),
-                self.descriptors[frame_index].clone(),
-            ],
-        });
-        
-        recorder.draw_indexed_indirect_count(&IndexedIndirectDrawReq {
-            draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
-            draw_buffer: self.draw_buffers[frame_index].clone(),
-            count_buffer: self.draw_count_buffers[frame_index].clone(),
-            max_draw_count: self.primitive_count,
-            count_offset: 0,
-            draw_offset: 0,
-        });
-    }
-
-    pub fn pyramid_debug(
-        &self,
-        frame_index: FrameIndex,
-        swapchain_image: Res<Image>,
-        recorder: &CommandRecorder,
-        level: u32,
-    ) {
-        let pyramid = &self.depth_pyramid.pyramids[frame_index];
-
-        recorder.blit_image(&ImageBlitReq {
-            src: pyramid.clone(),
-            dst: swapchain_image,
-            filter: vk::Filter::NEAREST,
-            src_mip: level,
-            dst_mip: 0,
-        });
-    }
-
-    pub fn primitives_drawn(&self, renderer: &Renderer, frame_index: FrameIndex) -> Result<u32> {
-        let src = self.draw_count_buffers[frame_index].clone();
-        let dst = self.draw_count_host_buffers[frame_index].clone();
-
-        renderer.transfer_with(|recorder| {
-            recorder.copy_buffers(src.clone(), dst.clone());
-        })?;
-
-        let mapped = dst.get_mapped()?;
-        let count: &DrawCount = bytemuck::from_bytes(mapped.as_slice());
-
-        Ok(count.command_count)
+    pub fn primitive_count(&self) -> u32 {
+        self.primitives.len() as u32
     }
 }
 
 const MAX_LOD_COUNT: usize = 8;
+const DEPTH_IMAGE_FORMAT: vk::Format = vk::Format::D32_SFLOAT;
 
 // Get previous power of 2.
 fn prev_pow2(mut val: u32) -> u32 {

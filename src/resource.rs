@@ -492,10 +492,12 @@ impl ImageView {
     ///
     /// This is diffferent from [`Image::extent`] in that this gives the extent of the mip level
     /// relative to the first level of the image view.
+    #[allow(dead_code)]
     pub fn extent(&self, mip_level: u32) -> vk::Extent3D {
         self.image.extent(self.mips.start + mip_level)
     }
 
+    #[allow(dead_code)]
     pub fn layout(&self) -> vk::ImageLayout {
         self.image.layout()
     }

@@ -2,7 +2,6 @@ use anyhow::Result;
 use glam::{Mat3, Mat4, Vec3};
 use ash::vk;
 
-use crate::RenderTargets;
 use crate::core::*;
 use crate::resource::*;
 use crate::camera::Camera;
@@ -87,7 +86,7 @@ pub struct Skybox {
 impl Skybox {
     pub fn new(
         renderer: &Renderer,
-        render_targets: &RenderTargets,
+        render_target_info: RenderTargetInfo,
         lights: &Lights,
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
@@ -170,9 +169,7 @@ impl Skybox {
         let cull_mode = vk::CullModeFlags::FRONT;
 
         let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
-            color_format: render_targets.color_format(),
-            depth_format: render_targets.depth_format(),
-            sample_count: render_targets.sample_count(),
+            render_target_info, 
 
             vertex_attributes: &[vk::VertexInputAttributeDescription {
                 format: vk::Format::R32G32B32_SFLOAT,

@@ -6,7 +6,6 @@ use nohash_hasher::NoHashHasher;
 use std::{mem, hash};
 use std::collections::HashMap;
 
-use crate::RenderTargets;
 use crate::core::*;
 use crate::resource::*;
 use asset::{Font, Glyph};
@@ -34,7 +33,11 @@ pub struct TextPass {
 }
 
 impl TextPass {
-    pub fn new(renderer: &Renderer, render_targets: &RenderTargets, font: &Font) -> Result<Self> {
+    pub fn new(
+        renderer: &Renderer,
+        render_target_info: RenderTargetInfo,
+        font: &Font,
+    ) -> Result<Self> {
         let pool = &renderer.static_pool;
         let text_objects = TextObjects::new(FontAtlas::new(font));
 
@@ -136,9 +139,7 @@ impl TextPass {
         );
 
         let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
-            color_format: render_targets.color_format(),
-            depth_format: render_targets.depth_format(),
-            sample_count: render_targets.sample_count(),
+            render_target_info,
 
             vertex_attributes: &[
                 vk::VertexInputAttributeDescription {

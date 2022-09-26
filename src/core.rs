@@ -1471,6 +1471,13 @@ impl Drop for ComputePipeline {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct RenderTargetInfo {
+    pub depth_format: vk::Format,
+    pub color_format: vk::Format,
+    pub sample_count: vk::SampleCountFlags,
+}
+
 pub struct GraphicsPipelineReq<'a> {
     pub layout: Res<PipelineLayout>,
 
@@ -1478,9 +1485,7 @@ pub struct GraphicsPipelineReq<'a> {
     pub vertex_bindings: &'a [vk::VertexInputBindingDescription],
     pub depth_stencil_info: &'a vk::PipelineDepthStencilStateCreateInfo,
 
-    pub depth_format: vk::Format,
-    pub color_format: vk::Format,
-    pub sample_count: vk::SampleCountFlags,
+    pub render_target_info: RenderTargetInfo,
 
     pub vertex_shader: &'a ShaderModule,
     pub fragment_shader: &'a ShaderModule,
@@ -1525,7 +1530,7 @@ impl GraphicsPipeline {
             .line_width(1.0);
 
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
-            .rasterization_samples(req.sample_count);
+            .rasterization_samples(req.render_target_info.sample_count);
 
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
@@ -1550,11 +1555,11 @@ impl GraphicsPipeline {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-        let color_formats = [req.color_format];
+        let color_formats = [req.render_target_info.color_format];
 
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .color_attachment_formats(&color_formats)
-            .depth_attachment_format(req.depth_format);
+            .depth_attachment_format(req.render_target_info.depth_format);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
             .dynamic_state(&dynamic_state)
