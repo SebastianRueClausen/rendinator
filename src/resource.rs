@@ -1,5 +1,4 @@
 use anyhow::Result;
-use glam::Vec3;
 use ash::vk;
 
 use std::{ops, slice, alloc, mem};
@@ -556,94 +555,6 @@ impl TextureSampler {
 impl Drop for TextureSampler {
     fn drop(&mut self) {
         unsafe { self.device.handle.destroy_sampler(self.handle, None); }
-    }
-}
-
-const CUBE_VERTICES: [Vec3; 36] = [
-    Vec3::new(-1.0, 1.0, 1.0),
-    Vec3::new(-1.0, -1.0, 1.0),
-    Vec3::new(1.0, -1.0, 1.0),
-    Vec3::new(1.0, -1.0, 1.0),
-    Vec3::new(1.0, 1.0, 1.0),
-    Vec3::new(-1.0, 1.0, 1.0),
-
-    Vec3::new(-1.0, -1.0, -1.0),
-    Vec3::new(-1.0, -1.0, 1.0),
-    Vec3::new(-1.0, 1.0, 1.0),
-    Vec3::new(-1.0, 1.0, 1.0),
-    Vec3::new(-1.0, 1.0, -1.0),
-    Vec3::new(-1.0, -1.0, -1.0),
-
-    Vec3::new(1.0, -1.0, 1.0),
-    Vec3::new(1.0, -1.0, -1.0),
-    Vec3::new(1.0, 1.0, -1.0),
-    Vec3::new(1.0, 1.0, -1.0),
-    Vec3::new(1.0, 1.0, 1.0),
-    Vec3::new(1.0, -1.0, 1.0),
-
-    Vec3::new(-1.0, -1.0, -1.0),
-    Vec3::new(-1.0, 1.0, -1.0),
-    Vec3::new(1.0, 1.0, -1.0),
-    Vec3::new(1.0, 1.0, -1.0),
-    Vec3::new(1.0, -1.0, -1.0),
-    Vec3::new(-1.0, -1.0, -1.0),
-
-    Vec3::new(-1.0, 1.0, 1.0),
-    Vec3::new(1.0, 1.0, 1.0),
-    Vec3::new(1.0, 1.0, -1.0),
-    Vec3::new(1.0, 1.0, -1.0),
-    Vec3::new(-1.0, 1.0, -1.0),
-    Vec3::new(-1.0, 1.0, 1.0),
-
-    Vec3::new(-1.0, -1.0, 1.0),
-    Vec3::new(-1.0, -1.0, -1.0),
-    Vec3::new(1.0, -1.0, 1.0),
-    Vec3::new(1.0, -1.0, 1.0),
-    Vec3::new(-1.0, -1.0, -1.0),
-    Vec3::new(1.0, -1.0, -1.0),
-];
-
-pub struct CubeMap {
-    pub image_view: Res<ImageView>,
-    pub vertex_buffer: Res<Buffer>,
-}
-
-impl CubeMap {
-    pub fn new(
-        renderer: &Renderer,
-        pool: &ResourcePool,
-        image_view: Res<ImageView>,
-    ) -> Result<Self> {
-        let vertex_data: &[u8] = bytemuck::cast_slice(&CUBE_VERTICES);
-
-        let staging = {
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-            let buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                size: vertex_data.len() as u64
-            })?;
-
-            buffer.get_mapped()?.fill(vertex_data);
-
-            buffer
-        };
-
-        let vertex_buffer = {
-            let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
-                usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
-                size: vertex_data.len() as u64
-            })?
-        };
-
-        renderer.transfer_with(|recorder|
-            recorder.copy_buffers(staging.clone(), vertex_buffer.clone())
-        )?;
-
-        Ok(Self { image_view, vertex_buffer })
     }
 }
 
