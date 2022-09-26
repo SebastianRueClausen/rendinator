@@ -10,6 +10,7 @@ extern crate anyhow;
 mod macros;
 
 mod resource;
+mod command;
 mod core;
 mod scene;
 mod skybox;
@@ -25,6 +26,7 @@ use winit::event::VirtualKeyCode;
 use std::time::Instant;
 use std::path::Path;
 
+use crate::command::*;
 use crate::core::*;
 use crate::text::TextPass;
 use crate::scene::{ForwardPass, Scene};

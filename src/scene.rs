@@ -7,6 +7,7 @@ use std::mem;
 use crate::light::Lights;
 use crate::core::*;
 use crate::resource::*;
+use crate::command::*;
 use crate::camera::{Camera, CameraUniforms};
 
 #[repr(C)]

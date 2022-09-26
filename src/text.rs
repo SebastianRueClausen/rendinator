@@ -6,6 +6,7 @@ use nohash_hasher::NoHashHasher;
 use std::{mem, hash};
 use std::collections::HashMap;
 
+use crate::command::*;
 use crate::core::*;
 use crate::resource::*;
 use asset::{Font, Glyph};
