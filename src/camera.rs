@@ -186,13 +186,13 @@ impl CameraUniforms {
             | vk::MemoryPropertyFlags::HOST_COHERENT;
 
         let view_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
                 size: mem::size_of::<ViewUniform>() as u64,
             })
         })?;
 
-        let proj_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+        let proj_buffer = Buffer::new(renderer, pool, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<ProjUniform>() as u64,
         })?;

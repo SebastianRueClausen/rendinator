@@ -45,14 +45,14 @@ impl TextPass {
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
         let vertex_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::VERTEX_BUFFER,
                 size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as vk::DeviceSize,
             })
         })?;
 
         let index_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::INDEX_BUFFER,
                 size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as vk::DeviceSize,
             })
@@ -60,7 +60,7 @@ impl TextPass {
 
         let staging_pool = ResourcePool::with_block_size(128, 1024);
 
-        let atlas_staging = Buffer::new(&renderer, &staging_pool, memory_flags, &BufferReq {
+        let atlas_staging = Buffer::new(&renderer, &staging_pool, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: font.atlas.base_image_data().len() as vk::DeviceSize,
         })?;
@@ -75,7 +75,7 @@ impl TextPass {
    
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let glyph_atlas = Image::new(&renderer, pool, memory_flags, &ImageReq {
+        let glyph_atlas = Image::new(&renderer, pool, memory_flags, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             kind: ImageKind::Texture, extent,
@@ -83,7 +83,7 @@ impl TextPass {
             mip_levels: 1,
         })?;
 
-        let view = ImageView::new(renderer, pool, &ImageViewReq {
+        let view = ImageView::new(renderer, pool, &ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
             mips: 0..glyph_atlas.mip_level_count(),
             image: glyph_atlas.clone(),
@@ -138,7 +138,7 @@ impl TextPass {
             PipelineLayout::new(&renderer, &push_consts, &[descriptor.layout.clone()])?
         );
 
-        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineInfo {
             render_target_info,
 
             vertex_attributes: &[
@@ -211,7 +211,7 @@ impl TextPass {
             .fill_range(0..index_size, index_data);
 
         recorder.bind_graphics_pipeline(self.pipeline.clone());
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
+        recorder.bind_descriptor_sets(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
             descriptors: &[self.descriptor.clone()],
@@ -234,7 +234,7 @@ impl TextPass {
                 &proj_transform,
             );
 
-            recorder.draw_indexed(IndexedDrawReq {
+            recorder.draw_indexed(IndexedDrawInfo {
                 index_count: label.index_count,
                 index_start: label.index_offset,
                 vertex_offset: 0,

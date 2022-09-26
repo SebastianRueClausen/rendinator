@@ -43,13 +43,13 @@ impl Renderer {
         let surface = pool.alloc(Surface::new(instance.clone(), window)?);
 
         let graphics_queue_req = physical
-            .get_queue_req(QueueReqKind::Graphics(surface.clone()))
+            .get_queue_req(QueueRequestKind::Graphics(surface.clone()))
             .ok_or_else(|| anyhow!("can't find valid graphics queue"))?;
         let transfer_queue_req = physical
-            .get_queue_req(QueueReqKind::Transfer)
+            .get_queue_req(QueueRequestKind::Transfer)
             .ok_or_else(|| anyhow!("can't find valid transfer queue"))?;
         let compute_queue_req = physical
-            .get_queue_req(QueueReqKind::Compute)
+            .get_queue_req(QueueRequestKind::Compute)
             .ok_or_else(|| anyhow!("can't find valid compute queue"))?;
 
         let device = pool.alloc(Device::new(instance, physical, &[
@@ -120,7 +120,7 @@ impl Renderer {
                 render(&recorder, frame.index, image_index);
 
                 // Transition swapchain image to present layout.
-                recorder.image_barrier(&ImageBarrierReq {
+                recorder.image_barrier(&ImageBarrierInfo {
                     flags: vk::DependencyFlags::BY_REGION,
                     src_stage: vk::PipelineStageFlags2::RESOLVE,
                     dst_stage: vk::PipelineStageFlags2::empty(),
@@ -136,7 +136,7 @@ impl Renderer {
             // Submit command buffer to be rendered. Wait for semaphore `frame.presented` first and
             // signals `frame.rendered´ and `frame.ready_to_draw` when all commands have been
             // executed.
-            frame.command_buffer.submit_wait(SubmitWaitReq {
+            frame.command_buffer.submit_wait(SubmitWaitInfo {
                 wait_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 fence: frame.ready_to_draw,
                 signal: frame.rendered,
@@ -386,9 +386,9 @@ impl PhysicalDevice {
         Ok(Self { handle, memory_properties, properties, queue_properties })
     }
 
-    pub fn get_queue_req(&self, kind: QueueReqKind) -> Option<QueueReq> {
+    pub fn get_queue_req(&self, kind: QueueRequestKind) -> Option<QueueRequest> {
         let index = match &kind {
-            QueueReqKind::Graphics(surface) => {
+            QueueRequestKind::Graphics(surface) => {
                 // This is technically not required to be exist, but it doesn't seem to be a
                 // problem in reallity.
                 let flags = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
@@ -408,12 +408,12 @@ impl PhysicalDevice {
                             }
                     })
             }
-            QueueReqKind::Transfer => {
+            QueueRequestKind::Transfer => {
                 self.queue_properties
                     .iter()
                     .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
             }
-            QueueReqKind::Compute => {
+            QueueRequestKind::Compute => {
                 self.queue_properties
                     .iter()
                     .position(|p| p.queue_flags.contains(vk::QueueFlags::COMPUTE))
@@ -422,7 +422,7 @@ impl PhysicalDevice {
 
         index.map(|family_index| {
             let flags = self.queue_properties[family_index].queue_flags;
-            QueueReq { flags, family_index: family_index as u32 }
+            QueueRequest { flags, family_index: family_index as u32 }
         })
     }
     
@@ -458,7 +458,7 @@ impl Device {
     pub fn new(
         instance: Res<Instance>,
         physical: PhysicalDevice,
-        queue_reqs: &[&QueueReq],
+        queue_reqs: &[&QueueRequest],
     ) -> Result<Self> {
         let priorities = [1.0_f32];
 
@@ -586,14 +586,14 @@ impl DebugMessenger {
 }
 
 #[derive(Clone)]
-pub enum QueueReqKind {
+pub enum QueueRequestKind {
     Graphics(Res<Surface>),
     Transfer,
     Compute,
 }
 
 #[derive(Clone, Copy)]
-pub struct QueueReq {
+pub struct QueueRequest {
     flags: vk::QueueFlags,
     family_index: u32,
 }
@@ -612,7 +612,7 @@ pub struct Queue {
 }
 
 impl Queue {
-    pub fn new(device: Res<Device>, req: &QueueReq) -> Result<Self> {
+    pub fn new(device: Res<Device>, req: &QueueRequest) -> Result<Self> {
         let (pool, handle) = unsafe {
             let info = vk::CommandPoolCreateInfo::builder()
                 .queue_family_index(req.family_index)
@@ -930,7 +930,7 @@ impl Swapchain {
             .into_iter()
             .map(|handle| {
                 let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = Image::from_device(device.clone(), pool, memory_flags, &ImageReq {
+                let image = Image::from_device(device.clone(), pool, memory_flags, &ImageInfo {
                     usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                     aspect_flags: vk::ImageAspectFlags::COLOR,
                     kind: ImageKind::Swapchain { handle },
@@ -943,7 +943,7 @@ impl Swapchain {
                     },
                 })?;
 
-                ImageView::from_device(device.clone(), pool, &ImageViewReq {
+                ImageView::from_device(device.clone(), pool, &ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     image: image.clone(),
                     mips: 0..1,
@@ -1014,7 +1014,7 @@ impl Swapchain {
             .into_iter()
             .map(|handle| {
                 let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = Image::from_device(self.device.clone(), pool, memory_flags, &ImageReq {
+                let image = Image::from_device(self.device.clone(), pool, memory_flags, &ImageInfo {
                     usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                     aspect_flags: vk::ImageAspectFlags::COLOR,
                     kind: ImageKind::Swapchain { handle },
@@ -1027,7 +1027,7 @@ impl Swapchain {
                     },
                 })?;
 
-                ImageView::from_device(self.device.clone(), pool, &ImageViewReq {
+                ImageView::from_device(self.device.clone(), pool, &ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
                     image: image.clone(),
                     mips: 0..1,
@@ -1179,7 +1179,7 @@ impl CommandBuffer {
     }
 }
 
-pub struct SubmitWaitReq {
+pub struct SubmitWaitInfo {
     signal: vk::Semaphore,
     wait: vk::Semaphore,
     wait_stage: vk::PipelineStageFlags,
@@ -1187,11 +1187,11 @@ pub struct SubmitWaitReq {
 }
 
 impl CommandBuffer {
-    pub fn submit_wait(&self, req: SubmitWaitReq) -> Result<()> {
-        let wait = [req.wait];
-        let signals = [req.signal];
+    pub fn submit_wait(&self, info: SubmitWaitInfo) -> Result<()> {
+        let wait = [info.wait];
+        let signals = [info.signal];
         let command_buffers = [self.handle];
-        let stages = [req.wait_stage];
+        let stages = [info.wait_stage];
 
         let submit_info = [vk::SubmitInfo::builder()
             .wait_dst_stage_mask(&stages)
@@ -1204,7 +1204,7 @@ impl CommandBuffer {
             self.device.handle.queue_submit(
                 self.queue.handle,
                 &submit_info,
-                req.fence,
+                info.fence,
             )?;
         }
 
@@ -1236,14 +1236,14 @@ impl Drop for CommandBuffer {
     }
 }
 
-pub struct IndexedDrawReq {
+pub struct IndexedDrawInfo {
     pub instance: u32,
     pub index_count: u32,
     pub index_start: u32,
     pub vertex_offset: i32,
 }
 
-pub struct IndexedIndirectDrawReq {
+pub struct IndexedIndirectDrawInfo {
     pub draw_buffer: Res<Buffer>,
     pub count_buffer: Res<Buffer>,
 
@@ -1254,7 +1254,7 @@ pub struct IndexedIndirectDrawReq {
     pub max_draw_count: u32,
 }
 
-pub struct BufferBarrierReq {
+pub struct BufferBarrierInfo {
     pub buffer: Res<Buffer>,
 
     pub src_mask: vk::AccessFlags2,
@@ -1263,7 +1263,7 @@ pub struct BufferBarrierReq {
     pub dst_stage: vk::PipelineStageFlags2,
 }
 
-pub struct ImageBarrierReq {
+pub struct ImageBarrierInfo {
     pub image: Res<Image>,
 
     pub flags: vk::DependencyFlags,
@@ -1278,14 +1278,14 @@ pub struct ImageBarrierReq {
     pub mips: ops::Range<u32>,
 }
 
-pub struct ImageResolveReq {
+pub struct ImageResolveInfo {
     pub src: Res<Image>,
     pub dst: Res<Image>,
     pub src_mip: u32,
     pub dst_mip: u32,
 }
 
-pub struct ImageBlitReq {
+pub struct ImageBlitInfo {
     pub src: Res<Image>,
     pub dst: Res<Image>,
     pub filter: vk::Filter,
@@ -1293,13 +1293,13 @@ pub struct ImageBlitReq {
     pub dst_mip: u32,
 }
 
-pub struct DescriptorBindReq<'a> {
+pub struct DescriptorBindInfo<'a> {
     pub bind_point: vk::PipelineBindPoint,
     pub layout: Res<PipelineLayout>,
     pub descriptors: &'a [Res<DescriptorSet>],
 }
 
-pub struct BeginRenderingReq {
+pub struct BeginRenderingInfo {
     pub color_target: Res<ImageView>,
     pub depth_target: Res<ImageView>,
     pub swapchain: Res<Swapchain>,
@@ -1367,91 +1367,90 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(dst);
     }
 
-    pub fn image_barrier(&self, req: &ImageBarrierReq) {
+    pub fn image_barrier(&self, info: &ImageBarrierInfo) {
         let subresource = vk::ImageSubresourceRange::builder()
-            .aspect_mask(req.image.aspect_flags())
-            .base_mip_level(req.mips.start)
-            .level_count(req.mips.end - req.mips.start)
+            .aspect_mask(info.image.aspect_flags())
+            .base_mip_level(info.mips.start)
+            .level_count(info.mips.end - info.mips.start)
             .base_array_layer(0)
-            .layer_count(req.image.layer_count())
+            .layer_count(info.image.layer_count())
             .build();
         let barriers = [vk::ImageMemoryBarrier2::builder()
-            .image(req.image.handle)
-            .old_layout(req.image.layout())
-            .new_layout(req.new_layout)
+            .image(info.image.handle)
+            .old_layout(info.image.layout())
+            .new_layout(info.new_layout)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .src_access_mask(req.src_mask)
-            .dst_access_mask(req.dst_mask)
-            .src_stage_mask(req.src_stage)
-            .dst_stage_mask(req.dst_stage)
+            .src_access_mask(info.src_mask)
+            .dst_access_mask(info.dst_mask)
+            .src_stage_mask(info.src_stage)
+            .dst_stage_mask(info.dst_stage)
             .subresource_range(subresource)
             .build()];
 
-        req.image.layout.set(req.new_layout);
+        info.image.layout.set(info.new_layout);
 
         let dependency_info = vk::DependencyInfo::builder()
-            .dependency_flags(req.flags)
+            .dependency_flags(info.flags)
             .image_memory_barriers(&barriers);
 
         unsafe {
             self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
         }
 
-        self.buffer.bind_resource(req.image.clone());
-
+        self.buffer.bind_resource(info.image.clone());
     }
 
-    pub fn resolve_image(&self, req: &ImageResolveReq) {
+    pub fn resolve_image(&self, info: &ImageResolveInfo) {
         let src_subresource = vk::ImageSubresourceLayers::builder()
-            .aspect_mask(req.src.aspect_flags())
+            .aspect_mask(info.src.aspect_flags())
             .base_array_layer(0)
             .layer_count(1)
-            .mip_level(req.src_mip)
+            .mip_level(info.src_mip)
             .build();
         let dst_subresource = vk::ImageSubresourceLayers::builder()
-            .aspect_mask(req.dst.aspect_flags())
+            .aspect_mask(info.dst.aspect_flags())
             .base_array_layer(0)
             .layer_count(1)
-            .mip_level(req.dst_mip)
+            .mip_level(info.dst_mip)
             .build();
         let regions = [vk::ImageResolve2::builder()
             .src_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
             .dst_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
             .src_subresource(src_subresource)
             .dst_subresource(dst_subresource)
-            .extent(req.src.extent(req.src_mip))
+            .extent(info.src.extent(info.src_mip))
             .build()];
         let resolve_info = vk::ResolveImageInfo2::builder()
-           .src_image(req.src.handle)
-           .dst_image(req.dst.handle)
-           .src_image_layout(req.src.layout())
-           .dst_image_layout(req.dst.layout())
+           .src_image(info.src.handle)
+           .dst_image(info.dst.handle)
+           .src_image_layout(info.src.layout())
+           .dst_image_layout(info.dst.layout())
            .regions(&regions);
 
         unsafe {
             self.device().handle.cmd_resolve_image2(self.buffer.handle, &resolve_info);
         }
 
-        self.buffer.bind_resource(req.src.clone());
-        self.buffer.bind_resource(req.dst.clone());
+        self.buffer.bind_resource(info.src.clone());
+        self.buffer.bind_resource(info.dst.clone());
     }
 
-    pub fn blit_image(&self, req: &ImageBlitReq) {
-        let src_extent = req.src.extent(req.src_mip);
-        let dst_extent = req.dst.extent(req.dst_mip);
+    pub fn blit_image(&self, info: &ImageBlitInfo) {
+        let src_extent = info.src.extent(info.src_mip);
+        let dst_extent = info.dst.extent(info.dst_mip);
 
         let src_subresource = vk::ImageSubresourceLayers::builder()
-            .aspect_mask(req.src.aspect_flags())
+            .aspect_mask(info.src.aspect_flags())
             .base_array_layer(0)
             .layer_count(1)
-            .mip_level(req.src_mip)
+            .mip_level(info.src_mip)
             .build();
         let dst_subresource = vk::ImageSubresourceLayers::builder()
-            .aspect_mask(req.dst.aspect_flags())
+            .aspect_mask(info.dst.aspect_flags())
             .base_array_layer(0)
             .layer_count(1)
-            .mip_level(req.dst_mip)
+            .mip_level(info.dst_mip)
             .build();
         let regions = [vk::ImageBlit2::builder()
             .src_offsets([
@@ -1474,19 +1473,19 @@ impl<'a> CommandRecorder<'a> {
             .dst_subresource(dst_subresource)
             .build()];
         let blit_info = vk::BlitImageInfo2::builder()
-           .src_image(req.src.handle)
-           .dst_image(req.dst.handle)
-           .src_image_layout(req.src.layout())
-           .dst_image_layout(req.dst.layout())
-           .filter(req.filter)
+           .src_image(info.src.handle)
+           .dst_image(info.dst.handle)
+           .src_image_layout(info.src.layout())
+           .dst_image_layout(info.dst.layout())
+           .filter(info.filter)
            .regions(&regions);
 
         unsafe {
             self.device().handle.cmd_blit_image2(self.buffer.handle, &blit_info);
         }
 
-        self.buffer.bind_resource(req.src.clone());
-        self.buffer.bind_resource(req.dst.clone());
+        self.buffer.bind_resource(info.src.clone());
+        self.buffer.bind_resource(info.dst.clone());
     }
 
     /// Transition the layout of `image` to `new`.
@@ -1515,7 +1514,7 @@ impl<'a> CommandRecorder<'a> {
             }
         };
 
-        self.image_barrier(&ImageBarrierReq {
+        self.image_barrier(&ImageBarrierInfo {
             flags: vk::DependencyFlags::BY_REGION,
             mips: 0..image.mip_level_count(),
             new_layout: new,
@@ -1527,16 +1526,16 @@ impl<'a> CommandRecorder<'a> {
         });
     }
 
-    pub fn begin_rendering(&self, req: &BeginRenderingReq) {
-        if req.color_target.image().layout() != vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
-            self.image_barrier(&ImageBarrierReq {
+    pub fn begin_rendering(&self, info: &BeginRenderingInfo) {
+        if info.color_target.image().layout() != vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
+            self.image_barrier(&ImageBarrierInfo {
                 flags: vk::DependencyFlags::BY_REGION,
                 src_stage: vk::PipelineStageFlags2::ALL_COMMANDS,
                 dst_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                 src_mask: vk::AccessFlags2::NONE,
                 dst_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
                 new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                image: req.color_target.image().clone(),
+                image: info.color_target.image().clone(),
                 mips: 0..1,
             });
         }
@@ -1544,7 +1543,7 @@ impl<'a> CommandRecorder<'a> {
         let color_attachments = [
             vk::RenderingAttachmentInfo::builder()
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image_view(req.color_target.handle)
+                .image_view(info.color_target.handle)
                 .load_op(vk::AttachmentLoadOp::DONT_CARE)
                 .store_op(vk::AttachmentStoreOp::STORE)
                 .clear_value(vk::ClearValue {
@@ -1557,7 +1556,7 @@ impl<'a> CommandRecorder<'a> {
 
         let depth_resolve_attachment = vk::RenderingAttachmentInfo::builder()
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
-            .image_view(req.depth_target.handle)
+            .image_view(info.depth_target.handle)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
@@ -1573,11 +1572,11 @@ impl<'a> CommandRecorder<'a> {
             .layer_count(1)
             .render_area(vk::Rect2D {
                 offset: vk::Offset2D { x: 0, y: 0 },
-                extent: req.swapchain.extent(),
+                extent: info.swapchain.extent(),
             });
 
-        let viewports = req.swapchain.viewports();
-        let scissors = req.swapchain.scissors();
+        let viewports = info.swapchain.viewports();
+        let scissors = info.swapchain.scissors();
 
         unsafe {
             self.device().handle.cmd_begin_rendering(self.buffer.handle, &rendering_info);
@@ -1611,8 +1610,8 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(pipeline);
     }
 
-    pub fn bind_descriptor_sets(&self, req: &DescriptorBindReq) {
-        let descs: SmallVec<[_; 12]> = req.descriptors
+    pub fn bind_descriptor_sets(&self, info: &DescriptorBindInfo) {
+        let descs: SmallVec<[_; 12]> = info.descriptors
             .iter()
             .map(|desc| desc.handle)
             .collect();
@@ -1620,17 +1619,17 @@ impl<'a> CommandRecorder<'a> {
         unsafe {
             self.device().handle.cmd_bind_descriptor_sets(
                 self.buffer.handle,
-                req.bind_point,
-                req.layout.handle,
+                info.bind_point,
+                info.layout.handle,
                 0,
                 &descs,
                 &[],
             );
         }
 
-        self.buffer.bind_resource(req.layout.clone());
+        self.buffer.bind_resource(info.layout.clone());
 
-        for desc in req.descriptors {
+        for desc in info.descriptors {
             self.buffer.bind_resource(desc.clone());
         }
     }
@@ -1707,15 +1706,15 @@ impl<'a> CommandRecorder<'a> {
         }
     }
 
-    pub fn draw_indexed(&self, req: IndexedDrawReq) {
+    pub fn draw_indexed(&self, info: IndexedDrawInfo) {
         unsafe {
             self.device().handle.cmd_draw_indexed(
                 self.buffer.handle,
-                req.index_count,
+                info.index_count,
                 1,
-                req.index_start,
-                req.vertex_offset,
-                req.instance,
+                info.index_start,
+                info.vertex_offset,
+                info.instance,
             );
         }
     }
@@ -1739,34 +1738,34 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(buffer);
     }
 
-    pub fn draw_indexed_indirect_count(&self, req: &IndexedIndirectDrawReq) {
+    pub fn draw_indexed_indirect_count(&self, info: &IndexedIndirectDrawInfo) {
         unsafe {
             self.device().handle.cmd_draw_indexed_indirect_count(
                 self.buffer.handle,
-                req.draw_buffer.handle,
-                req.draw_offset,
-                req.count_buffer.handle,
-                req.count_offset,
-                req.max_draw_count,
-                req.draw_command_size as u32,
+                info.draw_buffer.handle,
+                info.draw_offset,
+                info.count_buffer.handle,
+                info.count_offset,
+                info.max_draw_count,
+                info.draw_command_size as u32,
             );
         }
 
-        self.buffer.bind_resource(req.draw_buffer.clone());
-        self.buffer.bind_resource(req.count_buffer.clone());
+        self.buffer.bind_resource(info.draw_buffer.clone());
+        self.buffer.bind_resource(info.count_buffer.clone());
     }
 
-    pub fn buffer_barrier(&self, req: &BufferBarrierReq) {
+    pub fn buffer_barrier(&self, info: &BufferBarrierInfo) {
         let barriers = [vk::BufferMemoryBarrier2::builder()
-            .src_access_mask(req.src_mask)
-            .dst_access_mask(req.dst_mask)
-            .src_stage_mask(req.src_stage)
-            .dst_stage_mask(req.dst_stage)
+            .src_access_mask(info.src_mask)
+            .dst_access_mask(info.dst_mask)
+            .src_stage_mask(info.src_stage)
+            .dst_stage_mask(info.dst_stage)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .buffer(req.buffer.handle)
+            .buffer(info.buffer.handle)
             .offset(0)
-            .size(req.buffer.size())
+            .size(info.buffer.size())
             .build()];
 
         let dependency_info = vk::DependencyInfo::builder()
@@ -1777,7 +1776,7 @@ impl<'a> CommandRecorder<'a> {
             self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
         }
 
-        self.buffer.bind_resource(req.buffer.clone());
+        self.buffer.bind_resource(info.buffer.clone());
     }
 }
 

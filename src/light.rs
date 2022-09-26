@@ -141,7 +141,7 @@ impl ClusterInfoBuffer {
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let buffer = Buffer::new(&renderer, pool, memory_flags, &BufferReq {
+        let buffer = Buffer::new(&renderer, pool, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<ClusterInfo>() as u64,
         })?;
@@ -257,25 +257,25 @@ impl Lights {
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let light_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+        let light_buffer = Buffer::new(renderer, pool, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
         })?;
 
-        let cluster_aabb_buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+        let cluster_aabb_buffer = Buffer::new(renderer, pool, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
             size: (cluster_count * mem::size_of::<Aabb>()) as vk::DeviceSize,
         })?;
 
         let light_mask_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: (cluster_count * mem::size_of::<LightMask>()) as vk::DeviceSize,
             })
         })?;
 
         let light_pos_buffers = PerFrame::try_from_fn(|_| {
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as vk::DeviceSize,
             })
@@ -286,7 +286,7 @@ impl Lights {
         let memory_flags =
             vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-        let light_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferReq {
+        let light_staging = Buffer::new(renderer, &staging_pool, memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
             size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
         })?;
@@ -369,7 +369,7 @@ impl Lights {
         let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
-            recorder.bind_descriptor_sets(&DescriptorBindReq {
+            recorder.bind_descriptor_sets(&DescriptorBindInfo {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: cluster_build.layout(),
                 descriptors: &[
@@ -410,7 +410,7 @@ impl Lights {
         camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
+        recorder.bind_descriptor_sets(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.light_update.layout(),
             descriptors: &[
@@ -423,7 +423,7 @@ impl Lights {
             self.light_count.div_ceil(64), 1, 1,
         ]);
 
-        recorder.buffer_barrier(&BufferBarrierReq {
+        recorder.buffer_barrier(&BufferBarrierInfo {
             buffer: self.light_pos_buffers[frame_index].clone(),
             src_mask: vk::AccessFlags2::SHADER_WRITE,
             dst_mask: vk::AccessFlags2::SHADER_READ,
@@ -434,7 +434,7 @@ impl Lights {
         let group_count = self.cluster_info.info.cluster_subdivisions();
         recorder.dispatch(self.cluster_update.clone(), group_count.into());
 
-        recorder.buffer_barrier(&BufferBarrierReq {
+        recorder.buffer_barrier(&BufferBarrierInfo {
             buffer: self.light_mask_buffers[frame_index].clone(),
             src_mask: vk::AccessFlags2::SHADER_WRITE,
             dst_mask: vk::AccessFlags2::SHADER_READ,

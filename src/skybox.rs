@@ -70,7 +70,7 @@ impl CubeMap {
             let memory_flags =
                 vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
 
-            let buffer = Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            let buffer = Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::TRANSFER_SRC,
                 size: vertex_data.len() as u64
             })?;
@@ -83,7 +83,7 @@ impl CubeMap {
         let vertex_buffer = {
             let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-            Buffer::new(renderer, pool, memory_flags, &BufferReq {
+            Buffer::new(renderer, pool, memory_flags, &BufferInfo {
                 usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
                 size: vertex_data.len() as u64
             })?
@@ -149,7 +149,7 @@ impl Generator {
 
     fn generate(&self, renderer: &Renderer) -> Result<()> {
         renderer.compute_with(|recorder| {
-            recorder.bind_descriptor_sets(&DescriptorBindReq {
+            recorder.bind_descriptor_sets(&DescriptorBindInfo {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: self.pipeline.layout(),
                 descriptors: &[self.descriptor.clone()],
@@ -180,7 +180,7 @@ impl Skybox {
         let pool = &renderer.static_pool;
         let size = 64;
 
-        let image = Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageReq {
+        let image = Image::new(renderer, pool, vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             extent: vk::Extent3D { width: size, height: size, depth: 1 },
@@ -193,7 +193,7 @@ impl Skybox {
             recorder.transition_image_layout(image.clone(), vk::ImageLayout::GENERAL);
         })?;
 
-        let array_view = ImageView::new(renderer, pool, &ImageViewReq {
+        let array_view = ImageView::new(renderer, pool, &ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D_ARRAY,
             mips: image.mip_levels(),
             image: image.clone(),
@@ -211,7 +211,7 @@ impl Skybox {
             recorder.transition_image_layout(image.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
         })?;
 
-        let cube_view = ImageView::new(renderer, pool, &ImageViewReq {
+        let cube_view = ImageView::new(renderer, pool, &ImageViewInfo {
             view_type: vk::ImageViewType::CUBE,
             mips: image.mip_levels(),
             image: image.clone(),
@@ -256,7 +256,7 @@ impl Skybox {
 
         let cull_mode = vk::CullModeFlags::FRONT;
 
-        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineReq {
+        let pipeline = pool.alloc(GraphicsPipeline::new(&renderer, GraphicsPipelineInfo {
             render_target_info, 
 
             vertex_attributes: &[vk::VertexInputAttributeDescription {
@@ -286,7 +286,7 @@ impl Skybox {
         recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
         recorder.bind_graphics_pipeline(self.pipeline.clone());
 
-        recorder.bind_descriptor_sets(&DescriptorBindReq {
+        recorder.bind_descriptor_sets(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
             descriptors: &[self.descriptor.clone()],

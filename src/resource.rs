@@ -154,7 +154,7 @@ impl PartialEq for MemoryBlock {
 impl Eq for MemoryBlock {}
 
 #[derive(Clone, Copy)]
-pub struct BufferReq {
+pub struct BufferInfo {
     pub usage: vk::BufferUsageFlags,
     pub size: u64,
 }
@@ -173,12 +173,12 @@ impl Buffer {
         renderer: &Renderer,
         pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
-        req: &BufferReq,
+        info: &BufferInfo,
     ) -> Result<Res<Self>> {
         let pool = unsafe {
             let info = vk::BufferCreateInfo::builder()
-                .usage(req.usage)
-                .size(req.size)
+                .usage(info.usage)
+                .size(info.size)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .build();
 
@@ -221,18 +221,25 @@ impl Drop for Buffer {
     }
 }
 
+/// The kind of image.
 #[derive(Clone)]
 pub enum ImageKind {
+    /// Standard 2D texture.
     Texture,
+
+    /// 6-layer cubemap.
     CubeMap,
+
+    /// Render target. Either color or depth.
     RenderTarget {
         samples: vk::SampleCountFlags,
         queue: Res<Queue>,
     },
+
     Swapchain { handle: vk::Image },
 }
 
-pub struct ImageReq {
+pub struct ImageInfo {
     pub kind: ImageKind,
     pub usage: vk::ImageUsageFlags,
     pub aspect_flags: vk::ImageAspectFlags,
@@ -241,9 +248,16 @@ pub struct ImageReq {
     pub mip_levels: u32,
 }
 
+/// Enum of different image owners.
 enum ImageStorage {
+    /// Images created from the swapchain is owned by the swapchain.
+    ///
+    /// FIXME: This is not optimal as the image will be invalid after destroying the swapchain.
     Swapchain,
+
+    /// The image is owned by an allocated memory block.
     Block {
+        /// The range of `block` owned by the image.
         range: MemoryRange,
 
         #[allow(dead_code)]
@@ -272,18 +286,18 @@ impl Image {
         renderer: &Renderer,
         pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
-        req: &ImageReq,
+        info: &ImageInfo,
     ) -> Result<Res<Self>> {
-        Self::from_device(renderer.device.clone(), pool, memory_flags, req)
+        Self::from_device(renderer.device.clone(), pool, memory_flags, info)
     }
 
     pub fn from_device(
         device: Res<Device>,
         pool: &ResourcePool,
         memory_flags: vk::MemoryPropertyFlags,
-        req: &ImageReq,
+        info: &ImageInfo,
     ) -> Result<Res<Self>> {
-        let (array_layers, flags) = if let ImageKind::CubeMap = req.kind {
+        let (array_layers, flags) = if let ImageKind::CubeMap = info.kind {
             (6, vk::ImageCreateFlags::CUBE_COMPATIBLE)
         } else {
             (1, vk::ImageCreateFlags::empty())
@@ -291,48 +305,48 @@ impl Image {
 
         let layout = Cell::new(vk::ImageLayout::UNDEFINED);
 
-        if let ImageKind::Swapchain { handle } = req.kind {
+        if let ImageKind::Swapchain { handle } = info.kind {
             return Ok(pool.alloc(Self {
                 storage: ImageStorage::Swapchain,
-                mip_levels: req.mip_levels,
-                aspect_flags: req.aspect_flags,
+                mip_levels: info.mip_levels,
+                aspect_flags: info.aspect_flags,
                 device: device.clone(),
-                extent: req.extent,
-                format: req.format,
-                kind: req.kind.clone(),
+                extent: info.extent,
+                format: info.format,
+                kind: info.kind.clone(),
                 layout,
                 handle,
             }));
         }
 
         let handle = {
-            let info = vk::ImageCreateInfo::builder()
+            let create_info = vk::ImageCreateInfo::builder()
                 .image_type(vk::ImageType::TYPE_2D)
-                .usage(req.usage)
-                .format(req.format)
+                .usage(info.usage)
+                .format(info.format)
                 .tiling(vk::ImageTiling::OPTIMAL)
                 .initial_layout(vk::ImageLayout::UNDEFINED)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE)
-                .extent(req.extent)
-                .mip_levels(req.mip_levels)
+                .extent(info.extent)
+                .mip_levels(info.mip_levels)
                 .samples(vk::SampleCountFlags::TYPE_1)
                 .array_layers(array_layers)
                 .flags(flags);
 
-            match &req.kind {
+            match &info.kind {
                 ImageKind::RenderTarget { queue, samples } => {
                     let queue_families = [queue.family_index()];
-                    let info = info
+                    let create_info = create_info
                         .queue_family_indices(&queue_families)
                         .samples(*samples)
                         .clone();
                    
                     unsafe {
-                        device.handle.create_image(&info, None)?
+                        device.handle.create_image(&create_info, None)?
                     }
                 }
                 _ => unsafe {
-                    device.handle.create_image(&info, None)?
+                    device.handle.create_image(&create_info, None)?
                 }
             }
         };
@@ -356,16 +370,16 @@ impl Image {
             device.handle.bind_image_memory(handle, block.handle, range.start)?;
         }
 
-        let kind = req.kind.clone();
+        let kind = info.kind.clone();
 
         let storage = ImageStorage::Block { range: 0..memory_req.size, block };
 
         Ok(pool.alloc(Self {
-            mip_levels: req.mip_levels,
-            aspect_flags: req.aspect_flags,
+            mip_levels: info.mip_levels,
+            aspect_flags: info.aspect_flags,
             device: device.clone(),
-            extent: req.extent,
-            format: req.format,
+            extent: info.extent,
+            format: info.format,
             storage,
             layout,
             handle,
@@ -437,7 +451,7 @@ impl Drop for Image {
     }
 }
 
-pub struct ImageViewReq {
+pub struct ImageViewInfo {
     pub image: Res<Image>,
     pub view_type: vk::ImageViewType,
     pub mips: ops::Range<u32>,
@@ -450,43 +464,47 @@ pub struct ImageView {
 }
 
 impl ImageView {
-    pub fn new(renderer: &Renderer, pool: &ResourcePool, req: &ImageViewReq) -> Result<Res<Self>> {
-        Self::from_device(renderer.device.clone(), pool, req)
+    pub fn new(
+        renderer: &Renderer,
+        pool: &ResourcePool,
+        info: &ImageViewInfo,
+    ) -> Result<Res<Self>> {
+        Self::from_device(renderer.device.clone(), pool, info)
     }
 
     pub fn from_device(
         device: Res<Device>,
         pool: &ResourcePool,
-        req: &ImageViewReq,
+        info: &ImageViewInfo,
     ) -> Result<Res<Self>> {
         assert!(
-            req.image.mip_level_count() >= req.mips.end,
+            info.image.mip_level_count() >= info.mips.end,
             "mip levels outside range of image mips, is {} max is {}",
-            req.mips.end,
-            req.image.mip_level_count(),
+            info.mips.end,
+            info.image.mip_level_count(),
         ); 
 
-        let mip_count = req.mips.end - req.mips.start;
+        let mip_count = info.mips.end - info.mips.start;
 
         let subresource_range = vk::ImageSubresourceRange::builder()
-            .aspect_mask(req.image.aspect_flags())
-            .base_mip_level(req.mips.start)
-            .layer_count(req.image.layer_count())
+            .aspect_mask(info.image.aspect_flags())
+            .base_mip_level(info.mips.start)
+            .layer_count(info.image.layer_count())
             .level_count(mip_count)
             .base_array_layer(0);
 
         let view_info = vk::ImageViewCreateInfo::builder()
-            .view_type(req.view_type)
+            .view_type(info.view_type)
             .subresource_range(*subresource_range)
-            .format(req.image.format())
-            .image(req.image.handle)
+            .format(info.image.format())
+            .image(info.image.handle)
             .build();
 
         let handle = unsafe {
             device.handle.create_image_view(&view_info, None)?
         };
     
-        Ok(pool.alloc(Self { handle, image: req.image.clone(), mips: req.mips.clone() }))
+        Ok(pool.alloc(Self { handle, image: info.image.clone(), mips: info.mips.clone() }))
     }
 
     /// Get the extent of a given mip level.
@@ -705,7 +723,7 @@ pub struct RenderTargetInfo {
     pub sample_count: vk::SampleCountFlags,
 }
 
-pub struct GraphicsPipelineReq<'a> {
+pub struct GraphicsPipelineInfo<'a> {
     pub layout: Res<PipelineLayout>,
 
     pub vertex_attributes: &'a [vk::VertexInputAttributeDescription],
@@ -728,17 +746,17 @@ pub struct GraphicsPipeline {
 }
 
 impl GraphicsPipeline {
-    pub fn new(renderer: &Renderer, req: GraphicsPipelineReq) -> Result<Self> {
+    pub fn new(renderer: &Renderer, info: GraphicsPipelineInfo) -> Result<Self> {
         let device = renderer.device.clone();
 
         let shader_stages = [
-            *req.vertex_shader.stage_create_info(vk::ShaderStageFlags::VERTEX),
-            *req.fragment_shader.stage_create_info(vk::ShaderStageFlags::FRAGMENT),
+            *info.vertex_shader.stage_create_info(vk::ShaderStageFlags::VERTEX),
+            *info.fragment_shader.stage_create_info(vk::ShaderStageFlags::FRAGMENT),
         ];
 
         let vert_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
-            .vertex_attribute_descriptions(&req.vertex_attributes)
-            .vertex_binding_descriptions(&req.vertex_bindings);
+            .vertex_attribute_descriptions(&info.vertex_attributes)
+            .vertex_binding_descriptions(&info.vertex_bindings);
 
         let vert_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -752,12 +770,12 @@ impl GraphicsPipeline {
 
         let rasterize_info = vk::PipelineRasterizationStateCreateInfo::builder()
             .front_face(vk::FrontFace::CLOCKWISE)
-            .cull_mode(req.cull_mode)
+            .cull_mode(info.cull_mode)
             .polygon_mode(vk::PolygonMode::FILL)
             .line_width(1.0);
 
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
-            .rasterization_samples(req.render_target_info.sample_count);
+            .rasterization_samples(info.render_target_info.sample_count);
 
         let color_blend_attachments = [vk::PipelineColorBlendAttachmentState::builder()
             .src_color_blend_factor(vk::BlendFactor::SRC_ALPHA)
@@ -782,11 +800,11 @@ impl GraphicsPipeline {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-        let color_formats = [req.render_target_info.color_format];
+        let color_formats = [info.render_target_info.color_format];
 
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .color_attachment_formats(&color_formats)
-            .depth_attachment_format(req.render_target_info.depth_format);
+            .depth_attachment_format(info.render_target_info.depth_format);
 
         let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
             .dynamic_state(&dynamic_state)
@@ -796,9 +814,9 @@ impl GraphicsPipeline {
             .viewport_state(&viewport_info)
             .rasterization_state(&rasterize_info)
             .multisample_state(&multisample_info)
-            .depth_stencil_state(&req.depth_stencil_info)
+            .depth_stencil_state(&info.depth_stencil_info)
             .color_blend_state(&color_blend_info)
-            .layout(req.layout.handle)
+            .layout(info.layout.handle)
             .push_next(&mut rendering_info);
 
         let handle = unsafe {
@@ -813,7 +831,7 @@ impl GraphicsPipeline {
                 .unwrap()
         };
 
-        Ok(Self { device, handle, layout: req.layout })
+        Ok(Self { device, handle, layout: info.layout })
     }
 
     pub fn layout(&self) -> Res<PipelineLayout> {

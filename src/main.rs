@@ -133,7 +133,7 @@ fn main() -> Result<()> {
                         recorder,
                     );
 
-                    recorder.begin_rendering(&BeginRenderingReq {
+                    recorder.begin_rendering(&BeginRenderingInfo {
                         color_target: forward_pass.color_images[frame_index].clone(),
                         depth_target: forward_pass.depth_images[frame_index].clone(),
                         swapchain: swapchain.clone(),
@@ -168,7 +168,7 @@ fn main() -> Result<()> {
                     let color_image = forward_pass.color_images[frame_index].image().clone();
                     let swapchain_image = swapchain.image(image_index).image().clone();
 
-                    recorder.image_barrier(&ImageBarrierReq {
+                    recorder.image_barrier(&ImageBarrierInfo {
                         flags: vk::DependencyFlags::BY_REGION,
                         src_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
                         dst_stage: vk::PipelineStageFlags2::RESOLVE,
@@ -179,7 +179,7 @@ fn main() -> Result<()> {
                         mips: color_image.mip_levels(),
                     });
 
-                    recorder.image_barrier(&ImageBarrierReq {
+                    recorder.image_barrier(&ImageBarrierInfo {
                         flags: vk::DependencyFlags::BY_REGION,
                         src_stage: vk::PipelineStageFlags2::empty(),
                         dst_stage: vk::PipelineStageFlags2::RESOLVE,
@@ -190,7 +190,7 @@ fn main() -> Result<()> {
                         mips: swapchain_image.mip_levels(),
                     });
 
-                    recorder.resolve_image(&ImageResolveReq {
+                    recorder.resolve_image(&ImageResolveInfo {
                         src: color_image.clone(),
                         dst: swapchain_image.clone(),
                         src_mip: 0,
