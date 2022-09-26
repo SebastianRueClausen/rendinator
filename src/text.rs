@@ -70,7 +70,7 @@ impl TextPass {
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
 
         let sampler = pool.alloc(
-            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+            Sampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
         );
    
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;

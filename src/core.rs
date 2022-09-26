@@ -1209,12 +1209,8 @@ impl LayoutBindings {
 
 pub enum DescriptorBinding<'a> {
     Buffer(Res<Buffer>),
-    Image(Res<TextureSampler>, vk::ImageLayout, Res<ImageView>),
-    VariableImageArray(
-        Res<TextureSampler>,
-        vk::ImageLayout,
-        &'a [Res<ImageView>],
-    ),
+    Image(Res<Sampler>, vk::ImageLayout, Res<ImageView>),
+    VariableImageArray(Res<Sampler>, vk::ImageLayout, &'a [Res<ImageView>]),
 }
 
 pub struct DescriptorSetLayout {

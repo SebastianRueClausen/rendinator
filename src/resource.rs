@@ -512,12 +512,12 @@ impl Drop for ImageView {
     }
 }
 
-pub struct TextureSampler {
+pub struct Sampler {
     pub handle: vk::Sampler,
     device: Res<Device>,
 }
 
-impl TextureSampler {
+impl Sampler {
     pub fn new(renderer: &Renderer, reduction: vk::SamplerReductionMode) -> Result<Self> {
         let device = renderer.device.clone(); 
         let mut create_info = vk::SamplerCreateInfo::builder()
@@ -552,7 +552,7 @@ impl TextureSampler {
     }
 }
 
-impl Drop for TextureSampler {
+impl Drop for Sampler {
     fn drop(&mut self) {
         unsafe { self.device.handle.destroy_sampler(self.handle, None); }
     }

@@ -108,7 +108,7 @@ impl Generator {
     fn new(
         renderer: &Renderer,
         image_view: Res<ImageView>,
-        sampler: Res<TextureSampler>,
+        sampler: Res<Sampler>,
         lights: &Lights,
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
@@ -200,7 +200,7 @@ impl Skybox {
         })?;
 
         let sampler = pool.alloc(
-            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+            Sampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
         );
 
         let generator = Generator::new(renderer, array_view, sampler.clone(), lights)?;

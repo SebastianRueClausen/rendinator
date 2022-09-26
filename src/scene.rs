@@ -232,7 +232,7 @@ impl DepthPyramid {
         })?;
 
         let min_sampler = pool.alloc(
-            TextureSampler::new(renderer, vk::SamplerReductionMode::MIN)?
+            Sampler::new(renderer, vk::SamplerReductionMode::MIN)?
         );
 
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
@@ -254,7 +254,7 @@ impl DepthPyramid {
         })?;
 
         let sampler = pool.alloc(
-            TextureSampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+            Sampler::new(renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
         );
 
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
@@ -542,7 +542,7 @@ impl ForwardPass {
         })?;
 
         let sampler = pool.alloc(
-            TextureSampler::new(&renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
+            Sampler::new(&renderer, vk::SamplerReductionMode::WEIGHTED_AVERAGE)?
         );
 
         let layout = pool.alloc(DescriptorSetLayout::new(&renderer, &[
