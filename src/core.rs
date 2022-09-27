@@ -97,7 +97,7 @@ impl Renderer {
 
     pub fn draw<R>(&self, render: R) -> Result<()>
     where
-        R: FnOnce(&CommandRecorder, FrameIndex, u32),
+        R: FnOnce(&CommandRecorder, FrameIndex, Res<ImageView>),
     {
         self.frame_queue.next_frame();
 
@@ -120,21 +120,7 @@ impl Renderer {
 
             frame.command_buffer.record(SubmitCount::OneTime, |recorder| {
                 let swapchain_image = self.swapchain.image(image_index);
-
-                render(&recorder, frame.index, image_index);
-
-                // Transition swapchain image to present layout.
-                recorder.image_barrier(&ImageBarrierInfo {
-                    flags: vk::DependencyFlags::BY_REGION,
-                    src_stage: vk::PipelineStageFlags2::RESOLVE,
-                    dst_stage: vk::PipelineStageFlags2::empty(),
-                    src_mask: vk::AccessFlags2::TRANSFER_WRITE,
-                    dst_mask: vk::AccessFlags2::empty(),
-                    new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                    image: swapchain_image.image().clone(),
-                    mips: 0..1,
-                });
-
+                render(&recorder, frame.index, swapchain_image.clone());
             })?;
 
             // Submit command buffer to be rendered. Wait for semaphore `frame.presented` first and
@@ -706,16 +692,13 @@ impl FrameQueue {
             Frame::new(&device, index, buffer)
         })?;
 
-        let frame_index = Cell::new(FrameIndex::Uno);
+        let frame_index = Cell::default();
 
-        Ok(Self { frames, frame_index, device: device.clone(), graphics_queue })
+        Ok(Self { frames, frame_index, device, graphics_queue })
     }
 
     pub fn next_frame(&self) {
-        self.frame_index.set(match self.index() {
-            FrameIndex::Uno => FrameIndex::Dos,
-            FrameIndex::Dos => FrameIndex::Uno,
-        });
+        self.frame_index.set(self.index().next());
     }
 
     pub fn current_frame(&self) -> &Frame {
@@ -1060,11 +1043,18 @@ impl Swapchain {
                 vk::Fence::null(),
             )
         };
+
         match next_image {
-            Ok((image_index, false)) => Ok(NextSwapchainImage::UpToDate { image_index }),
+            // The image is up to date.
+            Ok((image_index, false)) => {
+                Ok(NextSwapchainImage::UpToDate { image_index })
+            },
+
+            // The image is suboptimal or unavailable.
             Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                 Ok(NextSwapchainImage::OutOfDate)
             }
+
             Err(result) => Err(result.into()),
         }
     }

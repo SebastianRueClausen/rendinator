@@ -3,7 +3,7 @@ use smallvec::{smallvec, SmallVec};
 use ash::vk;
 
 use std::ffi::CString;
-use std::{ops, slice, alloc, mem};
+use std::{array, ops, slice, alloc, mem};
 use std::rc::Rc;
 use std::cell::{UnsafeCell, Cell};
 use std::ptr::{self, NonNull};
@@ -425,7 +425,7 @@ impl Image {
 
 impl Drop for Image {
     fn drop(&mut self) {
-        // Swapchain images should not be manually destroyd.
+        // Swapchain images should not be manually destroyed.
         if let ImageStorage::Block { .. } = self.storage {
             unsafe {
                 self.device.handle.destroy_image(self.handle, None);
@@ -1558,26 +1558,25 @@ impl<T> ops::Deref for Res<T> {
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
-#[derive(Clone, Copy)]
-pub enum FrameIndex {
-    Uno = 0,
-    Dos = 1,
+#[derive(Default, Clone, Copy)]
+pub struct FrameIndex {
+    index: u8,
 }
 
 impl FrameIndex {
-    pub const ALL: [Self; FRAMES_IN_FLIGHT] = [
-        FrameIndex::Uno,
-        FrameIndex::Dos,
-    ];
-
     pub fn enumerate() -> impl Iterator<Item = Self> {
-        Self::ALL.into_iter()
+        (0..FRAMES_IN_FLIGHT as u8).map(|index| Self { index })
     }
 
     pub fn last(self) -> Self {
-        match self {
-            FrameIndex::Uno => FrameIndex::Dos,
-            FrameIndex::Dos => FrameIndex::Uno,
+        Self {
+            index: self.index.wrapping_sub(1) % FRAMES_IN_FLIGHT as u8
+        }
+    }
+
+    pub fn next(self) -> Self {
+        Self {
+            index: self.index.wrapping_add(1) % FRAMES_IN_FLIGHT as u8
         }
     }
 }
@@ -1589,15 +1588,23 @@ impl<T> PerFrame<T> {
     pub fn from_fn<F>(func: F) -> Self
     where F: Fn(FrameIndex) -> T
     {
-        Self { items: FrameIndex::ALL.map(|idx| func(idx)) }
+        let items = array::from_fn(|index| {
+            let frame_index = FrameIndex { index: index as u8 };
+            func(frame_index)
+        });
+
+        Self { items }
     }
 
     pub fn try_from_fn<F>(func: F) -> Result<Self>
     where F: Fn(FrameIndex) -> Result<T>
     {
-        FrameIndex::ALL
-            .try_map(|idx| func(idx))
-            .map(|items| Self { items })
+        let items = array::try_from_fn(|index| {
+            let frame_index = FrameIndex { index: index as u8 };
+            func(frame_index)
+        })?;
+
+        Ok(Self { items })
     }
 
     pub fn iter(&self) -> impl Iterator<Item = &T> {
@@ -1605,15 +1612,15 @@ impl<T> PerFrame<T> {
     }
 
     pub fn any(&self) -> &T {
-        &self[FrameIndex::Uno]
+        &self[FrameIndex { index: 0 }]
     }
 }
 
 impl<T> ops::Index<FrameIndex> for PerFrame<T> {
     type Output = T;
 
-    fn index(&self, idx: FrameIndex) -> &Self::Output {
-        &self.items[idx as usize]
+    fn index(&self, index: FrameIndex) -> &Self::Output {
+        &self.items[index.index as usize]
     }
 }
 

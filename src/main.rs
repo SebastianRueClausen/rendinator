@@ -1,4 +1,4 @@
-#![feature(int_roundings, array_try_map)]
+#![feature(int_roundings, array_try_from_fn)]
 
 #[macro_use]
 extern crate log;
@@ -122,7 +122,7 @@ fn main() -> Result<()> {
                 last_draw = Instant::now();
 
                 let swapchain = renderer.swapchain.clone();
-                let res = renderer.draw(|recorder, frame_index, image_index| {
+                let res = renderer.draw(|recorder, frame_index, swapchain_image| {
                     camera_uniforms
                         .update_view(frame_index, &camera)
                         .expect("failed to update view");
@@ -168,7 +168,7 @@ fn main() -> Result<()> {
                     recorder.end_rendering();
 
                     let color_image = forward_pass.color_images[frame_index].image().clone();
-                    let swapchain_image = swapchain.image(image_index).image().clone();
+                    let swapchain_image = swapchain_image.image().clone();
 
                     recorder.image_barrier(&ImageBarrierInfo {
                         flags: vk::DependencyFlags::BY_REGION,
@@ -202,6 +202,18 @@ fn main() -> Result<()> {
                     if false {
                         forward_pass.pyramid_debug(frame_index, swapchain_image.clone(), recorder, 4);
                     }
+
+                    // Transition swapchain image to present layout.
+                    recorder.image_barrier(&ImageBarrierInfo {
+                        flags: vk::DependencyFlags::BY_REGION,
+                        src_stage: vk::PipelineStageFlags2::RESOLVE,
+                        dst_stage: vk::PipelineStageFlags2::empty(),
+                        src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+                        dst_mask: vk::AccessFlags2::empty(),
+                        new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                        image: swapchain_image.clone(),
+                        mips: 0..1,
+                    });
                 });
 
                 res.expect("failed rendering");
