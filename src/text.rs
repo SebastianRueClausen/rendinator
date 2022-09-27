@@ -89,17 +89,29 @@ impl TextPass {
         })?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(
-                glyph_atlas.clone(),
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            );
+            recorder.image_barrier(&ImageBarrierInfo {
+                flags: vk::DependencyFlags::BY_REGION,
+                mips: glyph_atlas.mip_levels(),
+                new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                src_stage: vk::PipelineStageFlags2::empty(),
+                dst_stage: vk::PipelineStageFlags2::TRANSFER,
+                src_mask: vk::AccessFlags2::empty(),
+                dst_mask: vk::AccessFlags2::TRANSFER_WRITE,
+                image: glyph_atlas.clone(),
+            });
 
             recorder.copy_buffer_to_image(atlas_staging.clone(), glyph_atlas.clone(), 0);
 
-            recorder.transition_image_layout(
-                glyph_atlas.clone(),
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            );
+            recorder.image_barrier(&ImageBarrierInfo {
+                flags: vk::DependencyFlags::BY_REGION,
+                mips: glyph_atlas.mip_levels(),
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                src_stage: vk::PipelineStageFlags2::TRANSFER,
+                dst_stage: vk::PipelineStageFlags2::empty(),
+                src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+                dst_mask: vk::AccessFlags2::empty(),
+                image: glyph_atlas.clone(),
+            });
         })?;
 
         let layout = pool.create_descriptor_layout(&[LayoutBinding {

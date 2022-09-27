@@ -391,58 +391,7 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(info.dst.clone());
     }
 
-    /// Transition the layout of `image` to `new`.
-    pub fn transition_image_layout(&self, image: Res<Image>, new: vk::ImageLayout) {
-        let (src_stage, dst_stage, src_mask, dst_mask) = match (image.layout(), new) {
-            (_, vk::ImageLayout::GENERAL) => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::PipelineStageFlags2::COMPUTE_SHADER,
-                vk::AccessFlags2::empty(),
-                vk::AccessFlags2::empty(),
-            ),
-            (_, vk::ImageLayout::TRANSFER_DST_OPTIMAL) => (
-                vk::PipelineStageFlags2::TOP_OF_PIPE,
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::AccessFlags2::empty(),
-                vk::AccessFlags2::empty(),
-            ),
-            (_, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL) => (
-                vk::PipelineStageFlags2::TRANSFER,
-                vk::PipelineStageFlags2::FRAGMENT_SHADER,
-                vk::AccessFlags2::empty(),
-                vk::AccessFlags2::empty(),
-            ),
-            _ => {
-                todo!()
-            }
-        };
-
-        self.image_barrier(&ImageBarrierInfo {
-            flags: vk::DependencyFlags::BY_REGION,
-            mips: 0..image.mip_level_count(),
-            new_layout: new,
-            src_stage,
-            dst_stage,
-            src_mask,
-            dst_mask,
-            image,
-        });
-    }
-
     pub fn begin_rendering(&self, info: &BeginRenderingInfo) {
-        if info.color_target.image().layout() != vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL {
-            self.image_barrier(&ImageBarrierInfo {
-                flags: vk::DependencyFlags::BY_REGION,
-                src_stage: vk::PipelineStageFlags2::ALL_COMMANDS,
-                dst_stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                src_mask: vk::AccessFlags2::NONE,
-                dst_mask: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                image: info.color_target.image().clone(),
-                mips: 0..1,
-            });
-        }
-
         let color_attachments = [
             vk::RenderingAttachmentInfo::builder()
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)

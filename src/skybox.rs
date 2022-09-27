@@ -185,7 +185,16 @@ impl Skybox {
         })?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(image.clone(), vk::ImageLayout::GENERAL);
+            recorder.image_barrier(&ImageBarrierInfo {
+                flags: vk::DependencyFlags::BY_REGION,
+                mips: image.mip_levels(),
+                new_layout: vk::ImageLayout::GENERAL,
+                src_stage: vk::PipelineStageFlags2::empty(),
+                dst_stage: vk::PipelineStageFlags2::empty(),
+                src_mask: vk::AccessFlags2::empty(),
+                dst_mask: vk::AccessFlags2::empty(),
+                image: image.clone(),
+            });
         })?;
 
         let array_view = pool.create_image_view(&ImageViewInfo {
@@ -200,7 +209,16 @@ impl Skybox {
         generator.generate(renderer)?;
 
         renderer.transfer_with(|recorder| {
-            recorder.transition_image_layout(image.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL);
+            recorder.image_barrier(&ImageBarrierInfo {
+                flags: vk::DependencyFlags::BY_REGION,
+                mips: image.mip_levels(),
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                src_stage: vk::PipelineStageFlags2::empty(),
+                dst_stage: vk::PipelineStageFlags2::empty(),
+                src_mask: vk::AccessFlags2::empty(),
+                dst_mask: vk::AccessFlags2::empty(),
+                image: image.clone(),
+            });
         })?;
 
         let cube_view = pool.create_image_view(&ImageViewInfo {

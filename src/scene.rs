@@ -1066,10 +1066,16 @@ impl Scene {
 
         renderer.transfer_with(|recorder| {
             for image in images.iter() {
-                recorder.transition_image_layout(
-                    image.clone(),
-                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                );
+                recorder.image_barrier(&ImageBarrierInfo {
+                    flags: vk::DependencyFlags::BY_REGION,
+                    mips: 0..image.mip_level_count(),
+                    new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    src_stage: vk::PipelineStageFlags2::empty(),
+                    dst_stage: vk::PipelineStageFlags2::TRANSFER,
+                    src_mask: vk::AccessFlags2::empty(),
+                    dst_mask: vk::AccessFlags2::TRANSFER_WRITE,
+                    image: image.clone(),
+                });
             }
 
             for (levels, dst) in staging.iter().zip(images.iter()) {
@@ -1079,10 +1085,16 @@ impl Scene {
             }
 
             for image in images.iter() {
-                recorder.transition_image_layout(
-                    image.clone(),
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                );
+                recorder.image_barrier(&ImageBarrierInfo {
+                    flags: vk::DependencyFlags::BY_REGION,
+                    mips: 0..image.mip_level_count(),
+                    new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    src_stage: vk::PipelineStageFlags2::TRANSFER,
+                    dst_stage: vk::PipelineStageFlags2::empty(),
+                    src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+                    dst_mask: vk::AccessFlags2::empty(),
+                    image: image.clone(),
+                });
             }
         })?;
 
