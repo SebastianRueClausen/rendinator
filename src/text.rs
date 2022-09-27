@@ -196,7 +196,7 @@ impl TextPass {
 
     pub fn draw_text<F>(
         &mut self,
-        recorder: &CommandRecorder,
+        recorder: &DrawRecorder,
         frame_index: FrameIndex,
         mut func: F,
     ) -> Result<()>
@@ -222,7 +222,7 @@ impl TextPass {
             .fill_range(0..index_size, index_data);
 
         recorder.bind_graphics_pipeline(self.pipeline.clone());
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
             descriptors: &[self.descriptor.clone()],
@@ -238,11 +238,11 @@ impl TextPass {
                 label.pos,
             );
 
-            recorder.push_constants(
+            recorder.push_consts(
                 self.pipeline.layout(),
                 vk::ShaderStageFlags::VERTEX,
                 0,
-                &proj_transform,
+                bytemuck::bytes_of(&proj_transform),
             );
 
             recorder.draw_indexed(IndexedDrawInfo {

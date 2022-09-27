@@ -368,7 +368,7 @@ impl Lights {
         let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
-            recorder.bind_descriptor_sets(&DescriptorBindInfo {
+            recorder.bind_descriptors(&DescriptorBindInfo {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: cluster_build.layout(),
                 descriptors: &[
@@ -409,7 +409,7 @@ impl Lights {
         camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.light_update.layout(),
             descriptors: &[

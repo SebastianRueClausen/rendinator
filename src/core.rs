@@ -126,7 +126,7 @@ impl Renderer {
             // Submit command buffer to be rendered. Wait for semaphore `frame.presented` first and
             // signals `frame.rendered´ and `frame.ready_to_draw` when all commands have been
             // executed.
-            frame.command_buffer.submit_wait(SubmitWaitInfo {
+            self.graphics_queue.submit_wait(&frame.command_buffer, SubmitWaitInfo {
                 wait_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
                 fence: frame.ready_to_draw,
                 signal: frame.rendered,
@@ -624,6 +624,69 @@ impl Queue {
     pub fn wait_idle(&self) -> Result<()> {
         Ok(unsafe { self.device.handle.queue_wait_idle(self.handle)? })
     }
+
+    pub fn submit_wait_idle(&self, buffer: &CommandBuffer) -> Result<()> {
+        assert_eq!(
+            self.family_index,
+            buffer.queue.family_index,
+            "command buffer is not created from queue",
+        );
+
+        let buffers = [buffer.handle];
+        let submit_infos = [vk::SubmitInfo::builder()
+            .command_buffers(&buffers)
+            .build()];
+
+        unsafe {
+            self.device.handle.queue_submit(
+                self.handle,
+                &submit_infos,
+                vk::Fence::null(),
+            )?;
+        }
+
+        self.wait_idle()
+    }
+}
+
+pub struct SubmitWaitInfo {
+    pub signal: vk::Semaphore,
+    pub wait: vk::Semaphore,
+    pub wait_stage: vk::PipelineStageFlags,
+    pub fence: vk::Fence,
+}
+
+impl Queue {
+    pub fn submit_wait(&self, buffer: &CommandBuffer, info: SubmitWaitInfo) -> Result<()> {
+        assert_eq!(
+            self.family_index,
+            buffer.queue.family_index,
+            "command buffer is not created from queue",
+        );
+
+        let wait = [info.wait];
+        let signals = [info.signal];
+        let command_buffers = [buffer.handle];
+        let stages = [info.wait_stage];
+
+        let submit_info = [vk::SubmitInfo::builder()
+            .wait_dst_stage_mask(&stages)
+            .wait_semaphores(&wait)
+            .command_buffers(&command_buffers)
+            .signal_semaphores(&signals)
+            .build()];
+
+        unsafe {
+            self.device.handle.queue_submit(
+                self.handle,
+                &submit_info,
+                info.fence,
+            )?;
+        }
+
+        Ok(())
+    }
+
 }
 
 impl Drop for Queue {

@@ -10,7 +10,7 @@ use crate::core::*;
 use crate::resource::*;
 
 pub struct CommandBuffer {
-    handle: vk::CommandBuffer,
+    pub handle: vk::CommandBuffer,
 
     /// This keeps track of all the items used by the command buffer.
     ///
@@ -18,7 +18,7 @@ pub struct CommandBuffer {
     /// makes sure the items live as long as they are used by the buffer.
     bound_resources: UnsafeCell<Vec<DummyRes>>,
 
-    queue: Res<Queue>,
+    pub queue: Res<Queue>,
     device: Rc<Device>,
 }
 
@@ -73,59 +73,15 @@ impl CommandBuffer {
         let recorder = CommandRecorder { buffer: &self };
         let ret = func(&recorder);
 
-        unsafe { self.device.handle.end_command_buffer(self.handle)?; }
+        unsafe {
+            self.device.handle.end_command_buffer(self.handle)?;
+        }
 
         Ok(ret)
     }
-}
-
-pub struct SubmitWaitInfo {
-    pub signal: vk::Semaphore,
-    pub wait: vk::Semaphore,
-    pub wait_stage: vk::PipelineStageFlags,
-    pub fence: vk::Fence,
-}
-
-impl CommandBuffer {
-    pub fn submit_wait(&self, info: SubmitWaitInfo) -> Result<()> {
-        let wait = [info.wait];
-        let signals = [info.signal];
-        let command_buffers = [self.handle];
-        let stages = [info.wait_stage];
-
-        let submit_info = [vk::SubmitInfo::builder()
-            .wait_dst_stage_mask(&stages)
-            .wait_semaphores(&wait)
-            .command_buffers(&command_buffers)
-            .signal_semaphores(&signals)
-            .build()];
-
-        unsafe {
-            self.device.handle.queue_submit(
-                self.queue.handle,
-                &submit_info,
-                info.fence,
-            )?;
-        }
-
-        Ok(())
-    }
 
     pub fn submit_wait_idle(&self) -> Result<()> {
-        let buffers = [self.handle];
-        let submit_infos = [vk::SubmitInfo::builder()
-            .command_buffers(&buffers)
-            .build()];
-
-        unsafe {
-            self.device.handle.queue_submit(
-                self.queue.handle,
-                &submit_infos,
-                vk::Fence::null(),
-            )?;
-        }
-
-        self.queue.wait_idle()
+        self.queue.submit_wait_idle(self)
     }
 }
 
@@ -202,10 +158,213 @@ pub struct DescriptorBindInfo<'a> {
     pub descriptors: &'a [Res<DescriptorSet>],
 }
 
-pub struct BeginRenderingInfo {
+pub struct RenderInfo {
     pub color_target: Res<ImageView>,
     pub depth_target: Res<ImageView>,
     pub swapchain: Res<Swapchain>,
+}
+
+macro_rules! impl_shared_commands {
+    () => {
+        #[allow(unused)]
+        pub fn push_consts(
+            &self,
+            layout: Res<PipelineLayout>,
+            stage: vk::ShaderStageFlags,
+            offset: u32,
+            bytes: &[u8],
+        ) {
+            unsafe {
+                self.device().handle.cmd_push_constants(
+                    self.buffer.handle,
+                    layout.handle,
+                    stage,
+                    offset,
+                    bytes,
+                );
+            }
+
+            self.buffer.bind_resource(layout);
+        }
+
+        #[allow(unused)]
+        pub fn bind_descriptors(&self, info: &DescriptorBindInfo) {
+            let descs: SmallVec<[_; 12]> = info.descriptors
+                .iter()
+                .map(|desc| desc.handle)
+                .collect();
+
+            unsafe {
+                self.device().handle.cmd_bind_descriptor_sets(
+                    self.buffer.handle,
+                    info.bind_point,
+                    info.layout.handle,
+                    0,
+                    &descs,
+                    &[],
+                );
+            }
+
+            self.buffer.bind_resource(info.layout.clone());
+
+            for desc in info.descriptors {
+                self.buffer.bind_resource(desc.clone());
+            }
+        }
+
+        #[allow(unused)]
+        pub fn image_barrier(&self, info: &ImageBarrierInfo) {
+            let subresource = vk::ImageSubresourceRange::builder()
+                .aspect_mask(info.image.aspect_flags())
+                .base_mip_level(info.mips.start)
+                .level_count(info.mips.end - info.mips.start)
+                .base_array_layer(0)
+                .layer_count(info.image.layer_count())
+                .build();
+            let barriers = [vk::ImageMemoryBarrier2::builder()
+                .image(info.image.handle)
+                .old_layout(info.image.layout())
+                .new_layout(info.new_layout)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .src_access_mask(info.src_mask)
+                .dst_access_mask(info.dst_mask)
+                .src_stage_mask(info.src_stage)
+                .dst_stage_mask(info.dst_stage)
+                .subresource_range(subresource)
+                .build()];
+
+            info.image.layout.set(info.new_layout);
+
+            let dependency_info = vk::DependencyInfo::builder()
+                .dependency_flags(info.flags)
+                .image_memory_barriers(&barriers);
+
+            unsafe {
+                self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
+            }
+
+            self.buffer.bind_resource(info.image.clone());
+        }
+
+        #[allow(unused)]
+        pub fn buffer_barrier(&self, info: &BufferBarrierInfo) {
+            let barriers = [vk::BufferMemoryBarrier2::builder()
+                .src_access_mask(info.src_mask)
+                .dst_access_mask(info.dst_mask)
+                .src_stage_mask(info.src_stage)
+                .dst_stage_mask(info.dst_stage)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .buffer(info.buffer.handle)
+                .offset(0)
+                .size(info.buffer.size())
+                .build()];
+
+            let dependency_info = vk::DependencyInfo::builder()
+                .dependency_flags(vk::DependencyFlags::empty())
+                .buffer_memory_barriers(&barriers);
+
+            unsafe {
+                self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
+            }
+
+            self.buffer.bind_resource(info.buffer.clone());
+        }
+    }
+}
+
+pub struct DrawRecorder<'a> {
+    buffer: &'a CommandBuffer,
+}
+
+impl<'a> DrawRecorder<'a> {
+    impl_shared_commands!();
+
+    fn device(&self) -> &Device {
+        &self.buffer.device
+    }
+
+    pub fn bind_vertex_buffer(&self, buffer: Res<Buffer>) {
+        unsafe {
+            self.device().handle.cmd_bind_vertex_buffers(
+                self.buffer.handle,
+                0,
+                &[buffer.handle],
+                &[0],
+            );
+        }
+
+        self.buffer.bind_resource(buffer);
+    }
+
+    pub fn bind_index_buffer(&self, buffer: Res<Buffer>, index_type: vk::IndexType) {
+        unsafe {
+            self.device().handle.cmd_bind_index_buffer(
+                self.buffer.handle,
+                buffer.handle,
+                0,
+                index_type,
+            );
+        }
+
+        self.buffer.bind_resource(buffer);
+    }
+
+    pub fn bind_graphics_pipeline(&self, pipeline: Res<GraphicsPipeline>) {
+        let bind_point = vk::PipelineBindPoint::GRAPHICS;
+        unsafe {
+            self.device().handle.cmd_bind_pipeline(
+                self.buffer.handle,
+                bind_point,
+                pipeline.handle,
+            );
+        }
+
+        self.buffer.bind_resource(pipeline);
+    }
+    
+    pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
+        unsafe {
+            self.device().handle.cmd_draw(
+                self.buffer.handle,
+                vertex_count,
+                1,
+                vertex_start,
+                0,
+            );
+        }
+    }
+
+    pub fn draw_indexed(&self, info: IndexedDrawInfo) {
+        unsafe {
+            self.device().handle.cmd_draw_indexed(
+                self.buffer.handle,
+                info.index_count,
+                1,
+                info.index_start,
+                info.vertex_offset,
+                info.instance,
+            );
+        }
+    }
+
+    pub fn draw_indexed_indirect_count(&self, info: &IndexedIndirectDrawInfo) {
+        unsafe {
+            self.device().handle.cmd_draw_indexed_indirect_count(
+                self.buffer.handle,
+                info.draw_buffer.handle,
+                info.draw_offset,
+                info.count_buffer.handle,
+                info.count_offset,
+                info.max_draw_count,
+                info.draw_command_size as u32,
+            );
+        }
+
+        self.buffer.bind_resource(info.draw_buffer.clone());
+        self.buffer.bind_resource(info.count_buffer.clone());
+    }
 }
 
 pub struct CommandRecorder<'a> {
@@ -213,6 +372,8 @@ pub struct CommandRecorder<'a> {
 }
 
 impl<'a> CommandRecorder<'a> {
+    impl_shared_commands!();
+
     fn device(&self) -> &Device {
         &self.buffer.device
     }
@@ -268,40 +429,6 @@ impl<'a> CommandRecorder<'a> {
 
         self.buffer.bind_resource(src);
         self.buffer.bind_resource(dst);
-    }
-
-    pub fn image_barrier(&self, info: &ImageBarrierInfo) {
-        let subresource = vk::ImageSubresourceRange::builder()
-            .aspect_mask(info.image.aspect_flags())
-            .base_mip_level(info.mips.start)
-            .level_count(info.mips.end - info.mips.start)
-            .base_array_layer(0)
-            .layer_count(info.image.layer_count())
-            .build();
-        let barriers = [vk::ImageMemoryBarrier2::builder()
-            .image(info.image.handle)
-            .old_layout(info.image.layout())
-            .new_layout(info.new_layout)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .src_access_mask(info.src_mask)
-            .dst_access_mask(info.dst_mask)
-            .src_stage_mask(info.src_stage)
-            .dst_stage_mask(info.dst_stage)
-            .subresource_range(subresource)
-            .build()];
-
-        info.image.layout.set(info.new_layout);
-
-        let dependency_info = vk::DependencyInfo::builder()
-            .dependency_flags(info.flags)
-            .image_memory_barriers(&barriers);
-
-        unsafe {
-            self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
-        }
-
-        self.buffer.bind_resource(info.image.clone());
     }
 
     pub fn resolve_image(&self, info: &ImageResolveInfo) {
@@ -391,7 +518,7 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(info.dst.clone());
     }
 
-    pub fn begin_rendering(&self, info: &BeginRenderingInfo) {
+    pub fn render<F: FnOnce(&DrawRecorder)>(&self, info: &RenderInfo, f: F) {
         let color_attachments = [
             vk::RenderingAttachmentInfo::builder()
                 .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -435,9 +562,13 @@ impl<'a> CommandRecorder<'a> {
             self.device().handle.cmd_set_viewport(self.buffer.handle, 0, &viewports);
             self.device().handle.cmd_set_scissor(self.buffer.handle, 0, &scissors);
         }
-    }
 
-    pub fn end_rendering(&self) {
+        let draw_recorder = DrawRecorder {
+            buffer: self.buffer,
+        };
+        
+        f(&draw_recorder);
+
         unsafe {
             self.device().handle.cmd_end_rendering(self.buffer.handle);
         };
@@ -462,115 +593,6 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(pipeline);
     }
 
-    pub fn bind_descriptor_sets(&self, info: &DescriptorBindInfo) {
-        let descs: SmallVec<[_; 12]> = info.descriptors
-            .iter()
-            .map(|desc| desc.handle)
-            .collect();
-
-        unsafe {
-            self.device().handle.cmd_bind_descriptor_sets(
-                self.buffer.handle,
-                info.bind_point,
-                info.layout.handle,
-                0,
-                &descs,
-                &[],
-            );
-        }
-
-        self.buffer.bind_resource(info.layout.clone());
-
-        for desc in info.descriptors {
-            self.buffer.bind_resource(desc.clone());
-        }
-    }
-
-    pub fn bind_vertex_buffer(&self, buffer: Res<Buffer>) {
-        unsafe {
-            self.device().handle.cmd_bind_vertex_buffers(
-                self.buffer.handle,
-                0,
-                &[buffer.handle],
-                &[0],
-            );
-        }
-
-        self.buffer.bind_resource(buffer);
-    }
-
-    pub fn bind_index_buffer(&self, buffer: Res<Buffer>, index_type: vk::IndexType) {
-        unsafe {
-            self.device().handle.cmd_bind_index_buffer(
-                self.buffer.handle,
-                buffer.handle,
-                0,
-                index_type,
-            );
-        }
-
-        self.buffer.bind_resource(buffer);
-    }
-
-    pub fn push_constants<T: bytemuck::NoUninit>(
-        &self,
-        layout: Res<PipelineLayout>,
-        stage: vk::ShaderStageFlags,
-        offset: u32,
-        val: &T,
-    ) {
-        let bytes = bytemuck::bytes_of(val);
-        unsafe {
-            self.device().handle.cmd_push_constants(
-                self.buffer.handle,
-                layout.handle,
-                stage,
-                offset,
-                bytes,
-            );
-        }
-
-        self.buffer.bind_resource(layout);
-    }
-
-    pub fn bind_graphics_pipeline(&self, pipeline: Res<GraphicsPipeline>) {
-        let bind_point = vk::PipelineBindPoint::GRAPHICS;
-        unsafe {
-            self.device().handle.cmd_bind_pipeline(
-                self.buffer.handle,
-                bind_point,
-                pipeline.handle,
-            );
-        }
-
-        self.buffer.bind_resource(pipeline);
-    }
-    
-    pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
-        unsafe {
-            self.device().handle.cmd_draw(
-                self.buffer.handle,
-                vertex_count,
-                1,
-                vertex_start,
-                0,
-            );
-        }
-    }
-
-    pub fn draw_indexed(&self, info: IndexedDrawInfo) {
-        unsafe {
-            self.device().handle.cmd_draw_indexed(
-                self.buffer.handle,
-                info.index_count,
-                1,
-                info.index_start,
-                info.vertex_offset,
-                info.instance,
-            );
-        }
-    }
-
     pub fn update_buffer<T: bytemuck::NoUninit>(&self, buffer: Res<Buffer>, val: &T) {
         assert_eq!(
             buffer.size(),
@@ -588,46 +610,5 @@ impl<'a> CommandRecorder<'a> {
         }
 
         self.buffer.bind_resource(buffer);
-    }
-
-    pub fn draw_indexed_indirect_count(&self, info: &IndexedIndirectDrawInfo) {
-        unsafe {
-            self.device().handle.cmd_draw_indexed_indirect_count(
-                self.buffer.handle,
-                info.draw_buffer.handle,
-                info.draw_offset,
-                info.count_buffer.handle,
-                info.count_offset,
-                info.max_draw_count,
-                info.draw_command_size as u32,
-            );
-        }
-
-        self.buffer.bind_resource(info.draw_buffer.clone());
-        self.buffer.bind_resource(info.count_buffer.clone());
-    }
-
-    pub fn buffer_barrier(&self, info: &BufferBarrierInfo) {
-        let barriers = [vk::BufferMemoryBarrier2::builder()
-            .src_access_mask(info.src_mask)
-            .dst_access_mask(info.dst_mask)
-            .src_stage_mask(info.src_stage)
-            .dst_stage_mask(info.dst_stage)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .buffer(info.buffer.handle)
-            .offset(0)
-            .size(info.buffer.size())
-            .build()];
-
-        let dependency_info = vk::DependencyInfo::builder()
-            .dependency_flags(vk::DependencyFlags::empty())
-            .buffer_memory_barriers(&barriers);
-
-        unsafe {
-            self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
-        }
-
-        self.buffer.bind_resource(info.buffer.clone());
     }
 }

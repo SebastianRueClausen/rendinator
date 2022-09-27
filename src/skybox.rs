@@ -144,7 +144,7 @@ impl Generator {
 
     fn generate(&self, renderer: &Renderer) -> Result<()> {
         renderer.compute_with(|recorder| {
-            recorder.bind_descriptor_sets(&DescriptorBindInfo {
+            recorder.bind_descriptors(&DescriptorBindInfo {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: self.pipeline.layout(),
                 descriptors: &[self.descriptor.clone()],
@@ -290,11 +290,11 @@ impl Skybox {
         Ok(Self { cube_map, descriptor, pipeline, generator })
     }
 
-    pub fn draw(&self, camera: &Camera, recorder: &CommandRecorder) {
+    pub fn draw(&self, camera: &Camera, recorder: &DrawRecorder) {
         recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
         recorder.bind_graphics_pipeline(self.pipeline.clone());
 
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
             descriptors: &[self.descriptor.clone()],
@@ -302,11 +302,11 @@ impl Skybox {
 
         let transform = camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));
 
-        recorder.push_constants(
+        recorder.push_consts(
             self.pipeline.layout(),
             vk::ShaderStageFlags::VERTEX,
             0,
-            &transform,
+            bytemuck::bytes_of(&transform),
         );
 
         recorder.draw(36, 0);

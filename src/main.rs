@@ -135,37 +135,44 @@ fn main() -> Result<()> {
                         recorder,
                     );
 
-                    recorder.begin_rendering(&BeginRenderingInfo {
+                    let render_info = RenderInfo {
                         color_target: forward_pass.color_images[frame_index].clone(),
                         depth_target: forward_pass.depth_images[frame_index].clone(),
                         swapchain: swapchain.clone(),
+                    };
+
+                    recorder.render(&render_info, |recorder| {
+                        forward_pass.draw(
+                            frame_index,
+                            &scene,
+                            &camera_uniforms,
+                            &lights,
+                            recorder,
+                        );
+
+                        skybox.draw(&camera, recorder); 
+
+                        text_pass.draw_text(recorder, frame_index, |texts| {
+                            let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
+                            let pos = format!(
+                                "position: ({}, {}, {})",
+                                camera.pos.x,
+                                camera.pos.y,
+                                camera.pos.z,
+                            );
+
+                            let primitives_drawn = format!(
+                                "primitives: {}",
+                                forward_pass.primitives_drawn(&renderer, frame_index.last())
+                                    .expect("failed to get amount of primitives drawn"),
+                            );
+
+                            texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
+                            texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);
+                            texts.add_label(30.0, Vec3::new(20.0, 100.0, 0.5), &primitives_drawn);
+                        })
+                        .expect("failed do draw text");
                     });
-
-                    forward_pass.draw(frame_index, &scene, &camera_uniforms, &lights, recorder);
-                    skybox.draw(&camera, recorder); 
-
-                    text_pass.draw_text(recorder, frame_index, |texts| {
-                        let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
-                        let pos = format!(
-                            "position: ({}, {}, {})",
-                            camera.pos.x,
-                            camera.pos.y,
-                            camera.pos.z,
-                        );
-
-                        let primitives_drawn = format!(
-                            "primitives: {}",
-                            forward_pass.primitives_drawn(&renderer, frame_index.last())
-                                .expect("failed to get amount of primitives drawn"),
-                        );
-
-                        texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
-                        texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);
-                        texts.add_label(30.0, Vec3::new(20.0, 100.0, 0.5), &primitives_drawn);
-                    })
-                    .expect("failed do draw text");
-
-                    recorder.end_rendering();
 
                     let color_image = forward_pass.color_images[frame_index].image().clone();
                     let swapchain_image = swapchain_image.image().clone();

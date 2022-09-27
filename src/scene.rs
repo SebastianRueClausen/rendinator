@@ -377,7 +377,7 @@ impl DepthPyramid {
             mips: self.stagings[frame_index].image().mip_levels(),
         });
 
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.resolve.layout(),
             descriptors: &[
@@ -394,11 +394,11 @@ impl DepthPyramid {
             sample: depth_image.image().sample_count().as_raw(),
         };
 
-        recorder.push_constants(
+        recorder.push_consts(
             self.resolve.layout(),
             vk::ShaderStageFlags::COMPUTE,
             0,
-            &info,
+            bytemuck::bytes_of(&info),
         );
        
         recorder.dispatch(self.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
@@ -418,7 +418,7 @@ impl DepthPyramid {
         // Reduce from each level to the next in depth pyramid.
         //
 
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.reduce.layout(),
             descriptors: &[
@@ -438,7 +438,13 @@ impl DepthPyramid {
 
             let layout = self.reduce.layout();
 
-            recorder.push_constants(layout, vk::ShaderStageFlags::COMPUTE, 0, &info);
+            recorder.push_consts(
+                layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                bytemuck::bytes_of(&info),
+            );
+
             recorder.dispatch(self.reduce.clone(), [width / 32, height / 32, 1]);
 
             recorder.image_barrier(&ImageBarrierInfo {
@@ -689,7 +695,7 @@ impl ForwardPass {
         // Frustrum cull and generate draw buffers.
         //
 
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.cull.layout(),
             descriptors: &[
@@ -715,11 +721,11 @@ impl ForwardPass {
             _pad2: 0.0,
         };
 
-        recorder.push_constants(
+        recorder.push_consts(
             self.cull.layout(),
             vk::ShaderStageFlags::COMPUTE,
             0,
-            &cull_info,
+            bytemuck::bytes_of(&cull_info),
         );
 
         recorder.dispatch(self.cull.clone(), [
@@ -743,12 +749,12 @@ impl ForwardPass {
         scene: &Scene,
         camera_uniforms: &CameraUniforms,
         lights: &Lights,
-        recorder: &CommandRecorder,
+        recorder: &DrawRecorder,
     ) {
         recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
         recorder.bind_graphics_pipeline(self.render.clone());
 
-        recorder.bind_descriptor_sets(&DescriptorBindInfo {
+        recorder.bind_descriptors(&DescriptorBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.render.layout(),
             descriptors: &[
