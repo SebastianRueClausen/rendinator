@@ -48,12 +48,26 @@ layout (location = 6) out uvec3 out_textures;
 void main() {
 	const DrawCommand command = draw_commands[gl_DrawIDARB];
 
-	const vec4 position = vec4(verts[gl_VertexIndex].position);
+	vec4 position = vec4(verts[gl_VertexIndex].position);
+
+	const float bitangent_sign = sign(position.w);
+	const float tangent_angle = abs(position.w);
+
+	position.w = 1.0;
+
 	const InstanceData instance = instance_data[gl_InstanceIndex];
 	const vec4 world = instance.transform * position;
 
 	const vec3 normal = decode_normal(vec2(verts[gl_VertexIndex].normal));
-	const vec4 tangent = vec4(verts[gl_VertexIndex].tangent);
+
+	vec3 tb;
+	if (abs(normal.x) > abs(normal.z)) {
+		tb = vec3(-normal.y, normal.x, 0.0);
+	} else {
+		tb = vec3(0.0, -normal.z, normal.y);
+	}
+
+	const vec3 tangent = vec3(tb * cos(tangent_angle) + cross(normal, tb) * sin(tangent_angle));
 
 	out_textures = uvec3(command.albedo_map, command.specular_map, command.normal_map);
 	out_texcoord = vec2(verts[gl_VertexIndex].texcoord);
@@ -61,7 +75,7 @@ void main() {
 	out_world_normal = normalize(mat3(instance.inverse_transpose_transform) * normal);
 	out_world_tangent = normalize(mat3(instance.transform) * tangent.xyz);
 
-	out_world_bitangent = float(verts[gl_VertexIndex].tangent.w) * cross(out_world_tangent, out_world_normal);
+	out_world_bitangent = bitangent_sign * cross(out_world_tangent, out_world_normal);
 
 	out_world_position = world;
 	out_view_z = (view.mat * world).z;

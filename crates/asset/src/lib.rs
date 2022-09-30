@@ -10,10 +10,19 @@ use std::fs;
 #[repr(C)]
 #[derive(Default, Clone, Copy, bytemuck::NoUninit, Serialize, Deserialize)]
 pub struct Vertex {
+    /// x, y, z contains the vertex position as half precision floats.
+    ///
+    /// w is the tangent angle compared to a fixed orthogonal vector to the normal.
+    /// The w sign bit indicates the sign of the bitangent.
     pub position: [u16; 4],
+
+    /// The textexture coordinates as half precision floats.
     pub texcoord: [u16; 2],
+
+    /// The normal vector encoded via stereographic projection.
+    ///
+    /// https://aras-p.info/texts/CompactNormalStorage.html
     pub normal: [u16; 2],
-    pub tangent: [u16; 4],
 }
 
 /// All mesh and texture data for at scene.

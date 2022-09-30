@@ -1,4 +1,4 @@
-#![feature(let_else, iterator_try_collect)]
+#![feature(iterator_try_collect)]
 
 use anyhow::{anyhow, Result};
 use glam::{Vec2, Vec3, Vec4, Mat4};
@@ -600,6 +600,20 @@ fn new(path: &Path) -> Result<Self> {
                     let mut vertices: Vec<_> = vertices
                         .iter()
                         .map(|vertex| {
+                            let normal = vertex.normal;
+
+                            let tb = if normal.x.abs() > normal.z.abs() {
+                                Vec3::new(-normal.y, normal.x, 0.0)
+                            } else {
+                                Vec3::new(0.0, -normal.z, normal.y)
+                            };
+
+                            let mut theta = tb.dot(vertex.tangent.truncate()).acos();
+
+                            if vertex.tangent.w.is_sign_negative() {
+                                theta *= -1.0;
+                            }
+
                             let scale = 1.7777;
 
                             let mut nx = vertex.normal.x / (vertex.normal.z + 1.0);
@@ -622,19 +636,13 @@ fn new(path: &Path) -> Result<Self> {
                                 });
 
                             let position = vertex.position
-                                .extend(1.0)
+                                .extend(theta)
                                 .to_array()
                                 .map(|val| {
                                     meshopt::utilities::quantize_half(val)
                                 });
 
-                            let tangent = vertex.tangent
-                                .to_array()
-                                .map(|val| {
-                                    meshopt::utilities::quantize_half(val)
-                                });
-
-                            Vertex { position, normal, texcoord, tangent }
+                            Vertex { position, normal, texcoord }
                         })
                         .collect();
 

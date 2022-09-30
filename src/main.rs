@@ -66,7 +66,7 @@ fn main() -> Result<()> {
     let lights = debug_lights();
     let mut lights = Lights::new(&renderer, &camera_uniforms, &proj, &lights)?;
 
-    let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
+    let scene = asset::Scene::load(Path::new("assets/scenes/helmet.scene"))?;
     let scene = Scene::from_scene_asset(&renderer, &scene)?;
 
     let mut forward_pass = ForwardPass::new(
