@@ -5,7 +5,7 @@ use ash::vk;
 use crate::command::*;
 use crate::core::*;
 use crate::resource::*;
-use crate::camera::Camera;
+use crate::camera::{View, Proj};
 use crate::light::Lights;
 
 use std::mem;
@@ -290,7 +290,7 @@ impl Skybox {
         Ok(Self { cube_map, descriptor, pipeline, generator })
     }
 
-    pub fn draw(&self, camera: &Camera, recorder: &DrawRecorder) {
+    pub fn draw(&self, proj: &Proj, view: &View, recorder: &DrawRecorder) {
         recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
         recorder.bind_graphics_pipeline(self.pipeline.clone());
 
@@ -300,7 +300,7 @@ impl Skybox {
             descs: &[self.descriptor.clone()],
         });
 
-        let transform = camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));
+        let transform = proj.mat * Mat4::from_mat3(Mat3::from_mat4(view.mat));
 
         recorder.push_consts(
             self.pipeline.layout(),

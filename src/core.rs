@@ -1,4 +1,5 @@
 use anyhow::Result;
+use glam::Vec2;
 use ash::extensions::{ext, khr};
 use ash::vk;
 
@@ -857,6 +858,7 @@ impl Surface {
                 return Err(anyhow!("unsupported platform"));
             }
         };
+
         Ok(Self { handle: handle?, loader, instance })
     }
 }
@@ -1140,8 +1142,11 @@ impl Swapchain {
         }]
     }
 
-    pub fn aspect_ratio(&self) -> f32 {
-        self.extent().width as f32 / self.extent().height as f32
+    pub fn size(&self) -> Vec2 {
+        Vec2 {
+            x: self.extent().width as f32,
+            y: self.extent().height as f32,
+        }
     }
 
     pub fn extent(&self) -> vk::Extent2D {

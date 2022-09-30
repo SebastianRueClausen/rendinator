@@ -8,7 +8,7 @@ use crate::light::Lights;
 use crate::core::*;
 use crate::resource::*;
 use crate::command::*;
-use crate::camera::{Camera, CameraUniforms};
+use crate::camera::{self, Proj, View, CameraUniforms};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -671,7 +671,8 @@ impl ForwardPass {
     pub fn prepare_draw_buffers(
         &self,
         frame_index: FrameIndex,
-        camera: &Camera,
+        proj: &Proj,
+        view: &View,
         camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {
@@ -705,10 +706,10 @@ impl ForwardPass {
         });
 
         let cull_info = CullInfo {
-            z_near: camera.z_near,
-            z_far: camera.z_far,
+            z_near: proj.z_near,
+            z_far: proj.z_far,
 
-            frustrum_planes: camera.frustrum_planes(),
+            frustrum_planes: camera::frustrum_planes(proj, view),
 
             pyramid_width: self.depth_pyramid.width as f32,
             pyramid_height: self.depth_pyramid.height as f32,

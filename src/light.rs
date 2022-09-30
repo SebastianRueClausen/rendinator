@@ -4,7 +4,7 @@ use anyhow::Result;
 
 use std::mem;
 
-use crate::camera::{Camera, CameraUniforms};
+use crate::camera::{Proj, CameraUniforms};
 use crate::resource::*;
 use crate::command::*;
 use crate::core::*;
@@ -105,7 +105,7 @@ pub struct ClusterInfo {
 }
 
 impl ClusterInfo {
-    fn new(swapchain: &Swapchain, camera: &Camera) -> Self {
+    fn new(swapchain: &Swapchain, proj: &Proj) -> Self {
         let width = swapchain.extent().width;
         let height = swapchain.extent().height;
 
@@ -113,8 +113,8 @@ impl ClusterInfo {
         let cluster_size = UVec2::new(width / subdivisions.x, height / subdivisions.y);
 
         let depth_factors = Vec2::new(
-            subdivisions.z as f32 / (camera.z_far / camera.z_near).ln(),
-            subdivisions.z as f32 * camera.z_near.ln() / (camera.z_far / camera.z_near).ln(),
+            subdivisions.z as f32 / (proj.z_far / proj.z_near).ln(),
+            subdivisions.z as f32 * proj.z_near.ln() / (proj.z_far / proj.z_near).ln(),
         );
 
         Self { subdivisions, cluster_size, depth_factors }
@@ -136,7 +136,7 @@ pub struct ClusterInfoBuffer {
 }
 
 impl ClusterInfoBuffer {
-    fn new(renderer: &Renderer, camera: &Camera) -> Result<Self> {
+    fn new(renderer: &Renderer, proj: &Proj) -> Result<Self> {
         let pool = &renderer.static_pool;
 
         let memory_flags =
@@ -147,7 +147,7 @@ impl ClusterInfoBuffer {
             size: mem::size_of::<ClusterInfo>() as u64,
         })?;
 
-        let info = ClusterInfo::new(&renderer.swapchain, camera);
+        let info = ClusterInfo::new(&renderer.swapchain, proj);
         let mapped = buffer.get_mapped()?;
 
         mapped.fill(bytemuck::bytes_of(&info));
@@ -155,8 +155,8 @@ impl ClusterInfoBuffer {
         Ok(Self { buffer, mapped, info })
     }
 
-    fn handle_resize(&mut self, camera: &Camera, swapchain: &Swapchain) {
-        self.info = ClusterInfo::new(swapchain, camera);
+    fn handle_resize(&mut self, proj: &Proj, swapchain: &Swapchain) {
+        self.info = ClusterInfo::new(swapchain, proj);
         self.mapped.fill(bytemuck::bytes_of(&self.info));
     }
 }
@@ -248,7 +248,7 @@ impl Lights {
     pub fn new(
         renderer: &Renderer,
         camera_uniforms: &CameraUniforms,
-        camera: &Camera,
+        camera: &Proj,
         lights: &[PointLight],
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
@@ -448,8 +448,8 @@ impl Lights {
     ///
     /// This must only be called when the device is idle, e.g. no rendering is happening, as
     /// during so will upload data to a buffer which might be in use.
-    pub fn handle_resize(&mut self, renderer: &Renderer, camera: &Camera) -> Result<()> {
-        self.cluster_info.handle_resize(camera, &renderer.swapchain);
+    pub fn handle_resize(&mut self, renderer: &Renderer, proj: &Proj) -> Result<()> {
+        self.cluster_info.handle_resize(proj, &renderer.swapchain);
         self.build_clusters()
     }
 }

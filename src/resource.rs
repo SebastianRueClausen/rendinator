@@ -37,7 +37,6 @@ impl MappedMemory {
         let size = range_length(&range);
 
         Ok(MappedMemory { size, block, ptr, })
-
     }
 
     unsafe fn as_slice_range_unchecked(&self, range: MemoryRange) -> &mut [u8] {
@@ -1684,6 +1683,12 @@ impl<T> ops::Index<FrameIndex> for PerFrame<T> {
 
     fn index(&self, index: FrameIndex) -> &Self::Output {
         &self.items[index.index as usize]
+    }
+}
+
+impl<T> ops::IndexMut<FrameIndex> for PerFrame<T> {
+    fn index_mut(&mut self, index: FrameIndex) -> &mut Self::Output {
+        &mut self.items[index.index as usize]
     }
 }
 

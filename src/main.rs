@@ -20,10 +20,10 @@ mod camera;
 
 use ash::vk;
 use anyhow::Result;
-use glam::Vec3;
+use glam::{Vec3, Mat4};
 use winit::event::VirtualKeyCode;
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use std::path::Path;
 
 use crate::command::*;
@@ -31,7 +31,7 @@ use crate::core::*;
 use crate::text::TextPass;
 use crate::scene::{ForwardPass, Scene};
 use crate::light::{Lights, PointLight};
-use crate::camera::{Camera, CameraUniforms};
+use crate::camera::{Proj, ProjMode, View, CameraUniforms};
 use crate::skybox::Skybox;
 
 fn main() -> Result<()> {
@@ -54,11 +54,17 @@ fn main() -> Result<()> {
     let mut renderer = Renderer::new(&window)?;
     let mut input_state = InputState::default();
 
-    let mut camera = Camera::new(renderer.swapchain.aspect_ratio());
-    let camera_uniforms = CameraUniforms::new(&renderer, &camera)?;
+    let proj_mode = ProjMode::Perspective {
+        fov: 66.0
+    };
+
+    let mut proj = Proj::new(renderer.swapchain.size(), proj_mode);
+    let mut view = View::new();
+
+    let camera_uniforms = CameraUniforms::new(&renderer, &proj)?;
 
     let lights = debug_lights();
-    let mut lights = Lights::new(&renderer, &camera_uniforms, &camera, &lights)?;
+    let mut lights = Lights::new(&renderer, &camera_uniforms, &proj, &lights)?;
 
     let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
     let scene = Scene::from_scene_asset(&renderer, &scene)?;
@@ -102,19 +108,20 @@ fn main() -> Result<()> {
                 forward_pass.handle_resize(&mut renderer).expect("failed to resize forward pass");
 
                 text_pass.handle_resize(&renderer);
-                camera.update_proj(renderer.swapchain.aspect_ratio());
+                proj.update(renderer.swapchain.size());
 
                 camera_uniforms
-                    .update_proj(&renderer, &camera)
+                    .update_proj(&proj)
                     .expect("failed to update projection");
 
                 lights
-                    .handle_resize(&renderer, &camera)
+                    .handle_resize(&renderer, &proj)
                     .expect("failed to resize lights");
             }
         }
         Event::MainEventsCleared => {
-            camera.update(&mut input_state, last_update.elapsed());
+            // views[frame_index].update(&mut input_state, last_update.elapsed());
+            update_view(&mut view, &mut input_state, last_update.elapsed());
             last_update = Instant::now();
 
             if !minimized {
@@ -123,14 +130,17 @@ fn main() -> Result<()> {
 
                 let swapchain = renderer.swapchain.clone();
                 let res = renderer.draw(|recorder, frame_index, swapchain_image| {
+                    view.update();
+
                     camera_uniforms
-                        .update_view(frame_index, &camera)
+                        .update_view(frame_index, &proj, &view)
                         .expect("failed to update view");
 
                     lights.prepare_lights(frame_index, &camera_uniforms, recorder);
                     forward_pass.prepare_draw_buffers(
                         frame_index,
-                        &camera,
+                        &proj,
+                        &view,
                         &camera_uniforms,
                         recorder,
                     );
@@ -150,15 +160,15 @@ fn main() -> Result<()> {
                             recorder,
                         );
 
-                        skybox.draw(&camera, recorder); 
+                        skybox.draw(&proj, &view, recorder); 
 
                         text_pass.draw_text(recorder, frame_index, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
                             let pos = format!(
                                 "position: ({}, {}, {})",
-                                camera.pos.x,
-                                camera.pos.y,
-                                camera.pos.z,
+                                view.pos.x,
+                                view.pos.y,
+                                view.pos.z,
                             );
 
                             let primitives_drawn = format!(
@@ -219,7 +229,7 @@ fn main() -> Result<()> {
                         dst_mask: vk::AccessFlags2::empty(),
                         new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
                         image: swapchain_image.clone(),
-                        mips: 0..1,
+                        mips: swapchain_image.mip_levels(),
                     });
                 });
 
@@ -228,6 +238,44 @@ fn main() -> Result<()> {
         }
         _ => {}
     });
+}
+
+fn update_view(view: &mut View, input_state: &mut InputState, dt: Duration) {
+    let movement_speed = 15.0;
+    let rotation_speed = 1.0;
+
+    let speed = movement_speed * dt.as_secs_f32();
+
+    if input_state.is_key_pressed(VirtualKeyCode::W) {
+        view.pos += view.front * speed;
+    }
+
+    if input_state.is_key_pressed(VirtualKeyCode::S) {
+        view.pos -= view.front * speed;
+    }
+
+    if input_state.is_key_pressed(VirtualKeyCode::A) {
+        view.pos -= view.front.cross(view.up).normalize() * speed;
+    }
+
+    if input_state.is_key_pressed(VirtualKeyCode::D) {
+        view.pos += view.front.cross(view.up).normalize() * speed;
+    }
+
+    let (x_delta, y_delta) = input_state.mouse_delta();
+   
+    view.yaw += x_delta as f32 * rotation_speed;
+    view.pitch -= y_delta as f32 * rotation_speed;
+    view.pitch = view.pitch.clamp(-89.0, 89.0);
+
+    view.front = -Vec3::new(
+        f32::cos(view.yaw.to_radians()) * f32::cos(view.pitch.to_radians()),
+        f32::sin(view.pitch.to_radians()),
+        f32::sin(view.yaw.to_radians()) * f32::cos(view.pitch.to_radians()),
+    )
+    .normalize();
+
+    view.mat = Mat4::look_at_rh(view.pos, view.pos + view.front, view.up);
 }
 
 #[derive(Default)]
