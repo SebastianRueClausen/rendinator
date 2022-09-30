@@ -176,7 +176,7 @@ impl ProjUniform {
 pub struct CameraUniforms {
     pub view_buffers: PerFrame<Res<Buffer>>,
     pub proj_buffer: Res<Buffer>,
-    pub descriptors: PerFrame<Res<DescriptorSet>>,
+    pub descs: PerFrame<Res<DescSet>>,
 }
 
 impl CameraUniforms {
@@ -197,15 +197,15 @@ impl CameraUniforms {
             size: mem::size_of::<ProjUniform>() as u64,
         })?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE
                     | vk::ShaderStageFlags::FRAGMENT
                     | vk::ShaderStageFlags::VERTEX,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE
                     | vk::ShaderStageFlags::FRAGMENT
@@ -214,14 +214,14 @@ impl CameraUniforms {
             },
         ])?;
        
-        let descriptors = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(layout.clone(), &[
-                DescriptorBinding::Buffer(proj_buffer.clone()),
-                DescriptorBinding::Buffer(view_buffers[frame_index].clone()),
+        let descs = PerFrame::try_from_fn(|frame_index| {
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::Buffer(proj_buffer.clone()),
+                DescBinding::Buffer(view_buffers[frame_index].clone()),
             ])
         })?;
 
-        let uniforms = Self { view_buffers, proj_buffer, descriptors };
+        let uniforms = Self { view_buffers, proj_buffer, descs };
 
         uniforms.update_proj(renderer, camera)?;
 

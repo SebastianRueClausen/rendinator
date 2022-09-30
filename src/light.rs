@@ -236,7 +236,7 @@ pub struct Lights {
     pub light_count: u32,
     pub cluster_info: ClusterInfoBuffer,
 
-    pub descriptors: PerFrame<Res<DescriptorSet>>,
+    pub descs: PerFrame<Res<DescSet>>,
 
     cluster_update: Res<ComputePipeline>,
     light_update: Res<ComputePipeline>,
@@ -299,46 +299,46 @@ impl Lights {
             recorder.copy_buffers(light_staging.clone(), light_buffer.clone())
         })?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
         ])?;
 
-        let descriptors = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(layout.clone(), &[
-                DescriptorBinding::Buffer(cluster_info.buffer.clone()),
-                DescriptorBinding::Buffer(cluster_aabb_buffer.clone()),
-                DescriptorBinding::Buffer(light_buffer.clone()),
-                DescriptorBinding::Buffer(light_pos_buffers[frame_index].clone()),
-                DescriptorBinding::Buffer(light_mask_buffers[frame_index].clone()),
+        let descs = PerFrame::try_from_fn(|frame_index| {
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::Buffer(cluster_info.buffer.clone()),
+                DescBinding::Buffer(cluster_aabb_buffer.clone()),
+                DescBinding::Buffer(light_buffer.clone()),
+                DescBinding::Buffer(light_pos_buffers[frame_index].clone()),
+                DescBinding::Buffer(light_mask_buffers[frame_index].clone()),
             ])
         })?;
 
         let layout = pool.create_pipeline_layout(&[], &[
-            camera_uniforms.descriptors.any().layout(),
+            camera_uniforms.descs.any().layout(),
             layout,
         ])?;
 
@@ -368,12 +368,12 @@ impl Lights {
         let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
-            recorder.bind_descriptors(&DescriptorBindInfo {
+            recorder.bind_descs(&DescBindInfo {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: cluster_build.layout(),
-                descriptors: &[
-                    camera_uniforms.descriptors.any().clone(),
-                    descriptors.any().clone()
+                descs: &[
+                    camera_uniforms.descs.any().clone(),
+                    descs.any().clone()
                 ],
             });
 
@@ -391,7 +391,7 @@ impl Lights {
             light_count,
             light_update,
             cluster_update,
-            descriptors,
+            descs,
         };
 
         lights.build_clusters()?;
@@ -409,12 +409,12 @@ impl Lights {
         camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.light_update.layout(),
-            descriptors: &[
-                camera_uniforms.descriptors[frame_index].clone(),
-                self.descriptors[frame_index].clone(),
+            descs: &[
+                camera_uniforms.descs[frame_index].clone(),
+                self.descs[frame_index].clone(),
             ],
         });
 

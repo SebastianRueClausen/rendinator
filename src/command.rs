@@ -34,8 +34,10 @@ impl CommandBuffer {
             .command_pool(queue.pool)
             .command_buffer_count(1);
 
-        let handles = unsafe { device.handle.allocate_command_buffers(&info)? };
         let bound_resources = UnsafeCell::new(Vec::new());
+        let handles = unsafe {
+            device.handle.allocate_command_buffers(&info)?
+        };
 
         Ok(Self { handle: *handles.first().unwrap(), queue, device, bound_resources })
     }
@@ -152,10 +154,10 @@ pub struct ImageBlitInfo {
     pub dst_mip: u32,
 }
 
-pub struct DescriptorBindInfo<'a> {
+pub struct DescBindInfo<'a> {
     pub bind_point: vk::PipelineBindPoint,
     pub layout: Res<PipelineLayout>,
-    pub descriptors: &'a [Res<DescriptorSet>],
+    pub descs: &'a [Res<DescSet>],
 }
 
 pub struct RenderInfo {
@@ -188,8 +190,8 @@ macro_rules! impl_shared_commands {
         }
 
         #[allow(unused)]
-        pub fn bind_descriptors(&self, info: &DescriptorBindInfo) {
-            let descs: SmallVec<[_; 12]> = info.descriptors
+        pub fn bind_descs(&self, info: &DescBindInfo) {
+            let descs: SmallVec<[_; 12]> = info.descs
                 .iter()
                 .map(|desc| desc.handle)
                 .collect();
@@ -207,7 +209,7 @@ macro_rules! impl_shared_commands {
 
             self.buffer.bind_resource(info.layout.clone());
 
-            for desc in info.descriptors {
+            for desc in info.descs {
                 self.buffer.bind_resource(desc.clone());
             }
         }

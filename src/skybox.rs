@@ -100,7 +100,7 @@ impl CubeMap {
 
 struct Generator {
     pipeline: Res<ComputePipeline>,
-    descriptor: Res<DescriptorSet>,
+    descriptor: Res<DescSet>,
 
     size: u32,
 }
@@ -113,22 +113,22 @@ impl Generator {
         lights: &Lights,
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
         ])?;
 
-        let descriptor = pool.create_descriptor_set(layout.clone(), &[
-            DescriptorBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL, image_view.clone()),
-            DescriptorBinding::Buffer(lights.light_buffer.clone()),
+        let descriptor = pool.create_desc_set(layout.clone(), &[
+            DescBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL, image_view.clone()),
+            DescBinding::Buffer(lights.light_buffer.clone()),
         ])?;
 
         let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");
@@ -144,10 +144,10 @@ impl Generator {
 
     fn generate(&self, renderer: &Renderer) -> Result<()> {
         renderer.compute_with(|recorder| {
-            recorder.bind_descriptors(&DescriptorBindInfo {
+            recorder.bind_descs(&DescBindInfo {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: self.pipeline.layout(),
-                descriptors: &[self.descriptor.clone()],
+                descs: &[self.descriptor.clone()],
             });
 
             recorder.dispatch(self.pipeline.clone(), [
@@ -160,7 +160,7 @@ impl Generator {
 pub struct Skybox {
     pub cube_map: CubeMap,
     pub pipeline: Res<GraphicsPipeline>,
-    pub descriptor: Res<DescriptorSet>, 
+    pub descriptor: Res<DescSet>, 
 
     #[allow(dead_code)]
     generator: Generator,
@@ -229,16 +229,16 @@ impl Skybox {
 
         let cube_map = CubeMap::new(renderer, pool, cube_view.clone())?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
         ])?;
 
-        let descriptor = pool.create_descriptor_set(layout.clone(), &[
-            DescriptorBinding::Image(
+        let descriptor = pool.create_desc_set(layout.clone(), &[
+            DescBinding::Image(
                 sampler, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, cube_view.clone(),
             )
         ])?;
@@ -294,10 +294,10 @@ impl Skybox {
         recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
         recorder.bind_graphics_pipeline(self.pipeline.clone());
 
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
-            descriptors: &[self.descriptor.clone()],
+            descs: &[self.descriptor.clone()],
         });
 
         let transform = camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));

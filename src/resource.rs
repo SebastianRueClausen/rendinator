@@ -577,9 +577,15 @@ impl ResourcePool {
             return Err(anyhow!("shader code must be aligned to `u32`"));
         }
 
-        let code = unsafe { slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4) };
+        let code = unsafe {
+            slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4)
+        };
+
         let info = vk::ShaderModuleCreateInfo::builder().code(code);
-        let handle = unsafe { device.handle.create_shader_module(&info, None)? };
+
+        let handle = unsafe {
+            device.handle.create_shader_module(&info, None)?
+        };
 
         let Ok(entry) = CString::new(entry) else {
             return Err(anyhow!("invalid entry name `entry`"));
@@ -614,7 +620,7 @@ pub struct PipelineLayout {
     pub handle: vk::PipelineLayout,
 
     #[allow(dead_code)]
-    descriptor_layouts: SmallVec<[Res<DescriptorLayout>; 2]>,
+    desc_layouts: SmallVec<[Res<DescLayout>; 2]>,
 
     device: Rc<Device>,
 }
@@ -623,7 +629,7 @@ impl ResourcePool {
     pub fn create_pipeline_layout(
         &self,
         consts: &[vk::PushConstantRange],
-        layouts: &[Res<DescriptorLayout>],
+        layouts: &[Res<DescLayout>],
     ) -> Result<Res<PipelineLayout>> {
         let device = self.device.clone();
 
@@ -638,12 +644,12 @@ impl ResourcePool {
             device.handle.create_pipeline_layout(&info, None)?
         };
 
-        let mut descriptor_layouts = SmallVec::default();
+        let mut desc_layouts = SmallVec::default();
         for layout in layouts {
-            descriptor_layouts.push(layout.clone());
+            desc_layouts.push(layout.clone());
         }
 
-        Ok(self.alloc(PipelineLayout { handle, descriptor_layouts, device }))
+        Ok(self.alloc(PipelineLayout { handle, desc_layouts, device }))
     }
 }
 
@@ -826,16 +832,18 @@ impl GraphicsPipeline {
 
 impl Drop for GraphicsPipeline {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_pipeline(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_pipeline(self.handle, None);
+        }
     }
 }
 
-pub struct DescriptorPool {
+pub struct DescPool {
     pub handle: vk::DescriptorPool,
     device: Rc<Device>,
 }
 
-impl DescriptorPool {
+impl DescPool {
     pub fn new(
         device: Rc<Device>,
         max_sets: u32,
@@ -853,27 +861,27 @@ impl DescriptorPool {
     }
 }
 
-impl Drop for DescriptorPool {
+impl Drop for DescPool {
     fn drop(&mut self) {
         unsafe { self.device.handle.destroy_descriptor_pool(self.handle, None); }
     }
 }
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
-pub struct LayoutBinding {
+pub struct DescLayoutSlot {
     pub stage: vk::ShaderStageFlags,
     pub ty: vk::DescriptorType,
     pub array_count: Option<u32>,
 }
 
-struct LayoutBindings {
+struct DescLayoutSlots {
     bindings: SmallVec<[vk::DescriptorSetLayoutBinding; 6]>,
     flags: SmallVec<[vk::DescriptorBindingFlags; 6]>,
     variable_set_count: u32,
 }
 
-impl LayoutBindings {
-    fn new(bindings: &[LayoutBinding]) -> Self  {
+impl DescLayoutSlots {
+    fn new(bindings: &[DescLayoutSlot]) -> Self  {
         let flags = bindings
             .iter()
             .map(|binding| {
@@ -911,22 +919,22 @@ impl LayoutBindings {
     }
 }
 
-pub struct DescriptorLayout {
+pub struct DescLayout {
     pub handle: vk::DescriptorSetLayout,
-    bindings: LayoutBindings,
+    slots: DescLayoutSlots,
     device: Rc<Device>, 
 }
 
-impl DescriptorLayout {
-    pub fn new(device: Rc<Device>, bindings: &[LayoutBinding]) -> Result<Self> {
-        let bindings = LayoutBindings::new(bindings);
+impl DescLayout {
+    pub fn new(device: Rc<Device>, slots: &[DescLayoutSlot]) -> Result<Self> {
+        let slots = DescLayoutSlots::new(slots);
 
         let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
-            .binding_flags(&bindings.flags)
+            .binding_flags(&slots.flags)
             .build();
 
         let layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
-            .bindings(&bindings.bindings)
+            .bindings(&slots.bindings)
             .push_next(&mut binding_flags)
             .build();
 
@@ -934,63 +942,58 @@ impl DescriptorLayout {
             device.handle.create_descriptor_set_layout(&layout_info, None)?
         };
 
-        Ok(Self { handle, bindings, device }) 
+        Ok(Self { handle, slots, device }) 
     }
 }
 
 impl ResourcePool {
-    pub fn create_descriptor_layout(
-        &self,
-        bindings: &[LayoutBinding],
-    ) -> Result<Res<DescriptorLayout>> {
+    pub fn create_desc_layout(&self, slots: &[DescLayoutSlot]) -> Result<Res<DescLayout>> {
         let shared = unsafe {
             self.get_shared()
         };
 
-        if let Some(layout) = shared.desc_layouts.get(bindings) {
+        if let Some(layout) = shared.desc_layouts.get(slots) {
             return Ok(layout);
         }
 
         let layout = self.alloc(
-            DescriptorLayout::new(self.device.clone(), bindings)?
+            DescLayout::new(self.device.clone(), slots)?
         );
 
-        shared.desc_layouts.insert(bindings, layout.clone());
+        shared.desc_layouts.insert(slots, layout.clone());
 
         Ok(layout)
     }
 }
 
-impl Drop for DescriptorLayout {
+impl Drop for DescLayout {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_descriptor_set_layout(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_descriptor_set_layout(self.handle, None);
+        }
     }
 }
 
-pub enum DescriptorBinding<'a> {
+pub enum DescBinding<'a> {
     Buffer(Res<Buffer>),
     Image(Res<Sampler>, vk::ImageLayout, Res<ImageView>),
-    VariableImageArray(Res<Sampler>, vk::ImageLayout, &'a [Res<ImageView>]),
+    ImageArray(Res<Sampler>, vk::ImageLayout, &'a [Res<ImageView>]),
 }
 
-pub struct DescriptorSet {
+pub struct DescSet {
     pub handle: vk::DescriptorSet,
 
-    pub layout: Res<DescriptorLayout>,
-    pub pool: Rc<DescriptorPool>,
+    pub layout: Res<DescLayout>,
+    pub pool: Rc<DescPool>,
 
     #[allow(dead_code)]
     resources: SmallVec<[DummyRes; 32]>,
 }
 
 impl ResourcePool {
-    pub fn create_descriptor_set(
-        &self,
-        layout: Res<DescriptorLayout>,
-        bindings: &[DescriptorBinding],
-    ) -> Result<Res<DescriptorSet>> {
+    pub fn create_desc_set(&self, layout: Res<DescLayout>, bindings: &[DescBinding]) -> Result<Res<DescSet>> {
         let device = self.device.clone();
-        let (handle, pool) = self.descriptor_alloc(&layout)?;
+        let (handle, pool) = self.desc_alloc(&layout)?;
 
         struct Info {
             ty: vk::DescriptorType,
@@ -999,9 +1002,9 @@ impl ResourcePool {
         }
 
         let infos: SmallVec<[Info; 12]> = bindings.iter()
-            .zip(layout.bindings.iter())
+            .zip(layout.slots.iter())
             .map(|(binding, layout_binding)| match &binding {
-                DescriptorBinding::Buffer(buffer) => Info {
+                DescBinding::Buffer(buffer) => Info {
                     ty: layout_binding.descriptor_type,
                     images: smallvec![vk::DescriptorImageInfo::default()],
                     buffers: smallvec![vk::DescriptorBufferInfo {
@@ -1010,7 +1013,7 @@ impl ResourcePool {
                         offset: 0,
                     }],
                 },
-                DescriptorBinding::Image(sampler, layout, image) => Info {
+                DescBinding::Image(sampler, layout, image) => Info {
                     ty: layout_binding.descriptor_type,
                     buffers: smallvec![vk::DescriptorBufferInfo::default()],
                     images: smallvec![vk::DescriptorImageInfo {
@@ -1019,7 +1022,7 @@ impl ResourcePool {
                         image_layout: *layout,
                     }],
                 },
-                DescriptorBinding::VariableImageArray(sampler, layout, array) => Info {
+                DescBinding::ImageArray(sampler, layout, array) => Info {
                     ty: layout_binding.descriptor_type,
                     buffers: smallvec![vk::DescriptorBufferInfo::default()],
                     images: array
@@ -1055,14 +1058,14 @@ impl ResourcePool {
         let mut resources: SmallVec<[_; 32]> = SmallVec::default();
         for binding in bindings {
             match &binding {
-                DescriptorBinding::Buffer(buffer) => {
+                DescBinding::Buffer(buffer) => {
                     resources.push(buffer.create_dummy());
                 }
-                DescriptorBinding::Image(sampler, _, image) => {
+                DescBinding::Image(sampler, _, image) => {
                     resources.push(sampler.create_dummy());
                     resources.push(image.create_dummy());
                 }
-                DescriptorBinding::VariableImageArray(sampler, _, array) => {
+                DescBinding::ImageArray(sampler, _, array) => {
                     resources.push(sampler.create_dummy());
 
                     for image in *array {
@@ -1072,12 +1075,12 @@ impl ResourcePool {
             }
         }
 
-        Ok(self.alloc(DescriptorSet { layout, pool, handle, resources }))
+        Ok(self.alloc(DescSet { layout, pool, handle, resources }))
     }
 }
 
-impl DescriptorSet {
-    pub fn layout(&self) -> Res<DescriptorLayout> {
+impl DescSet {
+    pub fn layout(&self) -> Res<DescLayout> {
         self.layout.clone()
     }
 }
@@ -1263,12 +1266,12 @@ impl GpuBlocks {
 }
 
 #[derive(Default)]
-struct DescriptorPools {
-    current_pool: Option<Rc<DescriptorPool>>, 
+struct DescPools {
+    current_pool: Option<Rc<DescPool>>, 
 }
 
-impl DescriptorPools {
-    fn new_pool(device: Rc<Device>, size_factor: f32) -> Result<Rc<DescriptorPool>> {
+impl DescPools {
+    fn new_pool(device: Rc<Device>, size_factor: f32) -> Result<Rc<DescPool>> {
         let sizes = [
             vk::DescriptorPoolSize {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -1290,16 +1293,16 @@ impl DescriptorPools {
 
         let max_sets = (50.0 * size_factor) as u32;
 
-        DescriptorPool::new(device, max_sets, &sizes).map(|pool| Rc::new(pool))
+        DescPool::new(device, max_sets, &sizes).map(|pool| Rc::new(pool))
     }
 
     pub fn alloc(
         &mut self,
         device: Rc<Device>,
-        layout: &DescriptorLayout,
-    ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
+        layout: &DescLayout,
+    ) -> Result<(vk::DescriptorSet, Rc<DescPool>)> {
         let layouts = [layout.handle];
-        let set_counts = [layout.bindings.variable_set_count];
+        let set_counts = [layout.slots.variable_set_count];
 
         let mut size_factor = 1.0;
 
@@ -1341,26 +1344,26 @@ impl DescriptorPools {
 
 #[derive(PartialEq, Eq, Hash)]
 struct DescLayoutKey {
-    bindings: SmallVec<[LayoutBinding; 8]>,
+    slots: SmallVec<[DescLayoutSlot; 8]>,
 }
 
 #[derive(Default)]
 struct DescLayouts {
-    layouts: HashMap<DescLayoutKey, Res<DescriptorLayout>>, 
+    layouts: HashMap<DescLayoutKey, Res<DescLayout>>, 
 }
 
 impl DescLayouts {
-    fn insert(&mut self, bindings: &[LayoutBinding], layout: Res<DescriptorLayout>) {
+    fn insert(&mut self, bindings: &[DescLayoutSlot], layout: Res<DescLayout>) {
         let key = DescLayoutKey {
-            bindings: SmallVec::from_slice(bindings),
+            slots: SmallVec::from_slice(bindings),
         };
 
         self.layouts.insert(key, layout);
     }
 
-    fn get(&self, bindings: &[LayoutBinding]) -> Option<Res<DescriptorLayout>> {
+    fn get(&self, bindings: &[DescLayoutSlot]) -> Option<Res<DescLayout>> {
         let key = DescLayoutKey {
-            bindings: SmallVec::from_slice(bindings),
+            slots: SmallVec::from_slice(bindings),
         };
       
         self.layouts.get(&key).cloned()
@@ -1371,7 +1374,7 @@ struct SharedResources {
     /// The memory blocks where all the CPU resources are allocated.
     cpu_blocks: CpuBlocks,
     gpu_blocks: GpuBlocks,
-    descriptor_pools: DescriptorPools,
+    desc_pools: DescPools,
     desc_layouts: DescLayouts,
 }
 
@@ -1380,7 +1383,7 @@ impl SharedResources {
         Self {
             cpu_blocks: CpuBlocks::new(cpu_block_size),
             gpu_blocks: GpuBlocks::new(gpu_block_size),
-            descriptor_pools: DescriptorPools::default(),
+            desc_pools: DescPools::default(),
             desc_layouts: DescLayouts::default(),
         }
     }
@@ -1462,12 +1465,12 @@ impl ResourcePool {
     /// Allocate descriptor set.
     #[inline]
     #[must_use]
-    pub fn descriptor_alloc(
+    pub fn desc_alloc(
         &self,
-        layout: &DescriptorLayout,
-    ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
+        layout: &DescLayout,
+    ) -> Result<(vk::DescriptorSet, Rc<DescPool>)> {
         unsafe {
-            self.get_shared().descriptor_pools.alloc(self.device.clone(), layout)
+            self.get_shared().desc_pools.alloc(self.device.clone(), layout)
         }
     }
 

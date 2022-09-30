@@ -129,13 +129,13 @@ struct DepthPyramid {
     pyramids: PerFrame<Res<Image>>,
 
     /// Min sampled image array of each level in `mips`.
-    sampled: PerFrame<Res<DescriptorSet>>,
+    sampled: PerFrame<Res<DescSet>>,
 
     /// Storage image array of each level in `mips`, besides level 0.
-    storage: PerFrame<Res<DescriptorSet>>,
+    storage: PerFrame<Res<DescSet>>,
 
     /// Descriptor of `depth_staging` and the depth image.
-    resolve_descs: PerFrame<Res<DescriptorSet>>,
+    resolve_descs: PerFrame<Res<DescSet>>,
 
     reduce: Res<ComputePipeline>,
     resolve: Res<ComputePipeline>,
@@ -234,8 +234,8 @@ impl DepthPyramid {
 
         let min_sampler = pool.create_sampler(vk::SamplerReductionMode::MIN)?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: Some(mip_levels + 1),
@@ -243,8 +243,8 @@ impl DepthPyramid {
         ])?;
 
         let sampled = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(layout.clone(), &[
-                DescriptorBinding::VariableImageArray(
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::ImageArray(
                     min_sampler.clone(),
                     vk::ImageLayout::GENERAL,
                     &mips[frame_index],
@@ -254,8 +254,8 @@ impl DepthPyramid {
 
         let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: Some(mip_levels),
@@ -263,8 +263,8 @@ impl DepthPyramid {
         ])?;
 
         let storage = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(layout.clone(), &[
-                DescriptorBinding::VariableImageArray(
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::ImageArray(
                     sampler.clone(),
                     vk::ImageLayout::GENERAL,
                     &mips[frame_index][1..],
@@ -272,13 +272,13 @@ impl DepthPyramid {
             ])
         })?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
@@ -288,11 +288,11 @@ impl DepthPyramid {
         let image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
 
         let resolve_descs = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(layout.clone(), &[
-                DescriptorBinding::Image(sampler.clone(), image_layout,
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::Image(sampler.clone(), image_layout,
                     depth_images[frame_index].clone(),
                 ),
-                DescriptorBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL,
+                DescBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL,
                     stagings[frame_index].clone(),
                 ),
             ])
@@ -377,10 +377,10 @@ impl DepthPyramid {
             mips: self.stagings[frame_index].image().mip_levels(),
         });
 
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.resolve.layout(),
-            descriptors: &[
+            descs: &[
                 self.resolve_descs[frame_index].clone()
             ],
         });
@@ -418,10 +418,10 @@ impl DepthPyramid {
         // Reduce from each level to the next in depth pyramid.
         //
 
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.reduce.layout(),
-            descriptors: &[
+            descs: &[
                 self.sampled[frame_index].clone(),
                 self.storage[frame_index].clone(),
             ],
@@ -458,12 +458,11 @@ impl DepthPyramid {
                 mips: target..target + 1,
             });
         }
-
     }
 }
 
 pub struct ForwardPass {
-    descriptors: PerFrame<Res<DescriptorSet>>,
+    descs: PerFrame<Res<DescSet>>,
 
     pub depth_images: PerFrame<Res<ImageView>>,
     pub color_images: PerFrame<Res<ImageView>>,
@@ -546,48 +545,48 @@ impl ForwardPass {
 
         let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
 
-        let layout = pool.create_descriptor_layout(&[
-            LayoutBinding {
+        let layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::VERTEX
                     | vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::VERTEX,
                 array_count: None,
             },
-            LayoutBinding {
+            DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
                 stage: vk::ShaderStageFlags::FRAGMENT,
                 array_count: Some(scene.textures.len() as u32),
             },
         ])?;
 
-        let descriptors = PerFrame::try_from_fn(|frame_index| {
-            pool.create_descriptor_set(layout.clone(), &[
-                DescriptorBinding::Buffer(scene.instance_buffer.clone()),
-                DescriptorBinding::Buffer(draw_buffers[frame_index].clone()),
-                DescriptorBinding::Buffer(scene.primitive_buffer.clone()),
-                DescriptorBinding::Buffer(draw_count_buffers[frame_index].clone()),
-                DescriptorBinding::Buffer(scene.vertex_buffer.clone()),
-                DescriptorBinding::VariableImageArray(
+        let descs = PerFrame::try_from_fn(|frame_index| {
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::Buffer(scene.instance_buffer.clone()),
+                DescBinding::Buffer(draw_buffers[frame_index].clone()),
+                DescBinding::Buffer(scene.primitive_buffer.clone()),
+                DescBinding::Buffer(draw_count_buffers[frame_index].clone()),
+                DescBinding::Buffer(scene.vertex_buffer.clone()),
+                DescBinding::ImageArray(
                     sampler.clone(),
                     vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     &scene.textures,
@@ -614,9 +613,9 @@ impl ForwardPass {
                 .depth_test_enable(true);
 
             let layout = pool.create_pipeline_layout(&[], &[
-                camera_uniforms.descriptors.any().layout(),
-                lights.descriptors.any().layout(),
-                descriptors.any().layout(),
+                camera_uniforms.descs.any().layout(),
+                lights.descs.any().layout(),
+                descs.any().layout(),
             ])?;
 
             pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
@@ -642,8 +641,8 @@ impl ForwardPass {
                 .build()];
 
             let layout = pool.create_pipeline_layout(&push_consts, &[
-                camera_uniforms.descriptors.any().layout(),
-                descriptors.any().layout(),
+                camera_uniforms.descs.any().layout(),
+                descs.any().layout(),
                 depth_pyramid.sampled.any().layout(),
             ])?;
 
@@ -658,7 +657,7 @@ impl ForwardPass {
             draw_buffers,
             draw_count_buffers,
             draw_count_host_buffers,
-            descriptors,
+            descs,
             render_target_info,
             cull,
             render,
@@ -695,12 +694,12 @@ impl ForwardPass {
         // Frustrum cull and generate draw buffers.
         //
 
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.cull.layout(),
-            descriptors: &[
-                camera_uniforms.descriptors[frame_index].clone(),
-                self.descriptors[frame_index].clone(),
+            descs: &[
+                camera_uniforms.descs[frame_index].clone(),
+                self.descs[frame_index].clone(),
                 self.depth_pyramid.sampled[frame_index].clone(),
             ],
         });
@@ -754,13 +753,13 @@ impl ForwardPass {
         recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
         recorder.bind_graphics_pipeline(self.render.clone());
 
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.render.layout(),
-            descriptors: &[
-                camera_uniforms.descriptors[frame_index].clone(),
-                lights.descriptors[frame_index].clone(),
-                self.descriptors[frame_index].clone(),
+            descs: &[
+                camera_uniforms.descs[frame_index].clone(),
+                lights.descs[frame_index].clone(),
+                self.descs[frame_index].clone(),
             ],
         });
         

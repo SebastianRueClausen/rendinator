@@ -20,7 +20,7 @@ struct Vertex {
 
 pub struct TextPass {
     pub pipeline: Res<GraphicsPipeline>,
-    pub descriptor: Res<DescriptorSet>,
+    pub desc: Res<DescSet>,
 
     vertex_buffers: PerFrame<Res<Buffer>>,
     index_buffers: PerFrame<Res<Buffer>>,
@@ -114,14 +114,14 @@ impl TextPass {
             });
         })?;
 
-        let layout = pool.create_descriptor_layout(&[LayoutBinding {
+        let layout = pool.create_desc_layout(&[DescLayoutSlot {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
             stage: vk::ShaderStageFlags::FRAGMENT,
             array_count: None,
         }])?;
 
-        let descriptor = pool.create_descriptor_set(layout.clone(), &[
-            DescriptorBinding::Image(
+        let desc = pool.create_desc_set(layout.clone(), &[
+            DescBinding::Image(
                 sampler.clone(),
                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                 view.clone()
@@ -146,7 +146,7 @@ impl TextPass {
             .build()];
 
         let layout = pool.create_pipeline_layout(&push_consts, &[
-            descriptor.layout.clone(),
+            desc.layout.clone(),
         ])?;
 
         let pipeline = pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
@@ -185,7 +185,7 @@ impl TextPass {
 
         let proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
 
-        Ok(Self { text_objects, proj, pipeline, descriptor, index_buffers, vertex_buffers })
+        Ok(Self { text_objects, proj, pipeline, desc, index_buffers, vertex_buffers })
     }
 
     pub fn handle_resize(&mut self, renderer: &Renderer) {
@@ -222,10 +222,10 @@ impl TextPass {
             .fill_range(0..index_size, index_data);
 
         recorder.bind_graphics_pipeline(self.pipeline.clone());
-        recorder.bind_descriptors(&DescriptorBindInfo {
+        recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),
-            descriptors: &[self.descriptor.clone()],
+            descs: &[self.desc.clone()],
         });
 
         recorder.bind_index_buffer(self.index_buffers[frame_index].clone(), vk::IndexType::UINT16);
