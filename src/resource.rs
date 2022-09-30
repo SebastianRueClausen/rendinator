@@ -2,6 +2,7 @@ use anyhow::Result;
 use smallvec::{smallvec, SmallVec};
 use ash::vk;
 
+use std::collections::HashMap;
 use std::ffi::CString;
 use std::{array, ops, slice, alloc, mem};
 use std::rc::Rc;
@@ -189,11 +190,9 @@ impl ResourcePool {
                 .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
             let (block, range) = self.gpu_alloc(memory_type, req.size, req.alignment)?;
-
             let range = range.start..range.start + info.size;
 
             self.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
-
             self.alloc(Buffer { handle, range, block, device: self.device.clone() })
         };
 
@@ -860,6 +859,7 @@ impl Drop for DescriptorPool {
     }
 }
 
+#[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub struct LayoutBinding {
     pub stage: vk::ShaderStageFlags,
     pub ty: vk::DescriptorType,
@@ -917,24 +917,47 @@ pub struct DescriptorLayout {
     device: Rc<Device>, 
 }
 
-impl ResourcePool {
-    pub fn create_descriptor_layout(
-        &self,
-        bindings: &[LayoutBinding],
-    ) -> Result<Res<DescriptorLayout>> {
-        let device = self.device.clone();
+impl DescriptorLayout {
+    pub fn new(device: Rc<Device>, bindings: &[LayoutBinding]) -> Result<Self> {
         let bindings = LayoutBindings::new(bindings);
 
         let mut binding_flags = vk::DescriptorSetLayoutBindingFlagsCreateInfo::builder()
             .binding_flags(&bindings.flags)
             .build();
+
         let layout_info = vk::DescriptorSetLayoutCreateInfo::builder()
             .bindings(&bindings.bindings)
             .push_next(&mut binding_flags)
             .build();
-        let handle = unsafe { device.handle.create_descriptor_set_layout(&layout_info, None)? };
 
-        Ok(self.alloc(DescriptorLayout { handle, bindings, device }))
+        let handle = unsafe {
+            device.handle.create_descriptor_set_layout(&layout_info, None)?
+        };
+
+        Ok(Self { handle, bindings, device }) 
+    }
+}
+
+impl ResourcePool {
+    pub fn create_descriptor_layout(
+        &self,
+        bindings: &[LayoutBinding],
+    ) -> Result<Res<DescriptorLayout>> {
+        let shared = unsafe {
+            self.get_shared()
+        };
+
+        if let Some(layout) = shared.desc_layouts.get(bindings) {
+            return Ok(layout);
+        }
+
+        let layout = self.alloc(
+            DescriptorLayout::new(self.device.clone(), bindings)?
+        );
+
+        shared.desc_layouts.insert(bindings, layout.clone());
+
+        Ok(layout)
     }
 }
 
@@ -1316,19 +1339,49 @@ impl DescriptorPools {
     }
 }
 
+#[derive(PartialEq, Eq, Hash)]
+struct DescLayoutKey {
+    bindings: SmallVec<[LayoutBinding; 8]>,
+}
+
+#[derive(Default)]
+struct DescLayouts {
+    layouts: HashMap<DescLayoutKey, Res<DescriptorLayout>>, 
+}
+
+impl DescLayouts {
+    fn insert(&mut self, bindings: &[LayoutBinding], layout: Res<DescriptorLayout>) {
+        let key = DescLayoutKey {
+            bindings: SmallVec::from_slice(bindings),
+        };
+
+        self.layouts.insert(key, layout);
+    }
+
+    fn get(&self, bindings: &[LayoutBinding]) -> Option<Res<DescriptorLayout>> {
+        let key = DescLayoutKey {
+            bindings: SmallVec::from_slice(bindings),
+        };
+      
+        self.layouts.get(&key).cloned()
+    }
+}
+
 struct SharedResources {
     /// The memory blocks where all the CPU resources are allocated.
-    cpu_blocks: UnsafeCell<CpuBlocks>,
-    gpu_blocks: UnsafeCell<GpuBlocks>,
-    descriptor_pools: UnsafeCell<DescriptorPools>,
+    cpu_blocks: CpuBlocks,
+    gpu_blocks: GpuBlocks,
+    descriptor_pools: DescriptorPools,
+    desc_layouts: DescLayouts,
 }
 
 impl SharedResources {
     fn new(cpu_block_size: usize, gpu_block_size: vk::DeviceSize) -> Self {
         Self {
-            cpu_blocks: UnsafeCell::new(CpuBlocks::new(cpu_block_size)),
-            gpu_blocks: UnsafeCell::new(GpuBlocks::new(gpu_block_size)),
-            descriptor_pools: UnsafeCell::new(DescriptorPools::default()),
+            cpu_blocks: CpuBlocks::new(cpu_block_size),
+            gpu_blocks: GpuBlocks::new(gpu_block_size),
+            descriptor_pools: DescriptorPools::default(),
+            desc_layouts: DescLayouts::default(),
         }
     }
 }
@@ -1345,7 +1398,7 @@ impl SharedResources {
 /// of scope.
 #[derive(Clone)]
 pub struct ResourcePool {
-    shared: Rc<SharedResources>,
+    shared: Rc<UnsafeCell<SharedResources>>,
     device: Rc<Device>,
 }
 
@@ -1379,7 +1432,15 @@ impl ResourcePool {
         cpu_block_size: usize,
         gpu_block_size: vk::DeviceSize,
     ) -> Self {
-        Self { device, shared: Rc::new(SharedResources::new(cpu_block_size, gpu_block_size)) }
+        let shared = Rc::new(
+            UnsafeCell::new(SharedResources::new(cpu_block_size, gpu_block_size))
+        );
+
+        Self { device, shared }
+    }
+
+    unsafe fn get_shared(&self) -> &mut SharedResources {
+        self.shared.get().as_mut().unwrap_unchecked()
     }
 
     /// Allocate block of GPU memory.
@@ -1394,8 +1455,7 @@ impl ResourcePool {
         trace!("allocating {size} bytes on the GPU");
 
         unsafe {
-            (*self.shared.gpu_blocks.get())
-                .alloc(self.device.clone(), memory_type, size, alignment)
+            self.get_shared().gpu_blocks.alloc(self.device.clone(), memory_type, size, alignment)
         }
     }
 
@@ -1407,7 +1467,7 @@ impl ResourcePool {
         layout: &DescriptorLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescriptorPool>)> {
         unsafe {
-            (*self.shared.descriptor_pools.get()).alloc(self.device.clone(), layout)
+            self.get_shared().descriptor_pools.alloc(self.device.clone(), layout)
         }
     }
 
@@ -1417,7 +1477,7 @@ impl ResourcePool {
     pub fn alloc<T>(&self, val: T) -> Res<T> {
         // SAFETY: `cpu_blocks` is only used here, and is therefore never borrowed.
         let ptr = unsafe {
-            (*self.shared.cpu_blocks.get()).alloc::<T>(val)
+            self.get_shared().cpu_blocks.alloc::<T>(val)
         };
 
         Res { ptr }
