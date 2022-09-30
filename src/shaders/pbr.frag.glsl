@@ -6,6 +6,7 @@
 
 #include "light.glsl"
 #include "tonemap.glsl"
+#include "camera.glsl"
 
 #ifdef CLUSTER_DEBUG
 #include "cluster_debug.glsl"
@@ -13,16 +14,12 @@
 
 #include "brdf.glsl"
 
-layout (std140, set = 0, binding = 0) readonly uniform Proj {
-	mat4 proj;
-	mat4 inverse_proj;
-	vec2 screen_dimensions;
+layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
+	Proj proj;
 };
 
-layout (std140, set = 0, binding = 1) readonly uniform View {
-	vec4 eye;
-	mat4 view;
-	mat4 proj_view;
+layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
+	View view;
 };
 
 layout (std140, set = 1, binding = 0) readonly uniform Cluster {
@@ -74,7 +71,7 @@ void main() {
 			+ normal.z * normalize(in_world_normal)
 	);
 
-	const vec3 view_dir = normalize(eye.xyz - in_world_position.xyz);
+	const vec3 view_dir = normalize(view.eye.xyz - in_world_position.xyz);
 	const float norm_dot_view = clamp(dot(normal, view_dir), 0.0001, 1.0);
 
 	const vec3 diffuse_albedo = (1.0 - metallic) * albedo;

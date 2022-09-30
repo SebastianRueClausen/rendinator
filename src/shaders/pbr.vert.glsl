@@ -6,11 +6,10 @@
 #extension GL_EXT_shader_16bit_storage: require
 
 #include "mesh.glsl"
+#include "camera.glsl"
 
-layout (set = 0, binding = 1) uniform View {
-	vec4 eye;
-	mat4 view;
-	mat4 proj_view;
+layout (set = 0, binding = 1) uniform ViewBuf {
+	View view;
 };
 
 layout (std430, set = 2, binding = 0) buffer Instances {
@@ -65,7 +64,7 @@ void main() {
 	out_world_bitangent = float(verts[gl_VertexIndex].tangent.w) * cross(out_world_tangent, out_world_normal);
 
 	out_world_position = world;
-	out_view_z = (view * world).z;
+	out_view_z = (view.mat * world).z;
 
-	gl_Position = proj_view * world;
+	gl_Position = view.proj_view * world;
 }

@@ -112,43 +112,6 @@ pub fn frustrum_planes(proj: &Proj, view: &View) -> [Vec4; 6] {
     planes.map(|plane| plane / plane.truncate().length())
 }
 
-/*
-pub fn update(&mut self, input_state: &mut InputState, dt: Duration) {
-    let speed = self.movement_speed * dt.as_secs_f32();
-
-    if input_state.is_key_pressed(VirtualKeyCode::W) {
-        self.pos += self.front * speed;
-    }
-
-    if input_state.is_key_pressed(VirtualKeyCode::S) {
-        self.pos -= self.front * speed;
-    }
-
-    if input_state.is_key_pressed(VirtualKeyCode::A) {
-        self.pos -= self.front.cross(self.up).normalize() * speed;
-    }
-
-    if input_state.is_key_pressed(VirtualKeyCode::D) {
-        self.pos += self.front.cross(self.up).normalize() * speed;
-    }
-
-    let (x_delta, y_delta) = input_state.mouse_delta();
-   
-    self.yaw += x_delta as f32 * self.rotation_speed;
-    self.pitch -= y_delta as f32 * self.rotation_speed;
-    self.pitch = self.pitch.clamp(-89.0, 89.0);
-
-    self.front = -Vec3::new(
-        f32::cos(self.yaw.to_radians()) * f32::cos(self.pitch.to_radians()),
-        f32::sin(self.pitch.to_radians()),
-        f32::sin(self.yaw.to_radians()) * f32::cos(self.pitch.to_radians()),
-    )
-    .normalize();
-
-    self.view = Mat4::look_at_rh(self.pos, self.pos + self.front, self.up);
-}
-*/
-
 /// Data related to the camera view. This is updated every frame and has a copy per frame in
 /// flight.
 #[repr(C)]
@@ -156,8 +119,10 @@ pub fn update(&mut self, input_state: &mut InputState, dt: Duration) {
 pub struct ViewUniform {
     /// The position of the camera in world space.
     eye: Vec4,
+
     /// The view matrix.
     view: Mat4,
+
     /// `proj * view`. This is cached to save a dot product between two 4x4 matrices
     /// for each vertex.
     proj_view: Mat4,
@@ -179,25 +144,27 @@ impl ViewUniform {
 pub struct ProjUniform {
     /// The projection matrix.
     proj: Mat4,
+
     /// The inverse projection.
     ///
     /// Used to transform points from screen to view space.
     inverse_proj: Mat4,
+
     /// The screen dimensions.
     surface_size: Vec2,
-    /// z near and z far.
-    z_plane: Vec2,
+
+    z_near: f32,
+    z_far: f32,
 }
 
 impl ProjUniform {
     pub fn new(proj: &Proj) -> Self {
-        let z_plane = Vec2::new(proj.z_near, proj.z_far);
-
         Self {
             proj: proj.mat,
             inverse_proj: proj.inverse_mat,
             surface_size: proj.surface_size,
-            z_plane,
+            z_near: proj.z_near,
+            z_far: proj.z_far,
         }
     }
 }

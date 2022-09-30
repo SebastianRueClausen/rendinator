@@ -90,17 +90,11 @@ struct DrawCount {
 struct CullInfo {
     frustrum_planes: [Vec4; 6],
 
-    z_near: f32,
-    z_far: f32,
-
     lod_base: f32,
     lod_step: f32,
 
     pyramid_width: f32,
     pyramid_height: f32,
-
-    _pad1: f32,
-    _pad2: f32,
 }
 
 #[repr(C)]
@@ -706,9 +700,6 @@ impl ForwardPass {
         });
 
         let cull_info = CullInfo {
-            z_near: proj.z_near,
-            z_far: proj.z_far,
-
             frustrum_planes: camera::frustrum_planes(proj, view),
 
             pyramid_width: self.depth_pyramid.width as f32,
@@ -716,9 +707,6 @@ impl ForwardPass {
 
             lod_base: 10.0,
             lod_step: 2.0,
-
-            _pad1: 0.0,
-            _pad2: 0.0,
         };
 
         recorder.push_consts(

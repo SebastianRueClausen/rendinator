@@ -2,15 +2,14 @@
 #pragma shader_stage(compute)
 
 #include "light.glsl"
+#include "camera.glsl"
 
 const uint THREAD_COUNT = 64;
 
 layout (local_size_x = THREAD_COUNT, local_size_y = 1, local_size_z = 1) in;
 
-layout (std140, set = 0, binding = 1) readonly uniform View {
-	vec4 eye;
-	mat4 view;
-	mat4 proj_view;
+layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
+	View view;
 };
 
 layout (std430, set = 1, binding = 2) readonly buffer Lights {
@@ -31,7 +30,7 @@ void main() {
 		const PointLight light = point_lights[light_index];
 
 		light_positions[light_index] = LightPos(
-			(view * light.pos).xyz,
+			(view.mat * light.pos).xyz,
 			light.radius
 		);
 	}

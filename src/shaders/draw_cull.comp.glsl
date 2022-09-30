@@ -11,6 +11,7 @@
 #define OCCLUSION_CULL
 
 #include "mesh.glsl"
+#include "camera.glsl"
 
 const uint THREAD_COUNT = 64;
 
@@ -18,9 +19,6 @@ layout (local_size_x = THREAD_COUNT) in;
 
 layout (std430, push_constant) uniform CullInfo {
 	vec4 frust_planes[6];
-
-	float z_near;
-	float z_far;
 
 	float lod_base;
 	float lod_step;
@@ -30,16 +28,12 @@ layout (std430, push_constant) uniform CullInfo {
 
 } cull_info;
 
-layout (std140, set = 0, binding = 0) readonly uniform Proj {
-	mat4 proj;
-	mat4 inverse_proj;
-	vec2 screen_dimensions;
+layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
+	Proj proj;
 };
 
-layout (std140, set = 0, binding = 1) readonly uniform View {
-	vec4 eye;
-	mat4 view;
-	mat4 proj_view;
+layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
+	View view;
 };
 
 layout (std430, set = 1, binding = 0) readonly buffer Instances {
@@ -62,10 +56,10 @@ layout (std430, set = 1, binding = 3) buffer DrawCount {
 layout (set = 2, binding = 0) uniform sampler2D depth_pyramid[];
 
 bool project_sphere(const vec3 center, const float radius, out vec4 aabb) {
-	if (center.z < radius + cull_info.z_near) return false;
+	if (center.z < radius + proj.z_near) return false;
 
-	const float p00 = proj[0][0];
-	const float p11 = proj[1][1];
+	const float p00 = proj.mat[0][0];
+	const float p11 = proj.mat[1][1];
 
 	const vec2 cx = -center.xz;
 	const vec2 vx = vec2(sqrt(dot(cx, cx) - radius * radius), radius);
@@ -137,7 +131,7 @@ void main() {
 
 #ifdef OCCLUSION_CULL
 	vec4 aabb;
-	vec3 view_center = (view * vec4(center, 1.0)).xyz;
+	vec3 view_center = (view.mat * vec4(center, 1.0)).xyz;
 
 	view_center.y *= -1;
 	view_center.z *= -1;
@@ -149,7 +143,7 @@ void main() {
 		const uint level = uint(log2(max(width, height))) + 1;
 
 		const float depth = texture(depth_pyramid[level], (aabb.xy + aabb.zw) * 0.5).r;
-		const float depth_sphere = cull_info.z_near / (view_center.z - radius);
+		const float depth_sphere = proj.z_near / (view_center.z - radius);
 
 		visible = visible && depth_sphere > depth;
 	}
