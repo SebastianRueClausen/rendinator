@@ -327,7 +327,6 @@ impl DepthPyramid {
             pool.create_compute_pipeline(layout, shader)?
         };
 
-
         Ok(Self {
             resolve,
             reduce,
@@ -455,7 +454,54 @@ impl DepthPyramid {
     }
 }
 
+struct SceneView {
+    draw_buffer: Res<Buffer>,
+    draw_count_buffer: Res<Buffer>,
+    draw_count_host_buffer: Res<Buffer>,
+}
+
+impl SceneView {
+    fn new(renderer: &Renderer, scene: &Scene) -> Result<Self> {
+        let pool = &renderer.static_pool;
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+
+        let draw_count_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::INDIRECT_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_SRC,
+            size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+        })?;
+
+        let draw_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                | vk::BufferUsageFlags::TRANSFER_DST
+                | vk::BufferUsageFlags::INDIRECT_BUFFER,
+            size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
+        })?;
+
+        let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
+            | vk::MemoryPropertyFlags::HOST_COHERENT;
+
+        let draw_count_host_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+        })?;
+
+        renderer.transfer_with(|recorder| {
+            recorder.update_buffer(draw_count_buffer.clone(), &DrawCount {
+                primitive_count: scene.primitive_count(),
+                command_count: 0,
+            });
+        })?;
+
+        Ok(Self { draw_count_buffer, draw_buffer, draw_count_host_buffer })
+    }
+}
+
 pub struct ForwardPass {
+    scene_views: PerFrame<SceneView>,
+
     descs: PerFrame<Res<DescSet>>,
 
     pub depth_images: PerFrame<Res<ImageView>>,
@@ -465,15 +511,6 @@ pub struct ForwardPass {
     cull: Res<ComputePipeline>,
 
     depth_pyramid: DepthPyramid,
-
-    /// Contains [`DrawCommand`] used for draw indirect count commands.
-    draw_buffers: PerFrame<Res<Buffer>>,
-
-    /// Contains [`DrawCount`] used for draw indirect count commands.
-    draw_count_buffers: PerFrame<Res<Buffer>>,
-
-    /// Small host buffer to copy `draw_count_buffers` into to access amount of primitives drawn.
-    draw_count_host_buffers: PerFrame<Res<Buffer>>,
 
     render_target_info: RenderTargetInfo,
     primitive_count: u32,
@@ -496,45 +533,8 @@ impl ForwardPass {
 
         let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
 
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let draw_count_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_DST
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_SRC,
-                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
-            })
-        })?;
-
-        let draw_count_host_buffers = PerFrame::try_from_fn(|_| {
-            let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
-                | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-            pool.create_buffer(memory_flags, &BufferInfo {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
-            })
-        })?;
-
-        renderer.transfer_with(|recorder| {
-            let draw_count = DrawCount {
-                command_count: 0,
-                primitive_count: scene.primitive_count(),
-            };
-
-            for buffer in &draw_count_buffers {
-                recorder.update_buffer(buffer.clone(), &draw_count);
-            }
-        })?;
-
-        let draw_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                    | vk::BufferUsageFlags::TRANSFER_DST
-                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
-                size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
-            })
+        let scene_views = PerFrame::try_from_fn(|_| {
+            SceneView::new(renderer, scene)
         })?;
 
         let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
@@ -574,16 +574,16 @@ impl ForwardPass {
         ])?;
 
         let descs = PerFrame::try_from_fn(|frame_index| {
+            let view = &scene_views[frame_index];
+
             pool.create_desc_set(layout.clone(), &[
                 DescBinding::Buffer(scene.instance_buffer.clone()),
-                DescBinding::Buffer(draw_buffers[frame_index].clone()),
+                DescBinding::Buffer(view.draw_buffer.clone()),
                 DescBinding::Buffer(scene.primitive_buffer.clone()),
-                DescBinding::Buffer(draw_count_buffers[frame_index].clone()),
+                DescBinding::Buffer(view.draw_count_buffer.clone()),
                 DescBinding::Buffer(scene.vertex_buffer.clone()),
                 DescBinding::ImageArray(
-                    sampler.clone(),
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    &scene.textures,
+                    sampler.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, &scene.textures,
                 ),
             ])
         })?;
@@ -645,14 +645,12 @@ impl ForwardPass {
 
         Ok(Self {
             primitive_count: scene.primitive_count(),
+            render_target_info,
             depth_images,
             color_images,
             depth_pyramid,
-            draw_buffers,
-            draw_count_buffers,
-            draw_count_host_buffers,
+            scene_views,
             descs,
-            render_target_info,
             cull,
             render,
         })
@@ -670,15 +668,15 @@ impl ForwardPass {
         camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {
-        let draw_count = DrawCount {
-            command_count: 0,
-            primitive_count: self.primitive_count,
-        };
+        let scene_view = &self.scene_views[frame_index];
 
-        recorder.update_buffer(self.draw_count_buffers[frame_index].clone(), &draw_count);
+        recorder.update_buffer(scene_view.draw_count_buffer.clone(), &DrawCount {
+            primitive_count: self.primitive_count,
+            command_count: 0,
+        });
 
         recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: self.draw_count_buffers[frame_index].clone(),
+            buffer: scene_view.draw_count_buffer.clone(),
             src_mask: vk::AccessFlags2::TRANSFER_WRITE,
             dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
             src_stage: vk::PipelineStageFlags2::TRANSFER,
@@ -721,7 +719,7 @@ impl ForwardPass {
         ]);
 
         recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: self.draw_buffers[frame_index].clone(),
+            buffer: scene_view.draw_buffer.clone(),
             src_mask: vk::AccessFlags2::SHADER_WRITE,
             dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
             src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
@@ -739,6 +737,8 @@ impl ForwardPass {
         lights: &Lights,
         recorder: &DrawRecorder,
     ) {
+        let scene_view = &self.scene_views[frame_index];
+
         recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
         recorder.bind_graphics_pipeline(self.render.clone());
 
@@ -754,8 +754,8 @@ impl ForwardPass {
         
         recorder.draw_indexed_indirect_count(&IndexedIndirectDrawInfo {
             draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
-            draw_buffer: self.draw_buffers[frame_index].clone(),
-            count_buffer: self.draw_count_buffers[frame_index].clone(),
+            draw_buffer: scene_view.draw_buffer.clone(),
+            count_buffer: scene_view.draw_count_buffer.clone(),
             max_draw_count: self.primitive_count,
             count_offset: 0,
             draw_offset: 0,
@@ -781,10 +781,14 @@ impl ForwardPass {
     }
 
     pub fn primitives_drawn(&self, renderer: &Renderer, frame_index: FrameIndex) -> Result<u32> {
-        let src = self.draw_count_buffers[frame_index].clone();
-        let dst = self.draw_count_host_buffers[frame_index].clone();
+        let scene_view = &self.scene_views[frame_index];
 
-        renderer.transfer_with(|recorder| recorder.copy_buffers(src.clone(), dst.clone()))?;
+        let src = scene_view.draw_count_buffer.clone();
+        let dst = scene_view.draw_count_host_buffer.clone();
+
+        renderer.transfer_with(|recorder| {
+            recorder.copy_buffers(src.clone(), dst.clone())
+        })?;
 
         let mapped = dst.get_mapped()?;
         let count: &DrawCount = bytemuck::from_bytes(mapped.as_slice());
