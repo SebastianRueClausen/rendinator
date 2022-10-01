@@ -133,13 +133,12 @@ impl TextPass {
         let vertex_shader = pool.create_shader_module("main", vertex_code)?;
         let fragment_shader = pool.create_shader_module("main", fragment_code)?;
 
-        let push_consts = [vk::PushConstantRange::builder()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .size(mem::size_of::<Mat4>() as u32)
-            .offset(0)
-            .build()];
+        let const_ranges = [PushConstRange {
+            size: mem::size_of::<Mat4>() as vk::DeviceSize,
+            stage: vk::ShaderStageFlags::VERTEX,
+        }];
 
-        let layout = pool.create_pipeline_layout(&push_consts, &[
+        let layout = pool.create_pipeline_layout(&const_ranges, &[
             desc.layout.clone(),
         ])?;
 

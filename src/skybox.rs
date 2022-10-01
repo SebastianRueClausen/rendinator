@@ -238,13 +238,12 @@ impl Skybox {
             )
         ])?;
 
-        let push_consts = [vk::PushConstantRange::builder()
-            .stage_flags(vk::ShaderStageFlags::VERTEX)
-            .size(mem::size_of::<Mat4>() as u32)
-            .offset(0)
-            .build()];
+        let const_ranges = [PushConstRange {
+            size: mem::size_of::<Mat4>() as vk::DeviceSize,
+            stage: vk::ShaderStageFlags::VERTEX,
+        }];
 
-        let layout = pool.create_pipeline_layout(&push_consts, &[layout.clone()])?;
+        let layout = pool.create_pipeline_layout(&const_ranges, &[layout.clone()])?;
 
         let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
             .depth_test_enable(true)

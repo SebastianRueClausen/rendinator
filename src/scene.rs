@@ -297,13 +297,12 @@ impl DepthPyramid {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_resolve.comp.spv");
             let shader = pool.create_shader_module("main", code)?;
 
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<DepthResolveInfo>() as u32)
-                .offset(0)
-                .build()];
+            let const_ranges = [PushConstRange {
+                size: mem::size_of::<DepthResolveInfo>() as vk::DeviceSize,
+                stage: vk::ShaderStageFlags::COMPUTE,
+            }];
 
-            let layout = pool.create_pipeline_layout(&push_consts, &[
+            let layout = pool.create_pipeline_layout(&const_ranges, &[
                 resolve_descs.any().layout(),
             ])?;
 
@@ -314,13 +313,12 @@ impl DepthPyramid {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_reduce.comp.spv");
             let shader = pool.create_shader_module("main", code)?;
 
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<DepthReduceInfo>() as u32)
-                .offset(0)
-                .build()];
+            let const_ranges = [PushConstRange {
+                size: mem::size_of::<DepthReduceInfo>() as vk::DeviceSize,
+                stage: vk::ShaderStageFlags::COMPUTE,
+            }];
 
-            let layout = pool.create_pipeline_layout(&push_consts, &[
+            let layout = pool.create_pipeline_layout(&const_ranges, &[
                 sampled.any().layout(),
                 storage.any().layout(),
             ])?;
@@ -641,13 +639,12 @@ impl ForwardPass {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
             let shader = pool.create_shader_module("main", code)?;
 
-            let push_consts = [vk::PushConstantRange::builder()
-                .stage_flags(vk::ShaderStageFlags::COMPUTE)
-                .size(mem::size_of::<CullInfo>() as u32)
-                .offset(0)
-                .build()];
+            let const_ranges = [PushConstRange {
+                size: mem::size_of::<CullInfo>() as vk::DeviceSize,
+                stage: vk::ShaderStageFlags::COMPUTE,
+            }];
 
-            let layout = pool.create_pipeline_layout(&push_consts, &[
+            let layout = pool.create_pipeline_layout(&const_ranges, &[
                 scene_views.any().camera_desc.layout(),
                 scene_views.any().desc.layout(),
                 scene.desc.layout(),

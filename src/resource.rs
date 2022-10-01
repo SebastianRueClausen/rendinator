@@ -125,7 +125,10 @@ pub struct MemoryBlock {
 
 impl MemoryBlock {
     fn new(device: Rc<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
-        let handle = unsafe { device.handle.allocate_memory(info, None)? };
+        let handle = unsafe {
+            device.handle.allocate_memory(info, None)?
+        };
+
         let size = info.allocation_size;
         let mapped = Cell::new(None);
 
@@ -633,7 +636,7 @@ pub struct PipelineLayout {
 impl ResourcePool {
     pub fn create_pipeline_layout(
         &self,
-        consts: &[vk::PushConstantRange],
+        consts: &[PushConstRange],
         layouts: &[Res<DescLayout>],
     ) -> Result<Res<PipelineLayout>> {
         let device = self.device.clone();
@@ -643,9 +646,27 @@ impl ResourcePool {
                 .iter()
                 .map(|layout| layout.handle)
                 .collect();
+        
+            let mut offset = 0;
+            let consts: SmallVec<[_; 6]> = consts
+                .iter()
+                .map(|range| {
+                    let range = vk::PushConstantRange::builder()
+                        .stage_flags(range.stage)
+                        .size(range.size as u32)
+                        .offset(offset)
+                        .build();
+
+                    offset += range.size as u32;
+
+                    range
+                })
+                .collect();
+
             let info = vk::PipelineLayoutCreateInfo::builder()
                 .set_layouts(&layouts)
                 .push_constant_ranges(&consts);
+
             device.handle.create_pipeline_layout(&info, None)?
         };
 
@@ -841,6 +862,12 @@ impl Drop for GraphicsPipeline {
             self.device.handle.destroy_pipeline(self.handle, None);
         }
     }
+}
+
+#[derive(Clone, Copy)]
+pub struct PushConstRange {
+    pub stage: vk::ShaderStageFlags, 
+    pub size: vk::DeviceSize,
 }
 
 pub struct DescPool {
