@@ -23,19 +23,19 @@ layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 	View view;
 };
 
-layout (std430, set = 1, binding = 0) readonly uniform LightInfoBuf {
+layout (set = 2, binding = 3) uniform sampler2D textures[];
+
+layout (std430, set = 3, binding = 0) readonly uniform LightInfoBuf {
 	LightInfo light_info;
 };
 
-layout (std430, set = 1, binding = 2) readonly buffer LightBuf {
+layout (std430, set = 3, binding = 2) readonly buffer LightBuf {
 	PointLight point_lights[];
 };
 
-layout (std430, set = 1, binding = 4) readonly buffer LightMaskBuf {
+layout (std430, set = 3, binding = 4) readonly buffer LightMaskBuf {
 	LightMask light_masks[];
 };
-
-layout (set = 2, binding = 5) uniform sampler2D textures[];
 
 layout (location = 0) in vec2 in_texcoord;
 layout (location = 1) in vec3 in_world_normal;

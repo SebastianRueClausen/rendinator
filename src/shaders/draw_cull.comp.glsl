@@ -36,24 +36,27 @@ layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 	View view;
 };
 
-layout (std430, set = 1, binding = 0) readonly buffer Instances {
-	InstanceData instances[];
-};
 
-layout (std430, set = 1, binding = 1) writeonly buffer DrawBuffer {
+layout (std430, set = 1, binding = 0) writeonly buffer DrawBuffer {
 	DrawCommand draw_commands[];
 };
 
-layout (std430, set = 1, binding = 2) readonly buffer Primitives {
-	Primitive primitives[];	
-};
-
-layout (std430, set = 1, binding = 3) buffer DrawCount {
+layout (std430, set = 1, binding = 1) buffer DrawCount {
 	uint command_count;
 	uint primitive_count;
 };
 
-layout (set = 2, binding = 0) uniform sampler2D depth_pyramid[];
+
+layout (std430, set = 2, binding = 0) readonly buffer Instances {
+	InstanceData instances[];
+};
+
+layout (std430, set = 2, binding = 1) readonly buffer Primitives {
+	Primitive primitives[];	
+};
+
+
+layout (set = 3, binding = 0) uniform sampler2D depth_pyramid[];
 
 bool project_sphere(const vec3 center, const float radius, out vec4 aabb) {
 	if (center.z < radius + proj.z_near) return false;

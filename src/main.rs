@@ -139,6 +139,7 @@ fn main() -> Result<()> {
                     lights.prepare_lights(frame_index, &camera_uniforms, recorder);
                     forward_pass.prepare_draw_buffers(
                         frame_index,
+                        &scene,
                         &proj,
                         &view,
                         &camera_uniforms,

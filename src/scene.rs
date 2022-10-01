@@ -537,15 +537,7 @@ impl ForwardPass {
             SceneView::new(renderer, scene)
         })?;
 
-        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
-
         let layout = pool.create_desc_layout(&[
-            DescLayoutSlot {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX
-                    | vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
                 stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
@@ -556,35 +548,14 @@ impl ForwardPass {
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
-                array_count: Some(scene.textures.len() as u32),
-            },
         ])?;
 
         let descs = PerFrame::try_from_fn(|frame_index| {
             let view = &scene_views[frame_index];
 
             pool.create_desc_set(layout.clone(), &[
-                DescBinding::Buffer(scene.instance_buffer.clone()),
                 DescBinding::Buffer(view.draw_buffer.clone()),
-                DescBinding::Buffer(scene.primitive_buffer.clone()),
                 DescBinding::Buffer(view.draw_count_buffer.clone()),
-                DescBinding::Buffer(scene.vertex_buffer.clone()),
-                DescBinding::ImageArray(
-                    sampler.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, &scene.textures,
-                ),
             ])
         })?;
 
@@ -608,8 +579,9 @@ impl ForwardPass {
 
             let layout = pool.create_pipeline_layout(&[], &[
                 camera_uniforms.descs.any().layout(),
-                lights.descs.any().layout(),
                 descs.any().layout(),
+                scene.desc.layout(),
+                lights.descs.any().layout(),
             ])?;
 
             pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
@@ -637,6 +609,7 @@ impl ForwardPass {
             let layout = pool.create_pipeline_layout(&push_consts, &[
                 camera_uniforms.descs.any().layout(),
                 descs.any().layout(),
+                scene.desc.layout(),
                 depth_pyramid.sampled.any().layout(),
             ])?;
 
@@ -663,6 +636,7 @@ impl ForwardPass {
     pub fn prepare_draw_buffers(
         &self,
         frame_index: FrameIndex,
+        scene: &Scene,
         proj: &Proj,
         view: &View,
         camera_uniforms: &CameraUniforms,
@@ -693,6 +667,7 @@ impl ForwardPass {
             descs: &[
                 camera_uniforms.descs[frame_index].clone(),
                 self.descs[frame_index].clone(),
+                scene.desc.clone(),
                 self.depth_pyramid.sampled[frame_index].clone(),
             ],
         });
@@ -747,8 +722,9 @@ impl ForwardPass {
             layout: self.render.layout(),
             descs: &[
                 camera_uniforms.descs[frame_index].clone(),
-                lights.descs[frame_index].clone(),
                 self.descs[frame_index].clone(),
+                scene.desc.clone(),
+                lights.descs[frame_index].clone(),
             ],
         });
         
@@ -874,11 +850,8 @@ fn create_forward_color_images(
 
 pub struct Scene {
     primitives: Vec<Primitive>,
-    textures: Vec<Res<ImageView>>,
+    desc: Res<DescSet>,
     index_buffer: Res<Buffer>,
-    vertex_buffer: Res<Buffer>, 
-    instance_buffer: Res<Buffer>,
-    primitive_buffer: Res<Buffer>,
 }
 
 impl Scene {
@@ -1109,14 +1082,42 @@ impl Scene {
     
         let textures = textures?;
 
-        Ok(Self {
-            primitives,
-            textures,
-            index_buffer,
-            vertex_buffer,
-            instance_buffer,
-            primitive_buffer,
-        })
+        let desc_layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX
+                    | vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                stage: vk::ShaderStageFlags::FRAGMENT,
+                array_count: Some(scene.textures.len() as u32),
+            },
+        ])?;
+
+        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+
+        let desc = pool.create_desc_set(desc_layout, &[
+            DescBinding::Buffer(instance_buffer.clone()),
+            DescBinding::Buffer(primitive_buffer.clone()),
+            DescBinding::Buffer(vertex_buffer.clone()),
+            DescBinding::ImageArray(
+                sampler.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, &textures,
+            ),
+        ])?;
+
+        Ok(Self { desc, primitives, index_buffer })
     }
 
     pub fn primitive_count(&self) -> u32 {
