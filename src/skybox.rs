@@ -288,12 +288,10 @@ impl Skybox {
 
         let transform = proj.mat * Mat4::from_mat3(Mat3::from_mat4(view.mat));
 
-        recorder.push_consts(
-            self.pipeline.layout(),
-            vk::ShaderStageFlags::VERTEX,
-            0,
-            bytemuck::bytes_of(&transform),
-        );
+        recorder.push_consts(self.pipeline.layout(), &[PushConst {
+            stage: vk::ShaderStageFlags::VERTEX,
+            bytes: bytemuck::bytes_of(&transform),
+        }]);
 
         recorder.draw(36, 0);
     }

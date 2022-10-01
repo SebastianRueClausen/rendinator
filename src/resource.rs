@@ -627,8 +627,11 @@ impl Drop for ShaderModule {
 pub struct PipelineLayout {
     pub handle: vk::PipelineLayout,
 
-    #[allow(dead_code)]
-    desc_layouts: SmallVec<[Res<DescLayout>; 2]>,
+    #[allow(unused)]
+    pub push_const_ranges: SmallVec<[PushConstRange; 4]>,
+
+    #[allow(unused)]
+    desc_layouts: SmallVec<[Res<DescLayout>; 4]>,
 
     device: Rc<Device>,
 }
@@ -670,18 +673,25 @@ impl ResourcePool {
             device.handle.create_pipeline_layout(&info, None)?
         };
 
-        let mut desc_layouts = SmallVec::default();
-        for layout in layouts {
-            desc_layouts.push(layout.clone());
-        }
+        let desc_layouts = layouts
+            .iter()
+            .map(|layout| layout.clone())
+            .collect();
 
-        Ok(self.alloc(PipelineLayout { handle, desc_layouts, device }))
+        let push_const_ranges = consts
+            .iter()
+            .cloned()
+            .collect();
+
+        Ok(self.alloc(PipelineLayout { handle, desc_layouts, push_const_ranges, device }))
     }
 }
 
 impl Drop for PipelineLayout {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_pipeline_layout(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_pipeline_layout(self.handle, None);
+        }
     }
 }
 
@@ -902,13 +912,13 @@ pub struct VertexAttribute {
     pub size: vk::DeviceSize,
 }
 
-pub struct DescPool {
+struct DescPool {
     pub handle: vk::DescriptorPool,
     device: Rc<Device>,
 }
 
 impl DescPool {
-    pub fn new(
+    fn new(
         device: Rc<Device>,
         max_sets: u32,
         sizes: &[vk::DescriptorPoolSize],
@@ -1048,9 +1058,11 @@ pub struct DescSet {
     pub handle: vk::DescriptorSet,
 
     pub layout: Res<DescLayout>,
-    pub pool: Rc<DescPool>,
 
-    #[allow(dead_code)]
+    #[allow(unused)]
+    pool: Rc<DescPool>,
+
+    #[allow(unused)]
     resources: SmallVec<[DummyRes; 32]>,
 }
 
@@ -1391,11 +1403,15 @@ impl DescPools {
             };
 
             match handles {
-                Ok(handles) => break (handles, current_pool.clone()),
+                Ok(handles) => {
+                    break (handles, current_pool.clone())
+                }
+
                 Err(vk::Result::ERROR_FRAGMENTED_POOL | vk::Result::ERROR_OUT_OF_POOL_MEMORY) => {
                     self.current_pool = None;
                     size_factor *= 2.0;
                 }
+
                 Err(err) => {
                     return Err(err.into());
                 }
@@ -1529,7 +1545,7 @@ impl ResourcePool {
     /// Allocate descriptor set.
     #[inline]
     #[must_use]
-    pub fn desc_alloc(
+    fn desc_alloc(
         &self,
         layout: &DescLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescPool>)> {

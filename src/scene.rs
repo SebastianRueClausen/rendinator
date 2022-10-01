@@ -179,8 +179,8 @@ impl DepthPyramid {
 
             renderer.pool.create_image_view(&ImageViewInfo {
                 view_type: vk::ImageViewType::TYPE_2D,
-                image: image.clone(),
                 mips: image.mip_levels(),
+                image: image.clone(),
             })
         })?;
 
@@ -372,9 +372,7 @@ impl DepthPyramid {
         recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.resolve.layout(),
-            descs: &[
-                self.resolve_descs[frame_index].clone()
-            ],
+            descs: &[self.resolve_descs[frame_index].clone()],
         });
 
         let vk::Extent3D { width, height, .. } =
@@ -386,12 +384,10 @@ impl DepthPyramid {
             sample: depth_image.image().sample_count().as_raw(),
         };
 
-        recorder.push_consts(
-            self.resolve.layout(),
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            bytemuck::bytes_of(&info),
-        );
+        recorder.push_consts(self.resolve.layout(), &[PushConst {
+            stage: vk::ShaderStageFlags::COMPUTE,
+            bytes: bytemuck::bytes_of(&info),
+        }]);
        
         recorder.dispatch(self.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
 
@@ -430,12 +426,10 @@ impl DepthPyramid {
 
             let layout = self.reduce.layout();
 
-            recorder.push_consts(
-                layout,
-                vk::ShaderStageFlags::COMPUTE,
-                0,
-                bytemuck::bytes_of(&info),
-            );
+            recorder.push_consts(layout, &[PushConst {
+                stage: vk::ShaderStageFlags::COMPUTE,
+                bytes: bytemuck::bytes_of(&info),
+            }]);
 
             recorder.dispatch(self.reduce.clone(), [width / 32, height / 32, 1]);
 
@@ -728,12 +722,10 @@ impl ForwardPass {
             lod_step: 2.0,
         };
 
-        recorder.push_consts(
-            self.cull.layout(),
-            vk::ShaderStageFlags::COMPUTE,
-            0,
-            bytemuck::bytes_of(&cull_info),
-        );
+        recorder.push_consts(self.cull.layout(), &[PushConst {
+            stage: vk::ShaderStageFlags::COMPUTE,
+            bytes: bytemuck::bytes_of(&cull_info),
+        }]);
 
         recorder.dispatch(self.cull.clone(), [
             self.primitive_count.div_ceil(64), 1, 1,

@@ -166,24 +166,36 @@ pub struct RenderInfo {
     pub swapchain: Res<Swapchain>,
 }
 
+pub struct PushConst<'a> {
+    pub stage: vk::ShaderStageFlags,
+    pub bytes: &'a [u8],
+}
+
 macro_rules! impl_shared_commands {
     () => {
         #[allow(unused)]
-        pub fn push_consts(
-            &self,
-            layout: Res<PipelineLayout>,
-            stage: vk::ShaderStageFlags,
-            offset: u32,
-            bytes: &[u8],
-        ) {
-            unsafe {
-                self.device().handle.cmd_push_constants(
-                    self.buffer.handle,
-                    layout.handle,
-                    stage,
-                    offset,
-                    bytes,
+        pub fn push_consts(&self, layout: Res<PipelineLayout>, consts: &[PushConst]) {
+            let mut offset = 0;
+
+            for (val, range) in consts.iter().zip(layout.push_const_ranges.iter()) {
+                assert!(
+                    (val.bytes.len() as vk::DeviceSize) <= range.size,
+                    "byte size is greater than specified in pipeline layout, {} vs {}",
+                    val.bytes.len(),
+                    range.size,
                 );
+
+                unsafe {
+                    self.device().handle.cmd_push_constants(
+                        self.buffer.handle,
+                        layout.handle,
+                        val.stage,
+                        offset,
+                        val.bytes,
+                    );
+
+                    offset += range.size as u32;
+                }
             }
 
             self.buffer.bind_resource(layout);

@@ -221,12 +221,10 @@ impl TextPass {
                 label.pos,
             );
 
-            recorder.push_consts(
-                self.pipeline.layout(),
-                vk::ShaderStageFlags::VERTEX,
-                0,
-                bytemuck::bytes_of(&proj_transform),
-            );
+            recorder.push_consts(self.pipeline.layout(), &[PushConst {
+                stage: vk::ShaderStageFlags::VERTEX,
+                bytes: bytemuck::bytes_of(&proj_transform),
+            }]);
 
             recorder.draw_indexed(IndexedDrawInfo {
                 index_count: label.index_count,
