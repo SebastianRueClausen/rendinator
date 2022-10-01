@@ -53,7 +53,7 @@ void main() {
 	for (uint i = start; i < light_info.point_light_count; i += THREADS_PER_CLUSTER) {
 		const LightPos light = light_positions[i];
 
-		const Sphere sphere = Sphere(light.view_pos, light.radius);
+		const Sphere sphere = Sphere(light.pos_radius.xyz, light.pos_radius.w);
 
 		if (sphere_intersects_aabb(aabb, sphere)) {
 			const uint word = i / 32;

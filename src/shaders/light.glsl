@@ -40,13 +40,11 @@ struct Sphere {
 
 struct PointLight {
 	vec4 pos;
-	vec3 lum;
-	float radius;
+	vec4 lum_radius;
 };
 
 struct LightPos {
-	vec3 view_pos;
-	float radius;
+	vec4 pos_radius;
 };
 
 const uint LIGHT_MASK_WORD_COUNT = uint(ceil(float(MAX_LIGHT_COUNT)) / 32.0);

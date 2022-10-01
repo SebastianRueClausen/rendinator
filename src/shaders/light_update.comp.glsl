@@ -32,9 +32,9 @@ void main() {
 	if (light_index < light_info.point_light_count) {
 		const PointLight light = point_lights[light_index];
 
-		light_positions[light_index] = LightPos(
+		light_positions[light_index] = LightPos(vec4(
 			(view.mat * light.pos).xyz,
-			light.radius
-		);
+			light.lum_radius.w
+		));
 	}
 }

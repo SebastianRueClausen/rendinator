@@ -128,7 +128,7 @@ void main() {
 			const vec3 light_dir = normalize(light.pos.xyz - in_world_position.xyz);
 			const vec3 half_vec = normalize(view_dir + light_dir);
 
-			const vec3 irradiance = vec3(light.lum) / (4.0 * PI * light_dist * light_dist);
+			const vec3 irradiance = light.lum_radius.xyz / (4.0 * PI * light_dist * light_dist);
 
 			const float norm_dot_half = clamp(dot(normal, half_vec), 0.0, 1.0);
 			const float norm_dot_light = clamp(dot(normal, light_dir), 0.0, 1.0);

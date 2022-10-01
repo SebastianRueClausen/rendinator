@@ -29,8 +29,7 @@ impl Default for DirLight {
 #[derive(Default, Debug, Clone, Copy, bytemuck::NoUninit)]
 pub struct PointLight {
     world_position: Vec4,
-    lum: Vec3,
-    radius: f32,
+    lum_radius: Vec4,
 }
 
 impl PointLight {
@@ -42,15 +41,17 @@ impl PointLight {
         // More specifically calculate distance from the light where the irradiance hits
         // `POW_CUTOFF`.
         let radius = (2.82095 * lum.max_element().sqrt()) / POW_CUTOFF.sqrt();
+        
+        let world_position = pos.extend(1.0);
+        let lum_radius = lum.extend(radius);
 
-        Self { world_position: Vec4::from((pos, 1.0)), lum, radius }
+        Self { world_position, lum_radius }
     }
 }
 
 #[repr(C)]
 struct LightPos {
-    view_pos: Vec3,
-    radius: f32,
+    pos_radius: Vec4,
 }
 
 #[repr(C)]
