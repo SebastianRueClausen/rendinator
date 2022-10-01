@@ -211,33 +211,31 @@ impl Lights {
         let info = LightInfo::new(dir_light, point_light_count, proj);
         let cluster_count = info.cluster_count() as usize;
 
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-        let info_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let info_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<LightInfo>() as vk::DeviceSize,
         })?;
 
         let light_data = bytemuck::cast_slice(&lights);
-        let light_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let light_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: light_data.len() as vk::DeviceSize,
         })?;
 
-        let cluster_aabb_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let cluster_aabb_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER,
             size: (cluster_count * mem::size_of::<Aabb>()) as vk::DeviceSize,
         })?;
 
         let light_mask_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
+            pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: (cluster_count * mem::size_of::<LightMask>()) as vk::DeviceSize,
             })
         })?;
 
         let light_pos_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
+            pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
                 usage: vk::BufferUsageFlags::STORAGE_BUFFER,
                 size: mem::size_of::<[LightPos; MAX_LIGHT_COUNT]>() as vk::DeviceSize,
             })
@@ -245,10 +243,7 @@ impl Lights {
 
         let staging_pool = ResourcePool::with_block_size(renderer.device.clone(), 128, 1024 * 24);
 
-        let memory_flags =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-        let light_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
+        let light_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
             size: light_data.len() as vk::DeviceSize,
         })?;
@@ -325,6 +320,7 @@ impl Lights {
         };
 
         let light_count = lights.len() as u32;
+
         let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
@@ -413,7 +409,6 @@ impl Lights {
         let dir_light = DirLight::default();
 
         self.info = LightInfo::new(dir_light, self.light_count, proj);
-
         renderer.transfer_with(|recorder| {
             recorder.update_buffer(self.info_buffer.clone(), &self.info);
         })?;

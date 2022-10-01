@@ -18,6 +18,23 @@ fn range_length(range: &MemoryRange) -> vk::DeviceSize {
     range.end - range.start
 }
 
+#[derive(Clone, Copy)]
+pub enum MemoryLocation {
+    Gpu,
+    Cpu,
+}
+
+impl Into<vk::MemoryPropertyFlags> for MemoryLocation {
+    fn into(self) -> vk::MemoryPropertyFlags {
+        match self {
+            MemoryLocation::Gpu => vk::MemoryPropertyFlags::DEVICE_LOCAL,
+            MemoryLocation::Cpu => {
+                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT
+            }
+        }
+    }
+}
+
 /// A wrapper around a raw ptr into a mapped memory block.
 pub struct MappedMemory {
     ptr: NonNull<u8>,
@@ -169,11 +186,7 @@ pub struct Buffer {
 }
 
 impl ResourcePool {
-    pub fn create_buffer(
-        &self,
-        memory_flags: vk::MemoryPropertyFlags,
-        info: &BufferInfo,
-    ) -> Result<Res<Buffer>> {
+    pub fn create_buffer(&self, loc: MemoryLocation, info: &BufferInfo) -> Result<Res<Buffer>> {
         let pool = unsafe {
             let info = vk::BufferCreateInfo::builder()
                 .usage(info.usage)
@@ -183,6 +196,8 @@ impl ResourcePool {
 
             let handle = self.device.handle.create_buffer(&info, None)?;
             let req = self.device.handle.get_buffer_memory_requirements(handle);
+
+            let memory_flags: vk::MemoryPropertyFlags = loc.into();
 
             let memory_type = self.device.physical
                 .get_memory_type_index(req.memory_type_bits, memory_flags)
@@ -276,11 +291,7 @@ pub struct Image {
 }
 
 impl ResourcePool {
-    pub fn create_image(
-        &self,
-        memory_flags: vk::MemoryPropertyFlags,
-        info: &ImageInfo,
-    ) -> Result<Res<Image>> {
+    pub fn create_image(&self, loc: MemoryLocation, info: &ImageInfo) -> Result<Res<Image>> {
         let (array_layers, flags) = if let ImageKind::CubeMap = info.kind {
             (6, vk::ImageCreateFlags::CUBE_COMPATIBLE)
         } else {
@@ -338,6 +349,8 @@ impl ResourcePool {
         let memory_req = unsafe {
             self.device.handle.get_image_memory_requirements(handle)
         };
+
+        let memory_flags: vk::MemoryPropertyFlags = loc.into();
          
         let memory_type = self.device.physical
             .get_memory_type_index(memory_req.memory_type_bits, memory_flags)
@@ -509,10 +522,7 @@ pub struct Sampler {
 }
 
 impl ResourcePool {
-    pub fn create_sampler(
-        &self,
-        reduction: vk::SamplerReductionMode,
-    ) -> Result<Res<Sampler>> {
+    pub fn create_sampler(&self, reduction: vk::SamplerReductionMode) -> Result<Res<Sampler>> {
         let device = self.device.clone(); 
 
         let mut create_info = vk::SamplerCreateInfo::builder()
@@ -561,11 +571,7 @@ pub struct ShaderModule {
 }
 
 impl ResourcePool {
-    pub fn create_shader_module(
-        &self,
-        entry: &str,
-        code: &[u8],
-    ) -> Result<Res<ShaderModule>> {
+    pub fn create_shader_module(&self, entry: &str, code: &[u8]) -> Result<Res<ShaderModule>> {
         let device = self.device.clone();
 
         if code.len() % mem::size_of::<u32>() != 0 {
@@ -665,8 +671,7 @@ pub struct ComputePipeline {
 }
 
 impl ResourcePool {
-    pub fn create_compute_pipeline(
-        &self,
+    pub fn create_compute_pipeline( &self,
         layout: Res<PipelineLayout>,
         shader: Res<ShaderModule>,
     ) -> Result<Res<ComputePipeline>> {
@@ -685,6 +690,7 @@ impl ResourcePool {
                 .unwrap()
                 .clone()
         };
+
         Ok(self.alloc(ComputePipeline { device, handle, layout }))
     }
 }

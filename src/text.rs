@@ -42,18 +42,15 @@ impl TextPass {
         let pool = &renderer.static_pool;
         let text_objects = TextObjects::new(FontAtlas::new(font));
 
-        let memory_flags =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
         let vertex_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
+            pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
                 usage: vk::BufferUsageFlags::VERTEX_BUFFER,
                 size : mem::size_of::<[Vertex; MAX_VERTEX_COUNT]>() as vk::DeviceSize,
             })
         })?;
 
         let index_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
+            pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
                 usage: vk::BufferUsageFlags::INDEX_BUFFER,
                 size : mem::size_of::<[u16; MAX_INDEX_COUNT]>() as vk::DeviceSize,
             })
@@ -61,7 +58,7 @@ impl TextPass {
 
         let staging_pool = ResourcePool::with_block_size(renderer.device.clone(), 128, 1024);
 
-        let atlas_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
+        let atlas_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: font.atlas.base_image_data().len() as vk::DeviceSize,
         })?;
@@ -69,12 +66,9 @@ impl TextPass {
         atlas_staging.get_mapped()?.fill(font.atlas.base_image_data());
 
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
-
         let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
    
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-        let glyph_atlas = pool.create_image(memory_flags, &ImageInfo {
+        let glyph_atlas = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             kind: ImageKind::Texture, extent,

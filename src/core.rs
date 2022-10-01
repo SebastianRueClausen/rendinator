@@ -982,8 +982,7 @@ impl Swapchain {
         let images: Result<Vec<_>> = images
             .into_iter()
             .map(|handle| {
-                let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = pool.create_image(memory_flags, &ImageInfo {
+                let image = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
                     usage: vk::ImageUsageFlags::TRANSFER_DST
                         | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                     aspect_flags: vk::ImageAspectFlags::COLOR,
@@ -1067,8 +1066,7 @@ impl Swapchain {
         let images: Result<Vec<_>> = images
             .into_iter()
             .map(|handle| {
-                let memory_flags = vk::MemoryPropertyFlags::empty();
-                let image = pool.create_image(memory_flags, &ImageInfo {
+                let image = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
                     usage: vk::ImageUsageFlags::TRANSFER_DST
                         | vk::ImageUsageFlags::COLOR_ATTACHMENT,
                     aspect_flags: vk::ImageAspectFlags::COLOR,

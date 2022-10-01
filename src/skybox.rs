@@ -68,10 +68,7 @@ impl CubeMap {
         let vertex_data: &[u8] = bytemuck::cast_slice(&CUBE_VERTICES);
 
         let staging = {
-            let memory_flags =
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-            let buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            let buffer = pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
                 usage: vk::BufferUsageFlags::TRANSFER_SRC,
                 size: vertex_data.len() as u64
             })?;
@@ -82,9 +79,7 @@ impl CubeMap {
         };
 
         let vertex_buffer = {
-            let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-            pool.create_buffer(memory_flags, &BufferInfo {
+            pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
                 usage: vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::VERTEX_BUFFER,
                 size: vertex_data.len() as u64
             })?
@@ -175,7 +170,7 @@ impl Skybox {
         let pool = &renderer.static_pool;
         let size = 64;
 
-        let image = pool.create_image(vk::MemoryPropertyFlags::DEVICE_LOCAL, &ImageInfo {
+        let image = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             extent: vk::Extent3D { width: size, height: size, depth: 1 },
@@ -275,9 +270,9 @@ impl Skybox {
             }],
 
             vertex_bindings: &[vk::VertexInputBindingDescription {
-                binding: 0,
                 stride: mem::size_of::<Vec3>() as u32,
                 input_rate: vk::VertexInputRate::VERTEX,
+                binding: 0,
             }],
 
             vertex_shader,

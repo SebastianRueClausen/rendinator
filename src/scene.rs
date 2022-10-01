@@ -148,7 +148,8 @@ impl DepthPyramid {
         let width = prev_pow2(depth_extent.width);
         let height = prev_pow2(depth_extent.height);
 
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let memory_location = MemoryLocation::Gpu;
+
         let usage = vk::ImageUsageFlags::STORAGE
             | vk::ImageUsageFlags::SAMPLED
             | vk::ImageUsageFlags::TRANSFER_SRC;
@@ -156,7 +157,7 @@ impl DepthPyramid {
         let mip_levels = (height.max(height) as f32).log2().floor() as u32;
 
         let pyramids = PerFrame::try_from_fn(|_| {
-            renderer.pool.create_image(memory_flags, &ImageInfo {
+            renderer.pool.create_image(memory_location, &ImageInfo {
                 extent: vk::Extent3D { width, height, depth: 1 },
                 aspect_flags: vk::ImageAspectFlags::COLOR,
                 format: vk::Format::R32_SFLOAT,
@@ -167,7 +168,7 @@ impl DepthPyramid {
         })?;
 
         let stagings = PerFrame::try_from_fn(|_| {
-            let image = renderer.pool.create_image(memory_flags, &ImageInfo {
+            let image = renderer.pool.create_image(memory_location, &ImageInfo {
                 format: vk::Format::R32_SFLOAT,
                 aspect_flags: vk::ImageAspectFlags::COLOR,
                 kind: ImageKind::Texture,
@@ -467,9 +468,8 @@ pub struct SceneView {
 impl SceneView {
     fn new(renderer: &Renderer, scene: &Scene, proj_buffer: Res<Buffer>) -> Result<Self> {
         let pool = &renderer.static_pool;
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
-        let draw_count_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let draw_count_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
@@ -477,22 +477,19 @@ impl SceneView {
             size: mem::size_of::<DrawCount>() as vk::DeviceSize,
         })?;
 
-        let draw_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let draw_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::INDIRECT_BUFFER,
             size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
         })?;
 
-        let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
-            | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-        let draw_count_host_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let draw_count_host_buffer = pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<DrawCount>() as vk::DeviceSize,
         })?;
 
-        let view_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let view_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
         })?;
@@ -588,8 +585,7 @@ impl ForwardPass {
 
         let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
 
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let proj_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let proj_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
             size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
         })?;
@@ -845,14 +841,12 @@ fn create_depth_images(
     extent: vk::Extent3D,
     samples: vk::SampleCountFlags,
 ) -> Result<PerFrame<Res<ImageView>>> {
-    let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
     PerFrame::try_from_fn(|_| {
         let usage = vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
             | vk::ImageUsageFlags::TRANSFER_SRC
             | vk::ImageUsageFlags::SAMPLED;
 
-        let image = renderer.pool.create_image(memory_flags, &ImageInfo {
+        let image = renderer.pool.create_image(MemoryLocation::Gpu, &ImageInfo {
             aspect_flags: vk::ImageAspectFlags::DEPTH,
             format: DEPTH_IMAGE_FORMAT,
             kind: ImageKind::RenderTarget {
@@ -877,13 +871,11 @@ fn create_forward_color_images(
     extent: vk::Extent3D,
     samples: vk::SampleCountFlags,
 ) -> Result<PerFrame<Res<ImageView>>> {
-    let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
     PerFrame::try_from_fn(|_| {
         let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
             | vk::ImageUsageFlags::TRANSFER_SRC;
 
-        let image = renderer.pool.create_image(memory_flags, &ImageInfo {
+        let image = renderer.pool.create_image(MemoryLocation::Gpu, &ImageInfo {
             aspect_flags: vk::ImageAspectFlags::COLOR,
             format: renderer.swapchain.format(),
             kind: ImageKind::RenderTarget {
@@ -977,29 +969,26 @@ impl Scene {
 
         let staging_pool = ResourcePool::new(renderer.device.clone());
 
-        let memory_flags =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
         let primitive_data = bytemuck::cast_slice(primitives.as_slice());
-        let primitive_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
+        let primitive_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: primitive_data.len() as vk::DeviceSize,
         })?;
 
         let instance_data = bytemuck::cast_slice(instance_data.as_slice());
-        let instance_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
+        let instance_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: instance_data.len() as vk::DeviceSize,
         })?;
 
         let vertex_data = bytemuck::cast_slice(scene.vertices.as_slice());
-        let vertex_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
+        let vertex_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: vertex_data.len() as vk::DeviceSize,
         })?;
 
         let index_data = bytemuck::cast_slice(scene.indices.as_slice());
-        let index_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
+        let index_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
             size: index_data.len() as vk::DeviceSize,
         })?;
@@ -1009,28 +998,25 @@ impl Scene {
         vertex_staging.get_mapped()?.fill(vertex_data);
         index_staging.get_mapped()?.fill(index_data);
 
-
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
-        let instance_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let instance_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: instance_data.len() as vk::DeviceSize,
         })?;
 
-        let primitive_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let primitive_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: primitive_data.len() as vk::DeviceSize,
         })?;
 
-        let vertex_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let vertex_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: vertex_data.len() as vk::DeviceSize,
         })?;
 
-        let index_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+        let index_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::INDEX_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST,
             size: index_data.len() as vk::DeviceSize,
@@ -1049,16 +1035,13 @@ impl Scene {
             }
         })?;
 
-        let memory_flags =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
         let staging: Result<Vec<Vec<_>>> = scene.textures
             .iter()
             .map(|texture| {
                 texture.mips
                     .iter()
                     .map(|data| {
-                        let buffer = staging_pool.create_buffer(memory_flags, &BufferInfo {
+                        let buffer = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
                             usage: vk::BufferUsageFlags::TRANSFER_SRC,
                             size: data.len() as vk::DeviceSize,
                         })?;
@@ -1073,12 +1056,10 @@ impl Scene {
 
         let staging = staging?;
 
-        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-
         let images: Result<Vec<_>> = scene.textures
             .iter()
             .map(|texture| {
-                pool.create_image(memory_flags, &ImageInfo {
+                pool.create_image(MemoryLocation::Gpu, &ImageInfo {
                     mip_levels: texture.mip_levels(),
                     format: texture.format.into(),
                     kind: ImageKind::Texture,
