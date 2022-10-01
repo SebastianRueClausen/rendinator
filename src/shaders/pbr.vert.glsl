@@ -5,6 +5,8 @@
 #extension GL_ARB_shader_draw_parameters: require
 #extension GL_EXT_shader_16bit_storage: require
 
+#define TB_BRANCHLESS
+
 #include "mesh.glsl"
 #include "camera.glsl"
 
@@ -24,6 +26,14 @@ layout (std430, set = 2, binding = 4) readonly buffer Verts {
 	Vert verts[];
 };
 
+layout (location = 0) out vec2 out_texcoord;
+layout (location = 1) out vec3 out_world_normal;
+layout (location = 2) out vec3 out_world_tangent;
+layout (location = 3) out vec3 out_world_bitangent;
+layout (location = 4) out vec4 out_world_position;
+layout (location = 5) out float out_view_z;
+layout (location = 6) out uvec3 out_textures;
+
 vec3 decode_normal(const vec2 encoded) {
     const float scale = 1.7777;
 
@@ -36,14 +46,6 @@ vec3 decode_normal(const vec2 encoded) {
 
     return vec3(n);	
 }
-
-layout (location = 0) out vec2 out_texcoord;
-layout (location = 1) out vec3 out_world_normal;
-layout (location = 2) out vec3 out_world_tangent;
-layout (location = 3) out vec3 out_world_bitangent;
-layout (location = 4) out vec4 out_world_position;
-layout (location = 5) out float out_view_z;
-layout (location = 6) out uvec3 out_textures;
 
 void main() {
 	const DrawCommand command = draw_commands[gl_DrawIDARB];
@@ -60,13 +62,16 @@ void main() {
 
 	const vec3 normal = decode_normal(vec2(verts[gl_VertexIndex].normal));
 
-	vec3 tb;
-	if (abs(normal.x) > abs(normal.z)) {
-		tb = vec3(-normal.y, normal.x, 0.0);
-	} else {
-		tb = vec3(0.0, -normal.z, normal.y);
-	}
+#ifdef TB_BRANCHLESS
+	const vec3 tb1 = vec3(-normal.y, normal.x, 0.0);
+	const vec3 tb2 = vec3(0.0, -normal.z, normal.y);
 
+	const bool tb_switch = abs(normal.x) > abs(normal.z);
+	const vec3 tb = float(tb_switch) * tb1 + float(!tb_switch) * tb2;
+#else
+	const vec3 tb = abs(normal.x) > abs(normal.z) ? vec3(-normal.y, normal.x, 0.0) : vec3(0.0, -normal.z, normal.y);
+#endif	
+	
 	const vec3 tangent = vec3(tb * cos(tangent_angle) + cross(normal, tb) * sin(tangent_angle));
 
 	out_textures = uvec3(command.albedo_map, command.specular_map, command.normal_map);

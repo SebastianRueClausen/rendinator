@@ -10,11 +10,11 @@ layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
 	Proj proj;
 };
 
-layout (std140, set = 1, binding = 0) readonly uniform Cluster {
-	ClusterInfo cluster_info;
+layout (std140, set = 1, binding = 0) readonly uniform LightInfoBuf {
+	LightInfo light_info;
 };
 
-layout (std430, set = 1, binding = 1) writeonly buffer Aabbs {
+layout (std430, set = 1, binding = 1) writeonly buffer AabbBuf {
 	Aabb aabbs[];
 };
 
@@ -27,8 +27,8 @@ vec4 screen_to_view(const vec2 screen, const float z) {
 }
 
 uint cluster_index(const uvec3 coords) {
-	return coords.z * cluster_info.subdivisions.x * cluster_info.subdivisions.y
-		+ coords.y * cluster_info.subdivisions.x
+	return coords.z * light_info.subdivisions.x * light_info.subdivisions.y
+		+ coords.y * light_info.subdivisions.x
 		+ coords.x;
 }
 
@@ -36,8 +36,8 @@ void main() {
 	const uvec3 cluster_coords = gl_WorkGroupID;
 	const uint cluster_index = cluster_index(cluster_coords);
 
-	const vec2 screen_min = vec2(cluster_coords.xy * cluster_info.cluster_size.xy);
-	const vec2 screen_max = vec2((cluster_coords.xy + 1.0) * cluster_info.cluster_size.xy);
+	const vec2 screen_min = vec2(cluster_coords.xy * light_info.cluster_size.xy);
+	const vec2 screen_max = vec2((cluster_coords.xy + 1.0) * light_info.cluster_size.xy);
 
 	vec3 view_min = screen_to_view(screen_min, 1.0).xyz;
 	vec3 view_max = screen_to_view(screen_max, 1.0).xyz;
@@ -49,12 +49,12 @@ void main() {
 
 	const float view_near = -proj.z_near * pow(
 		z_far_over_z_near,
-		cluster_coords.z / float(cluster_info.subdivisions.z)
+		cluster_coords.z / float(light_info.subdivisions.z)
 	);
 
 	const float view_far = -proj.z_near * pow(
 		z_far_over_z_near,
-		(cluster_coords.z + 1) / float(cluster_info.subdivisions.z)
+		(cluster_coords.z + 1) / float(light_info.subdivisions.z)
 	);
 
 	const vec3 min_near = view_min * view_near / view_min.z;

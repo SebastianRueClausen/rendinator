@@ -3,6 +3,7 @@
 
 #extension GL_GOOGLE_include_directive: require
 #extension GL_EXT_nonuniform_qualifier: require
+#extension GL_EXT_scalar_block_layout: require
 
 #include "light.glsl"
 #include "tonemap.glsl"
@@ -14,8 +15,6 @@
 
 #include "brdf.glsl"
 
-#define NORMAL_DEBUG
-
 layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
 	Proj proj;
 };
@@ -24,18 +23,15 @@ layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 	View view;
 };
 
-layout (std140, set = 1, binding = 0) readonly uniform Cluster {
-	ClusterInfo cluster_info;
+layout (std430, set = 1, binding = 0) readonly uniform LightInfoBuf {
+	LightInfo light_info;
 };
 
-layout (std430, set = 1, binding = 2) readonly buffer Lights {
-	uint point_light_count;
-
-	DirLight dir_light;
+layout (std430, set = 1, binding = 2) readonly buffer LightBuf {
 	PointLight point_lights[];
 };
 
-layout (std430, set = 1, binding = 4) readonly buffer LightMasks {
+layout (std430, set = 1, binding = 4) readonly buffer LightMaskBuf {
 	LightMask light_masks[];
 };
 
@@ -52,8 +48,8 @@ layout (location = 6) flat in uvec3 in_textures;
 layout (location = 0) out vec4 out_color;
 
 uvec3 cluster_coords(vec2 coords, float view_z) {
-	uvec2 ij = uvec2(coords / cluster_info.cluster_size.xy);
-	uint k = uint(log(-view_z) * cluster_info.depth_factors.x - cluster_info.depth_factors.y);
+	uvec2 ij = uvec2(coords / light_info.cluster_size.xy);
+	uint k = uint(log(-view_z) * light_info.depth_factors.x - light_info.depth_factors.y);
 	return uvec3(ij, k);
 }
 
@@ -86,7 +82,7 @@ void main() {
 	//
 	
 	{
-		const vec3 light_dir = dir_light.dir.xyz;
+		const vec3 light_dir = light_info.dir_light.dir.xyz;
 		const vec3 half_vec = normalize(view_dir + light_dir);
 
 		const float norm_dot_half = clamp(dot(normal, half_vec), 0.0, 1.0);
@@ -102,7 +98,7 @@ void main() {
 		const vec3 specular = d * v * f;
 		const vec3 diffuse = diffuse_albedo * burley_diffuse(norm_dot_view, norm_dot_light, light_dot_half, rough);
 
-		radiance += (diffuse + specular) * norm_dot_light * dir_light.irradiance.xyz;
+		radiance += (diffuse + specular) * norm_dot_light * light_info.dir_light.irradiance.xyz;
 	}
 
 	//
@@ -110,7 +106,7 @@ void main() {
 	//
 
 	const uvec3 cluster_coords = cluster_coords(gl_FragCoord.xy, in_view_z);
-	const uint cluster_index = cluster_index(cluster_info.subdivisions.xyz, cluster_coords);
+	const uint cluster_index = cluster_index(light_info.subdivisions.xyz, cluster_coords);
 
 	const LightMask light_mask = light_masks[cluster_index];
 	

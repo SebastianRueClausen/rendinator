@@ -3,10 +3,24 @@
 
 const uint MAX_LIGHT_COUNT = 256;
 
-struct ClusterInfo {
+struct DirLight {
+	vec4 dir;
+	vec4 irradiance;
+};
+
+struct LightInfo {
+	DirLight dir_light;
+
 	uvec4 subdivisions;
+
 	uvec2 cluster_size;
 	vec2 depth_factors;
+
+	uint point_light_count;
+
+	uint pad1;
+	uint pad2;
+	uint pad3;
 };
 
 struct Aabb {
@@ -28,11 +42,6 @@ struct PointLight {
 	vec4 pos;
 	vec3 lum;
 	float radius;
-};
-
-struct DirLight {
-	vec4 dir;
-	vec4 irradiance;
 };
 
 struct LightPos {

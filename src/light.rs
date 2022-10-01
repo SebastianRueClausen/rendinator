@@ -53,31 +53,6 @@ struct LightPos {
     radius: f32,
 }
 
-/// The data of the light buffer.
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-struct LightBufferData {
-    point_light_count: u32, 
-
-    dir_light: DirLight,
-    point_lights: [PointLight; MAX_LIGHT_COUNT],
-}
-
-unsafe impl bytemuck::NoUninit for LightBufferData {}
-
-impl LightBufferData {
-    fn new(lights: &[PointLight]) -> Self {
-        let mut point_lights = [PointLight::default(); MAX_LIGHT_COUNT];
-        let point_light_count = lights.len() as u32;
-
-        for (src, dst) in lights.iter().zip(point_lights.iter_mut()) {
-            *dst = *src;
-        }
-
-        Self { point_lights, point_light_count, dir_light: DirLight::default() }
-    }
-}
-
 #[repr(C)]
 struct Aabb {
     min: Vec4,
@@ -86,14 +61,12 @@ struct Aabb {
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
-pub struct ClusterInfo {
+pub struct LightInfo {
+    dir_light: DirLight,
+
     /// The number of subdivisions in each axis.
     ///
     /// w is the total number of clusters:
-    ///
-    /// ```ignore
-    /// w = divisions.x * divisions.y * divisions.z;
-    /// ```
     subdivisions: UVec4,
 
     /// The size of the clusters in screen space in the x and y dimensions.
@@ -101,23 +74,29 @@ pub struct ClusterInfo {
     /// The size on the z-axis is not constant but scales logarithmic as nears the z_far plane.
     cluster_size: UVec2,
 
+    /// Constants used in shaders.
     depth_factors: Vec2,
+    point_light_count: u32,
+
+    padding: [u32; 3],
 }
 
-impl ClusterInfo {
-    fn new(swapchain: &Swapchain, proj: &Proj) -> Self {
-        let width = swapchain.extent().width;
-        let height = swapchain.extent().height;
+impl LightInfo {
+    fn new(dir_light: DirLight, point_light_count: u32, proj: &Proj) -> Self {
+        let width = proj.surface_size.x;
+        let height = proj.surface_size.y;
 
         let subdivisions = UVec4::new(12, 12, 24, 12 * 12 * 24);
-        let cluster_size = UVec2::new(width / subdivisions.x, height / subdivisions.y);
+        let cluster_size = UVec2::new(width as u32 / subdivisions.x, height as u32 / subdivisions.y);
 
         let depth_factors = Vec2::new(
             subdivisions.z as f32 / (proj.z_far / proj.z_near).ln(),
             subdivisions.z as f32 * proj.z_near.ln() / (proj.z_far / proj.z_near).ln(),
         );
 
-        Self { subdivisions, cluster_size, depth_factors }
+        let padding = [0x0; 3];
+
+        Self { subdivisions, cluster_size, depth_factors, dir_light, point_light_count, padding }
     }
 
     pub fn cluster_subdivisions(&self) -> UVec3 {
@@ -126,38 +105,6 @@ impl ClusterInfo {
 
     pub fn cluster_count(&self) -> u32 {
         self.subdivisions.w
-    }
-}
-
-pub struct ClusterInfoBuffer {
-    pub buffer: Res<Buffer>,
-    mapped: MappedMemory,
-    pub info: ClusterInfo,
-}
-
-impl ClusterInfoBuffer {
-    fn new(renderer: &Renderer, proj: &Proj) -> Result<Self> {
-        let pool = &renderer.static_pool;
-
-        let memory_flags =
-            vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-        let buffer = pool.create_buffer(memory_flags, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            size: mem::size_of::<ClusterInfo>() as u64,
-        })?;
-
-        let info = ClusterInfo::new(&renderer.swapchain, proj);
-        let mapped = buffer.get_mapped()?;
-
-        mapped.fill(bytemuck::bytes_of(&info));
-
-        Ok(Self { buffer, mapped, info })
-    }
-
-    fn handle_resize(&mut self, proj: &Proj, swapchain: &Swapchain) {
-        self.info = ClusterInfo::new(swapchain, proj);
-        self.mapped.fill(bytemuck::bytes_of(&self.info));
     }
 }
 
@@ -228,13 +175,16 @@ struct LightMask {
 /// of lights and `k` the number of clusters, this will hopefully speed things up.
 ///
 pub struct Lights {
+    pub info: LightInfo,
+
+    pub info_buffer: Res<Buffer>,
+
     pub light_buffer: Res<Buffer>,
     pub cluster_aabb_buffer: Res<Buffer>,
     pub light_pos_buffers: PerFrame<Res<Buffer>>,
     pub light_mask_buffers: PerFrame<Res<Buffer>>,
 
     pub light_count: u32,
-    pub cluster_info: ClusterInfoBuffer,
 
     pub descs: PerFrame<Res<DescSet>>,
 
@@ -248,19 +198,28 @@ impl Lights {
     pub fn new(
         renderer: &Renderer,
         camera_uniforms: &CameraUniforms,
-        camera: &Proj,
+        proj: &Proj,
         lights: &[PointLight],
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
 
-        let cluster_info = ClusterInfoBuffer::new(renderer, camera)?;
-        let cluster_count = cluster_info.info.cluster_count() as usize;
+        let point_light_count = lights.len() as u32;
+        let dir_light = DirLight::default();
+
+        let info = LightInfo::new(dir_light, point_light_count, proj);
+        let cluster_count = info.cluster_count() as usize;
 
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
+        let info_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<LightInfo>() as vk::DeviceSize,
+        })?;
+
+        let light_data = bytemuck::cast_slice(&lights);
         let light_buffer = pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
+            size: light_data.len() as vk::DeviceSize,
         })?;
 
         let cluster_aabb_buffer = pool.create_buffer(memory_flags, &BufferInfo {
@@ -289,13 +248,13 @@ impl Lights {
 
         let light_staging = staging_pool.create_buffer(memory_flags, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC,
-            size: mem::size_of::<LightBufferData>() as vk::DeviceSize,
+            size: light_data.len() as vk::DeviceSize,
         })?;
 
-        let light_data = LightBufferData::new(lights);
-        light_staging.get_mapped()?.fill(bytemuck::bytes_of(&light_data)); 
+        light_staging.get_mapped()?.fill(light_data); 
 
         renderer.transfer_with(|recorder| {
+            recorder.update_buffer(info_buffer.clone(), &info);
             recorder.copy_buffers(light_staging.clone(), light_buffer.clone())
         })?;
 
@@ -329,7 +288,7 @@ impl Lights {
 
         let descs = PerFrame::try_from_fn(|frame_index| {
             pool.create_desc_set(layout.clone(), &[
-                DescBinding::Buffer(cluster_info.buffer.clone()),
+                DescBinding::Buffer(info_buffer.clone()),
                 DescBinding::Buffer(cluster_aabb_buffer.clone()),
                 DescBinding::Buffer(light_buffer.clone()),
                 DescBinding::Buffer(light_pos_buffers[frame_index].clone()),
@@ -377,17 +336,18 @@ impl Lights {
                 ],
             });
 
-            let subdivisions = cluster_info.info.cluster_subdivisions();
+            let subdivisions = info.cluster_subdivisions();
             recorder.dispatch(cluster_build.clone(), subdivisions.into());
         })?;
 
         let lights = Self {
+            info,
+            info_buffer,
             build_clusters,
             light_buffer,
             cluster_aabb_buffer,
             light_pos_buffers,
             light_mask_buffers,
-            cluster_info,
             light_count,
             light_update,
             cluster_update,
@@ -430,15 +390,15 @@ impl Lights {
             dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
         });
 
-        let group_count = self.cluster_info.info.cluster_subdivisions();
+        let group_count = self.info.cluster_subdivisions();
         recorder.dispatch(self.cluster_update.clone(), group_count.into());
 
         recorder.buffer_barrier(&BufferBarrierInfo {
             buffer: self.light_mask_buffers[frame_index].clone(),
             src_mask: vk::AccessFlags2::SHADER_WRITE,
             dst_mask: vk::AccessFlags2::SHADER_READ,
-            src_stage:vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage:vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
         });
     }
 
@@ -449,7 +409,14 @@ impl Lights {
     /// This must only be called when the device is idle, e.g. no rendering is happening, as
     /// during so will upload data to a buffer which might be in use.
     pub fn handle_resize(&mut self, renderer: &Renderer, proj: &Proj) -> Result<()> {
-        self.cluster_info.handle_resize(proj, &renderer.swapchain);
+        let dir_light = DirLight::default();
+
+        self.info = LightInfo::new(dir_light, self.light_count, proj);
+
+        renderer.transfer_with(|recorder| {
+            recorder.update_buffer(self.info_buffer.clone(), &self.info);
+        })?;
+
         self.build_clusters()
     }
 }

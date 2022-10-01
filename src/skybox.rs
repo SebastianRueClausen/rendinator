@@ -120,7 +120,7 @@ impl Generator {
                 array_count: None,
             },
             DescLayoutSlot {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
                 stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
@@ -128,7 +128,7 @@ impl Generator {
 
         let descriptor = pool.create_desc_set(layout.clone(), &[
             DescBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL, image_view.clone()),
-            DescBinding::Buffer(lights.light_buffer.clone()),
+            DescBinding::Buffer(lights.info_buffer.clone()),
         ])?;
 
         let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");

@@ -7,22 +7,23 @@ const uint THREADS_PER_CLUSTER = 64;
 
 layout(local_size_x = THREADS_PER_CLUSTER, local_size_y = 1, local_size_z = 1) in;
 
-layout (std430, set = 1, binding = 1) readonly buffer Aabbs {
+layout (std140, set = 1, binding = 0) readonly uniform LightInfoBuf {
+	LightInfo light_info;	
+};
+
+layout (std430, set = 1, binding = 1) readonly buffer AabbBuf {
 	Aabb aabbs[];
 };
 
-layout (std430, set = 1, binding = 2) readonly buffer Lights {
-	uint point_light_count;
-
-	DirLight dir_light;
+layout (std430, set = 1, binding = 2) readonly buffer LightBuf {
 	PointLight point_lights[];
 };
 
-layout (std430, set = 1, binding = 3) readonly buffer LightPositions {
+layout (std430, set = 1, binding = 3) readonly buffer LightPosBuf {
 	LightPos light_positions[];
 };
 
-layout (std430, set = 1, binding = 4) writeonly buffer LightMasks {
+layout (std430, set = 1, binding = 4) writeonly buffer LightMaskBuf {
 	LightMask light_masks[];
 };
 
@@ -49,7 +50,7 @@ void main() {
 
 	const uint start = gl_LocalInvocationID.x;
 
-	for (uint i = start; i < point_light_count; i += THREADS_PER_CLUSTER) {
+	for (uint i = start; i < light_info.point_light_count; i += THREADS_PER_CLUSTER) {
 		const LightPos light = light_positions[i];
 
 		const Sphere sphere = Sphere(light.view_pos, light.radius);
