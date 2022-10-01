@@ -738,8 +738,7 @@ pub struct RenderTargetInfo {
 pub struct GraphicsPipelineInfo<'a> {
     pub layout: Res<PipelineLayout>,
 
-    pub vertex_attributes: &'a [vk::VertexInputAttributeDescription],
-    pub vertex_bindings: &'a [vk::VertexInputBindingDescription],
+    pub vertex_attributes: &'a [VertexAttribute],
     pub depth_stencil_info: &'a vk::PipelineDepthStencilStateCreateInfo,
 
     pub render_target_info: RenderTargetInfo,
@@ -769,9 +768,34 @@ impl ResourcePool {
             *info.fragment_shader.stage_create_info(vk::ShaderStageFlags::FRAGMENT),
         ];
 
+        let mut offset = 0;
+
+        let vert_attribs: SmallVec<[_; 8]> = info.vertex_attributes
+            .iter()
+            .enumerate()
+            .map(|(i, attrib)| {
+                let desc = vk::VertexInputAttributeDescription {
+                    format: attrib.format,
+                    location: i as u32,
+                    binding: 0,
+                    offset,
+                };
+
+                offset += attrib.size as u32;
+
+                desc
+            })
+            .collect();
+
+        let vertex_bindings = [vk::VertexInputBindingDescription {
+            input_rate: vk::VertexInputRate::VERTEX,
+            stride: offset,
+            binding: 0,
+        }];
+
         let vert_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
-            .vertex_attribute_descriptions(&info.vertex_attributes)
-            .vertex_binding_descriptions(&info.vertex_bindings);
+            .vertex_attribute_descriptions(&vert_attribs)
+            .vertex_binding_descriptions(&vertex_bindings);
 
         let vert_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
@@ -867,6 +891,14 @@ impl Drop for GraphicsPipeline {
 #[derive(Clone, Copy)]
 pub struct PushConstRange {
     pub stage: vk::ShaderStageFlags, 
+    pub size: vk::DeviceSize,
+}
+
+#[derive(Clone, Copy)]
+pub struct VertexAttribute {
+    pub format: vk::Format,
+
+    // TODO: Remove this once we implement our own formats.
     pub size: vk::DeviceSize,
 }
 

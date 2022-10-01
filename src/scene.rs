@@ -629,7 +629,6 @@ impl ForwardPass {
                 fragment_shader,
                 vertex_shader,
                 vertex_attributes: &[],
-                vertex_bindings: &[],
                 depth_stencil_info,
                 layout,
             })?

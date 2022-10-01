@@ -258,22 +258,14 @@ impl Skybox {
 
         let cull_mode = vk::CullModeFlags::FRONT;
 
+        let vertex_attributes = &[VertexAttribute {
+            format: vk::Format::R32G32B32_SFLOAT,
+            size: mem::size_of::<Vec3>() as vk::DeviceSize,
+        }];
+
         let pipeline = pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
             render_target_info, 
-
-            vertex_attributes: &[vk::VertexInputAttributeDescription {
-                format: vk::Format::R32G32B32_SFLOAT,
-                binding: 0,
-                location: 0,
-                offset: 0,
-            }],
-
-            vertex_bindings: &[vk::VertexInputBindingDescription {
-                stride: mem::size_of::<Vec3>() as u32,
-                input_rate: vk::VertexInputRate::VERTEX,
-                binding: 0,
-            }],
-
+            vertex_attributes,
             vertex_shader,
             fragment_shader,
             depth_stencil_info,

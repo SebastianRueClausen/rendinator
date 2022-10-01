@@ -146,25 +146,15 @@ impl TextPass {
             render_target_info,
 
             vertex_attributes: &[
-                vk::VertexInputAttributeDescription {
+                VertexAttribute {
                     format: vk::Format::R32G32B32_SFLOAT,
-                    binding: 0,
-                    location: 0,
-                    offset: 0,
+                    size: mem::size_of::<Vec3>() as vk::DeviceSize,
                 },
-                vk::VertexInputAttributeDescription {
+                VertexAttribute {
                     format: vk::Format::R32G32_SFLOAT,
-                    binding: 0,
-                    location: 1,
-                    offset: mem::size_of::<Vec3>() as u32,
+                    size: mem::size_of::<Vec2>() as vk::DeviceSize,
                 },
             ],
-
-            vertex_bindings: &[vk::VertexInputBindingDescription {
-                binding: 0,
-                stride: mem::size_of::<Vertex>() as u32,
-                input_rate: vk::VertexInputRate::VERTEX,
-            }],
 
             depth_stencil_info: &depth_stencil_info,
             vertex_shader,
