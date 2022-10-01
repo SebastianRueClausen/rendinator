@@ -4,7 +4,8 @@ use anyhow::Result;
 
 use std::mem;
 
-use crate::camera::{Proj, CameraUniforms};
+use crate::scene::SceneView;
+use crate::camera::Proj;
 use crate::resource::*;
 use crate::command::*;
 use crate::core::*;
@@ -198,7 +199,7 @@ pub struct Lights {
 impl Lights {
     pub fn new(
         renderer: &Renderer,
-        camera_uniforms: &CameraUniforms,
+        scene_views: &PerFrame<SceneView>,
         proj: &Proj,
         lights: &[PointLight],
     ) -> Result<Self> {
@@ -298,7 +299,7 @@ impl Lights {
         })?;
 
         let layout = pool.create_pipeline_layout(&[], &[
-            camera_uniforms.descs.any().layout(),
+            scene_views.any().camera_desc.layout(),
             layout,
         ])?;
 
@@ -324,7 +325,6 @@ impl Lights {
         };
 
         let light_count = lights.len() as u32;
-
         let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
@@ -332,7 +332,7 @@ impl Lights {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: cluster_build.layout(),
                 descs: &[
-                    camera_uniforms.descs.any().clone(),
+                    scene_views.any().camera_desc.clone(),
                     descs.any().clone()
                 ],
             });
@@ -367,14 +367,14 @@ impl Lights {
     pub fn prepare_lights(
         &self,
         frame_index: FrameIndex,
-        camera_uniforms: &CameraUniforms,
+        scene_view: &SceneView,
         recorder: &CommandRecorder,
     ) {
         recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.light_update.layout(),
             descs: &[
-                camera_uniforms.descs[frame_index].clone(),
+                scene_view.camera_desc.clone(),
                 self.descs[frame_index].clone(),
             ],
         });

@@ -1,11 +1,4 @@
-use ash::vk;
 use glam::{Mat4, Vec2, Vec3, Vec4};
-use anyhow::Result;
-
-use std::mem;
-
-use crate::core::*;
-use crate::resource::*;
 
 #[derive(Clone, Copy)]
 pub struct View {
@@ -31,12 +24,9 @@ impl View {
 
         Self { yaw, pitch, front, pos, mat, up }
     }
-
-    pub fn update(&mut self) {
-        self.mat = Mat4::look_at_rh(self.pos, self.pos + self.front, self.up);
-    }
 }
 
+#[derive(Clone, Copy)]
 pub enum ProjMode {
     Perspective {
         fov: f32,
@@ -49,6 +39,7 @@ pub enum ProjMode {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct Proj {
     pub z_near: f32,
     pub z_far: f32,
@@ -166,79 +157,5 @@ impl ProjUniform {
             z_near: proj.z_near,
             z_far: proj.z_far,
         }
-    }
-}
-
-/// Uniform buffers containing camera information.
-pub struct CameraUniforms {
-    pub view_buffers: PerFrame<Res<Buffer>>,
-    pub proj_buffer: Res<Buffer>,
-    pub descs: PerFrame<Res<DescSet>>,
-}
-
-impl CameraUniforms {
-    pub fn new(renderer: &Renderer, proj: &Proj) -> Result<Self> {
-        let pool = &renderer.static_pool;
-        let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
-            | vk::MemoryPropertyFlags::HOST_COHERENT;
-
-        let view_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(memory_flags, &BufferInfo {
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-                size: mem::size_of::<ViewUniform>() as u64,
-            })
-        })?;
-
-        let proj_buffer = pool.create_buffer(memory_flags, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
-            size: mem::size_of::<ProjUniform>() as u64,
-        })?;
-
-        let layout = pool.create_desc_layout(&[
-            DescLayoutSlot {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-        ])?;
-       
-        let descs = PerFrame::try_from_fn(|frame_index| {
-            pool.create_desc_set(layout.clone(), &[
-                DescBinding::Buffer(proj_buffer.clone()),
-                DescBinding::Buffer(view_buffers[frame_index].clone()),
-            ])
-        })?;
-
-        let uniforms = Self { view_buffers, proj_buffer, descs };
-
-        uniforms.update_proj(proj)?;
-
-        Ok(uniforms)
-    }
-
-    /// Update view uniform for frame with index `frame_index`.
-    pub fn update_view(&self, frame_index: FrameIndex, proj: &Proj, view: &View) -> Result<()> {
-        self.view_buffers[frame_index]
-            .get_mapped()?
-            .fill(bytemuck::bytes_of(&ViewUniform::new(proj, view)));
-
-        Ok(())
-    }
-
-    pub fn update_proj(&self, proj: &Proj) -> Result<()> {
-        self.proj_buffer
-            .get_mapped()?
-            .fill(bytemuck::bytes_of(&ProjUniform::new(proj)));
-
-        Ok(())
     }
 }

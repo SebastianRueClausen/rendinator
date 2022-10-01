@@ -30,8 +30,8 @@ use crate::command::*;
 use crate::core::*;
 use crate::text::TextPass;
 use crate::scene::{ForwardPass, Scene};
-use crate::light::{Lights, PointLight};
-use crate::camera::{Proj, ProjMode, View, CameraUniforms};
+use crate::light::PointLight;
+use crate::camera::{Proj, ProjMode, View};
 use crate::skybox::Skybox;
 
 fn main() -> Result<()> {
@@ -58,27 +58,19 @@ fn main() -> Result<()> {
         fov: 66.0
     };
 
-    let mut proj = Proj::new(renderer.swapchain.size(), proj_mode);
-    let mut view = View::new();
-
-    let camera_uniforms = CameraUniforms::new(&renderer, &proj)?;
+    let proj = Proj::new(renderer.swapchain.size(), proj_mode);
+    let view = View::new();
 
     let lights = debug_lights();
-    let mut lights = Lights::new(&renderer, &camera_uniforms, &proj, &lights)?;
 
     let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
-    let scene = Scene::from_scene_asset(&renderer, &scene)?;
+    let scene = Scene::from_scene_asset(&renderer, &scene, &lights)?;
 
-    let mut forward_pass = ForwardPass::new(
-        &renderer,
-        &camera_uniforms,
-        &scene,
-        &lights,
-    )?;
+    let mut forward_pass = ForwardPass::new(&renderer, proj, view, &scene)?;
 
     let render_target_info = forward_pass.render_target_info();
 
-    let skybox = Skybox::new(&renderer, render_target_info, &lights)?;
+    let skybox = Skybox::new(&renderer, render_target_info, &forward_pass.lights)?;
 
     let font = asset::Font::load(Path::new("assets/fonts/source_code_pro.font"))?;
     let mut text_pass = TextPass::new(&renderer, render_target_info, &font)?;
@@ -103,25 +95,14 @@ fn main() -> Result<()> {
                 minimized = true
             } else {
                 minimized = false;
+
                 renderer.resize(&window).expect("failed to resize window");
-
                 forward_pass.handle_resize(&mut renderer).expect("failed to resize forward pass");
-
                 text_pass.handle_resize(&renderer);
-                proj.update(renderer.swapchain.size());
-
-                camera_uniforms
-                    .update_proj(&proj)
-                    .expect("failed to update projection");
-
-                lights
-                    .handle_resize(&renderer, &proj)
-                    .expect("failed to resize lights");
             }
         }
         Event::MainEventsCleared => {
-            // views[frame_index].update(&mut input_state, last_update.elapsed());
-            update_view(&mut view, &mut input_state, last_update.elapsed());
+            update_view(&mut forward_pass.view, &mut input_state, last_update.elapsed());
             last_update = Instant::now();
 
             if !minimized {
@@ -130,21 +111,7 @@ fn main() -> Result<()> {
 
                 let swapchain = renderer.swapchain.clone();
                 let res = renderer.draw(|recorder, frame_index, swapchain_image| {
-                    view.update();
-
-                    camera_uniforms
-                        .update_view(frame_index, &proj, &view)
-                        .expect("failed to update view");
-
-                    lights.prepare_lights(frame_index, &camera_uniforms, recorder);
-                    forward_pass.prepare_draw_buffers(
-                        frame_index,
-                        &scene,
-                        &proj,
-                        &view,
-                        &camera_uniforms,
-                        recorder,
-                    );
+                    forward_pass.prepare_draw_buffers(frame_index, &scene, recorder);
 
                     let render_info = RenderInfo {
                         color_target: forward_pass.color_images[frame_index].clone(),
@@ -153,16 +120,8 @@ fn main() -> Result<()> {
                     };
 
                     recorder.render(&render_info, |recorder| {
-                        forward_pass.draw(
-                            frame_index,
-                            &scene,
-                            &camera_uniforms,
-                            &lights,
-                            recorder,
-                        );
-
-                        skybox.draw(&proj, &view, recorder); 
-
+                        forward_pass.draw(frame_index, &scene, recorder);
+                        skybox.draw(&forward_pass.proj, &forward_pass.view, recorder); 
                         text_pass.draw_text(recorder, frame_index, |texts| {
                             let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
                             let pos = format!(
@@ -172,11 +131,11 @@ fn main() -> Result<()> {
                                 view.pos.z,
                             );
 
-                            let primitives_drawn = format!(
-                                "primitives: {}",
-                                forward_pass.primitives_drawn(&renderer, frame_index.last())
-                                    .expect("failed to get amount of primitives drawn"),
-                            );
+                            let primitives_drawn = forward_pass
+                                .primitives_drawn(&renderer, frame_index.last())
+                                .expect("failed to get amount of primitives drawn");
+
+                            let primitives_drawn = format!("primitives: {}", primitives_drawn);
 
                             texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
                             texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);

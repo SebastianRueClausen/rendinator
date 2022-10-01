@@ -4,11 +4,11 @@ use ash::vk;
 
 use std::mem;
 
-use crate::light::Lights;
+use crate::light::{PointLight, Lights};
 use crate::core::*;
 use crate::resource::*;
 use crate::command::*;
-use crate::camera::{self, Proj, View, CameraUniforms};
+use crate::camera::{self, *};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -454,14 +454,18 @@ impl DepthPyramid {
     }
 }
 
-struct SceneView {
+pub struct SceneView {
+    pub desc: Res<DescSet>,
+    pub camera_desc: Res<DescSet>,
+
+    view_buffer: Res<Buffer>,
     draw_buffer: Res<Buffer>,
     draw_count_buffer: Res<Buffer>,
     draw_count_host_buffer: Res<Buffer>,
 }
 
 impl SceneView {
-    fn new(renderer: &Renderer, scene: &Scene) -> Result<Self> {
+    fn new(renderer: &Renderer, scene: &Scene, proj_buffer: Res<Buffer>) -> Result<Self> {
         let pool = &renderer.static_pool;
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
 
@@ -488,53 +492,16 @@ impl SceneView {
             size: mem::size_of::<DrawCount>() as vk::DeviceSize,
         })?;
 
+        let view_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
+        })?;
+
         renderer.transfer_with(|recorder| {
             recorder.update_buffer(draw_count_buffer.clone(), &DrawCount {
                 primitive_count: scene.primitive_count(),
                 command_count: 0,
             });
-        })?;
-
-        Ok(Self { draw_count_buffer, draw_buffer, draw_count_host_buffer })
-    }
-}
-
-pub struct ForwardPass {
-    scene_views: PerFrame<SceneView>,
-
-    descs: PerFrame<Res<DescSet>>,
-
-    pub depth_images: PerFrame<Res<ImageView>>,
-    pub color_images: PerFrame<Res<ImageView>>,
-
-    render: Res<GraphicsPipeline>, 
-    cull: Res<ComputePipeline>,
-
-    depth_pyramid: DepthPyramid,
-
-    render_target_info: RenderTargetInfo,
-    primitive_count: u32,
-}
-
-impl ForwardPass {
-    pub fn new(
-        renderer: &Renderer,
-        camera_uniforms: &CameraUniforms,
-        scene: &Scene,
-        lights: &Lights,
-    ) -> Result<Self> {
-        let pool = &renderer.pool;
-
-        let extent = renderer.swapchain.extent_3d();
-        let samples = renderer.device.sample_count();
-
-        let depth_images = create_depth_images(renderer, extent, samples)?;
-        let color_images = create_forward_color_images(renderer, extent, samples)?;
-
-        let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
-
-        let scene_views = PerFrame::try_from_fn(|_| {
-            SceneView::new(renderer, scene)
         })?;
 
         let layout = pool.create_desc_layout(&[
@@ -550,14 +517,92 @@ impl ForwardPass {
             },
         ])?;
 
-        let descs = PerFrame::try_from_fn(|frame_index| {
-            let view = &scene_views[frame_index];
+        let desc = pool.create_desc_set(layout, &[
+            DescBinding::Buffer(draw_buffer.clone()),
+            DescBinding::Buffer(draw_count_buffer.clone()),
+        ])?;
 
-            pool.create_desc_set(layout.clone(), &[
-                DescBinding::Buffer(view.draw_buffer.clone()),
-                DescBinding::Buffer(view.draw_count_buffer.clone()),
-            ])
+        let camera_layout = pool.create_desc_layout(&[
+            DescLayoutSlot {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+        ])?;
+       
+        let camera_desc = pool.create_desc_set(camera_layout, &[
+            DescBinding::Buffer(proj_buffer.clone()),
+            DescBinding::Buffer(view_buffer.clone()),
+        ])?;
+
+        Ok(Self {
+            draw_count_buffer,
+            draw_buffer,
+            draw_count_host_buffer,
+            camera_desc,
+            view_buffer,
+            desc,
+        })
+    }
+}
+
+pub struct ForwardPass {
+    pub scene_views: PerFrame<SceneView>,
+    pub lights: Lights,
+
+    proj_buffer: Res<Buffer>,
+
+    pub proj: Proj,
+    pub view: View,
+
+    pub depth_images: PerFrame<Res<ImageView>>,
+    pub color_images: PerFrame<Res<ImageView>>,
+
+    render: Res<GraphicsPipeline>, 
+    cull: Res<ComputePipeline>,
+
+    depth_pyramid: DepthPyramid,
+
+    render_target_info: RenderTargetInfo,
+    primitive_count: u32,
+}
+
+impl ForwardPass {
+    pub fn new(renderer: &Renderer, proj: Proj, view: View, scene: &Scene) -> Result<Self> {
+        let pool = &renderer.pool;
+
+        let extent = renderer.swapchain.extent_3d();
+        let samples = renderer.device.sample_count();
+
+        let depth_images = create_depth_images(renderer, extent, samples)?;
+        let color_images = create_forward_color_images(renderer, extent, samples)?;
+
+        let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
+
+        let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
+        let proj_buffer = pool.create_buffer(memory_flags, &BufferInfo {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
         })?;
+
+        renderer.transfer_with(|recorder| {
+            recorder.update_buffer(proj_buffer.clone(), &ProjUniform::new(&proj));
+        })?;
+
+        let scene_views = PerFrame::try_from_fn(|_| {
+            SceneView::new(renderer, scene, proj_buffer.clone())
+        })?;
+
+        let lights = Lights::new(&renderer, &scene_views, &proj, &scene.point_lights)?;
 
         let render_target_info = RenderTargetInfo {
             color_format: color_images.any().image().format(),
@@ -578,8 +623,8 @@ impl ForwardPass {
                 .depth_test_enable(true);
 
             let layout = pool.create_pipeline_layout(&[], &[
-                camera_uniforms.descs.any().layout(),
-                descs.any().layout(),
+                scene_views.any().camera_desc.layout(),
+                scene_views.any().desc.layout(),
                 scene.desc.layout(),
                 lights.descs.any().layout(),
             ])?;
@@ -607,8 +652,8 @@ impl ForwardPass {
                 .build()];
 
             let layout = pool.create_pipeline_layout(&push_consts, &[
-                camera_uniforms.descs.any().layout(),
-                descs.any().layout(),
+                scene_views.any().camera_desc.layout(),
+                scene_views.any().desc.layout(),
                 scene.desc.layout(),
                 depth_pyramid.sampled.any().layout(),
             ])?;
@@ -623,7 +668,10 @@ impl ForwardPass {
             color_images,
             depth_pyramid,
             scene_views,
-            descs,
+            proj_buffer,
+            lights,
+            proj,
+            view,
             cull,
             render,
         })
@@ -637,12 +685,24 @@ impl ForwardPass {
         &self,
         frame_index: FrameIndex,
         scene: &Scene,
-        proj: &Proj,
-        view: &View,
-        camera_uniforms: &CameraUniforms,
         recorder: &CommandRecorder,
     ) {
         let scene_view = &self.scene_views[frame_index];
+
+        recorder.update_buffer(
+            scene_view.view_buffer.clone(),
+            &ViewUniform::new(&self.proj, &self.view),
+        );
+
+        recorder.buffer_barrier(&BufferBarrierInfo {
+            buffer: scene_view.view_buffer.clone(),
+            src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_READ,
+            src_stage: vk::PipelineStageFlags2::TRANSFER,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        });
+
+        self.lights.prepare_lights(frame_index, scene_view, recorder);
 
         recorder.update_buffer(scene_view.draw_count_buffer.clone(), &DrawCount {
             primitive_count: self.primitive_count,
@@ -657,27 +717,21 @@ impl ForwardPass {
             dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
         });
 
-        //
-        // Frustrum cull and generate draw buffers.
-        //
-
         recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             layout: self.cull.layout(),
             descs: &[
-                camera_uniforms.descs[frame_index].clone(),
-                self.descs[frame_index].clone(),
+                scene_view.camera_desc.clone(),
+                scene_view.desc.clone(),
                 scene.desc.clone(),
                 self.depth_pyramid.sampled[frame_index].clone(),
             ],
         });
 
         let cull_info = CullInfo {
-            frustrum_planes: camera::frustrum_planes(proj, view),
-
+            frustrum_planes: camera::frustrum_planes(&self.proj, &self.view),
             pyramid_width: self.depth_pyramid.width as f32,
             pyramid_height: self.depth_pyramid.height as f32,
-
             lod_base: 10.0,
             lod_step: 2.0,
         };
@@ -704,14 +758,7 @@ impl ForwardPass {
         self.depth_pyramid.update(frame_index, &self.depth_images, recorder);
     }
 
-    pub fn draw(
-        &self,
-        frame_index: FrameIndex,
-        scene: &Scene,
-        camera_uniforms: &CameraUniforms,
-        lights: &Lights,
-        recorder: &DrawRecorder,
-    ) {
+    pub fn draw(&self, frame_index: FrameIndex, scene: &Scene, recorder: &DrawRecorder) {
         let scene_view = &self.scene_views[frame_index];
 
         recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
@@ -721,10 +768,10 @@ impl ForwardPass {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.render.layout(),
             descs: &[
-                camera_uniforms.descs[frame_index].clone(),
-                self.descs[frame_index].clone(),
+                scene_view.camera_desc.clone(),
+                scene_view.desc.clone(),
                 scene.desc.clone(),
-                lights.descs[frame_index].clone(),
+                self.lights.descs[frame_index].clone(),
             ],
         });
         
@@ -775,6 +822,14 @@ impl ForwardPass {
     pub fn handle_resize(&mut self, renderer: &Renderer) -> Result<()> {
         let extent = renderer.swapchain.extent_3d();
         let samples = renderer.device.sample_count();
+
+        self.proj.update(renderer.swapchain.size());
+
+        renderer.transfer_with(|recorder| {
+            recorder.update_buffer(self.proj_buffer.clone(), &ProjUniform::new(&self.proj));
+        })?;
+
+        self.lights.handle_resize(renderer, &self.proj)?;
 
         self.depth_images = create_depth_images(renderer, extent, samples)?;
         self.color_images = create_forward_color_images(renderer, extent, samples)?;
@@ -842,7 +897,7 @@ fn create_forward_color_images(
 
         renderer.pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
-            mips: 0..1,
+            mips: image.mip_levels(),
             image,
         })
     })
@@ -850,12 +905,18 @@ fn create_forward_color_images(
 
 pub struct Scene {
     primitives: Vec<Primitive>,
+    point_lights: Vec<PointLight>,
+
     desc: Res<DescSet>,
     index_buffer: Res<Buffer>,
 }
 
 impl Scene {
-    pub fn from_scene_asset(renderer: &Renderer, scene: &asset::Scene) -> Result<Self> {
+    pub fn from_scene_asset(
+        renderer: &Renderer,
+        scene: &asset::Scene,
+        lights: &[PointLight],
+    ) -> Result<Self> {
         let pool = &renderer.static_pool;
 
         let instance_data: Vec<_> = scene.instances
@@ -1117,7 +1178,9 @@ impl Scene {
             ),
         ])?;
 
-        Ok(Self { desc, primitives, index_buffer })
+        let point_lights = Vec::from(lights);
+
+        Ok(Self { desc, primitives, index_buffer, point_lights })
     }
 
     pub fn primitive_count(&self) -> u32 {
