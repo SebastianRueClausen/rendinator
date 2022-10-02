@@ -263,7 +263,7 @@ impl Skybox {
             size: mem::size_of::<Vec3>() as vk::DeviceSize,
         }];
 
-        let pipeline = pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
+        let pipeline = pool.create_graphics_pipeline(GraphicsPipelineInfo {
             render_target_info, 
             vertex_attributes,
             vertex_shader,

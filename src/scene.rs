@@ -482,7 +482,7 @@ impl SceneView {
         })?;
 
         let view_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
         })?;
 
@@ -493,41 +493,13 @@ impl SceneView {
             });
         })?;
 
-        let layout = pool.create_desc_layout(&[
-            DescLayoutSlot {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
-                array_count: None,
-            },
-        ])?;
-
+        let layout = Self::desc_layout(renderer)?;
         let desc = pool.create_desc_set(layout, &[
             DescBinding::Buffer(draw_buffer.clone()),
             DescBinding::Buffer(draw_count_buffer.clone()),
         ])?;
 
-        let camera_layout = pool.create_desc_layout(&[
-            DescLayoutSlot {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-        ])?;
-       
+        let camera_layout = Self::camera_desc_layout(renderer)?;
         let camera_desc = pool.create_desc_set(camera_layout, &[
             DescBinding::Buffer(proj_buffer.clone()),
             DescBinding::Buffer(view_buffer.clone()),
@@ -541,6 +513,40 @@ impl SceneView {
             view_buffer,
             desc,
         })
+    }
+
+    fn desc_layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
+        renderer.static_pool.create_desc_layout(&[
+            DescLayoutSlot {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE,
+                array_count: None,
+            },
+        ])
+    }
+
+    fn camera_desc_layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
+        renderer.static_pool.create_desc_layout(&[
+            DescLayoutSlot {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+        ])
     }
 }
 
@@ -578,7 +584,7 @@ impl ForwardPass {
         let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
 
         let proj_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
         })?;
 
@@ -617,7 +623,7 @@ impl ForwardPass {
                 lights.descs.any().layout(),
             ])?;
 
-            pool.create_graphics_pipeline(&renderer, GraphicsPipelineInfo {
+            pool.create_graphics_pipeline(GraphicsPipelineInfo {
                 render_target_info,
                 cull_mode: vk::CullModeFlags::BACK,
                 fragment_shader,

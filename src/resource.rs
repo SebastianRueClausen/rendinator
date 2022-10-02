@@ -768,7 +768,6 @@ pub struct GraphicsPipeline {
 impl ResourcePool {
     pub fn create_graphics_pipeline(
         &self,
-        renderer: &Renderer,
         info: GraphicsPipelineInfo,
     ) -> Result<Res<GraphicsPipeline>> {
         let device = self.device.clone();
@@ -797,11 +796,15 @@ impl ResourcePool {
             })
             .collect();
 
-        let vertex_bindings = [vk::VertexInputBindingDescription {
-            input_rate: vk::VertexInputRate::VERTEX,
-            stride: offset,
-            binding: 0,
-        }];
+        let vertex_bindings: SmallVec<[_; 1]> = if info.vertex_attributes.len() != 0 {
+            SmallVec::from([vk::VertexInputBindingDescription {
+                input_rate: vk::VertexInputRate::VERTEX,
+                stride: offset,
+                binding: 0,
+            }])
+        } else {
+            SmallVec::new()
+        };
 
         let vert_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
             .vertex_attribute_descriptions(&vert_attribs)
@@ -810,12 +813,7 @@ impl ResourcePool {
         let vert_assembly_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
             .topology(vk::PrimitiveTopology::TRIANGLE_LIST);
 
-        let viewports = renderer.swapchain.viewports();
-        let scissors = renderer.swapchain.scissors();
-
-        let viewport_info = vk::PipelineViewportStateCreateInfo::builder()
-            .viewports(&viewports)
-            .scissors(&scissors);
+        let viewport_info = vk::PipelineViewportStateCreateInfo::default();
 
         let rasterize_info = vk::PipelineRasterizationStateCreateInfo::builder()
             .front_face(vk::FrontFace::CLOCKWISE)

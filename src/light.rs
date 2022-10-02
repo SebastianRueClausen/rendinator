@@ -212,7 +212,7 @@ impl Lights {
         let cluster_count = info.cluster_count() as usize;
 
         let info_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER,
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<LightInfo>() as vk::DeviceSize,
         })?;
 
