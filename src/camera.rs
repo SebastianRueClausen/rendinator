@@ -1,110 +1,100 @@
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
-#[derive(Clone, Copy)]
-pub struct View {
+#[derive(Clone)]
+pub struct Camera {
+    /// The position of the camera in world space.
     pub pos: Vec3,
+
+    /// The front vector.
     pub front: Vec3,
-    pub up: Vec3,
+
+    /// The yaw of the camera (horizontal angle in degrees).
     pub yaw: f32,
+
+    /// The pitch of the camera (vertical angle in degrees).
     pub pitch: f32,
 
-    pub mat: Mat4,
+    /// The fov of the view frustrum in degrees.
+    pub fov: f32,
+
+    /// The distance to the near z-plane.
+    pub z_near: f32,
+
+    /// The distance to the far z-plane.
+    pub z_far: f32,
+
+    /// The size of the surface in pixels.
+    pub surface_size: Vec2,
+
+    /// The view matrix.
+    pub view: Mat4,
+
+    /// The projection matrix.
+    pub proj: Mat4,
+
+    /// Inverse of the projection matrix.
+    pub inverse_proj: Mat4,
 }
 
-impl View {
-    pub fn new() -> Self {
+impl Camera {
+    /// The up vector.
+    pub const UP: Vec3 = Vec3::new(0.0, -1.0, 0.0);
+
+    pub fn new(surface_size: Vec2) -> Self {
         let pos = Vec3::new(10.0, 10.0, 10.0);
-        let up = Vec3::new(0.0, -1.0, 0.0);
-        let front = Vec3::default();
+        let front = Vec3::splat(0.0);
 
         let yaw = 0.0;
         let pitch = 0.0;
 
-        let mat = Mat4::look_at_rh(pos, pos + front, up);
+        let view = Mat4::look_at_rh(pos, pos + front, Self::UP);
 
-        Self { yaw, pitch, front, pos, mat, up }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum ProjMode {
-    Perspective {
-        fov: f32,
-    },
-    Orthographic {
-        left: f32,
-        right: f32,
-        top: f32,
-        bottom: f32,
-    }
-}
-
-#[derive(Clone, Copy)]
-pub struct Proj {
-    pub z_near: f32,
-    pub z_far: f32,
-    pub surface_size: Vec2,
-
-    pub mat: Mat4,
-    pub inverse_mat: Mat4,
-
-    pub mode: ProjMode,
-}
-
-impl Proj {
-    pub fn new(surface_size: Vec2, mode: ProjMode) -> Self {
+        let fov = 66.0_f32;
         let z_near = 0.1;
         let z_far = 100.0;
 
         let aspect_ratio = surface_size.x / surface_size.y;
         
-        let mat = match mode {
-            ProjMode::Perspective { fov } => {
-                Mat4::perspective_rh(fov.to_radians(), aspect_ratio, z_near, z_far)
-            }
-            ProjMode::Orthographic { left, right, top, bottom } => {
-                Mat4::orthographic_rh(left, right, bottom, top, z_near, z_far)
-            }
-        };
+        let proj = Mat4::perspective_rh(fov.to_radians(), aspect_ratio, z_near, z_far);
+        let inverse_proj = proj.inverse();
 
-        let inverse_mat = mat.inverse();
-
-        Self { surface_size, z_near, z_far, mat, inverse_mat, mode }
+        Self { pos, yaw, pitch, view, z_near, z_far, fov, surface_size, inverse_proj, proj, front }
     }
 
-    pub fn update(&mut self, surface_size: Vec2) {
+    /// Update camera for new surface size.
+    pub fn handle_resize(&mut self, surface_size: Vec2) {
         let aspect_ratio = surface_size.x / surface_size.y;
-
         self.surface_size = surface_size;
-        self.mat = match self.mode {
-            ProjMode::Perspective { fov } => {
-                Mat4::perspective_rh(fov.to_radians(), aspect_ratio, self.z_near, self.z_far)
-            }
-            ProjMode::Orthographic { left, right, top, bottom } => {
-                Mat4::orthographic_rh(left, right, bottom, top, self.z_near, self.z_far)
-            }
-        };
+
+        self.proj =
+            Mat4::perspective_rh(self.fov.to_radians(), aspect_ratio, self.z_near, self.z_far);
+
+        self.inverse_proj = self.proj.inverse(); 
+    }
+
+    /// Get bounding planes of the frustrum in view space.
+    pub fn frustrum_planes(&self) -> [Vec4; 6] {
+        let proj_view = self.proj * self.view;
+
+        let planes = [
+            proj_view.row(3) + proj_view.row(0),
+            proj_view.row(3) - proj_view.row(0),
+            proj_view.row(3) + proj_view.row(1),
+            proj_view.row(3) - proj_view.row(1),
+            proj_view.row(3) - proj_view.row(2),
+
+            Vec4::splat(0.0),
+        ];
+
+        planes.map(|plane| plane / plane.truncate().length())
+    }
+
+    /// Update the view matrix.
+    pub fn update_view_matrix(&mut self) {
+        self.view = Mat4::look_at_rh(self.pos, self.pos + self.front, Self::UP);
     }
 }
 
-pub fn frustrum_planes(proj: &Proj, view: &View) -> [Vec4; 6] {
-    let proj_view = proj.mat * view.mat;
-
-    let planes = [
-        proj_view.row(3) + proj_view.row(0),
-        proj_view.row(3) - proj_view.row(0),
-        proj_view.row(3) + proj_view.row(1),
-        proj_view.row(3) - proj_view.row(1),
-        proj_view.row(3) - proj_view.row(2),
-
-        Vec4::splat(0.0),
-    ];
-
-    planes.map(|plane| plane / plane.truncate().length())
-}
-
-/// Data related to the camera view. This is updated every frame and has a copy per frame in
-/// flight.
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::NoUninit)]
 pub struct ViewUniform {
@@ -115,47 +105,46 @@ pub struct ViewUniform {
     view: Mat4,
 
     /// `proj * view`. This is cached to save a dot product between two 4x4 matrices
-    /// for each vertex.
+    /// for each vertex shader invocation.
     proj_view: Mat4,
 }
 
 impl ViewUniform {
-    pub fn new(proj: &Proj, view: &View) -> Self {
-        let eye = view.pos.extend(0.0);
-        let proj_view = proj.mat * view.mat;
+    pub fn new(camera: &Camera) -> Self {
+        let eye = camera.pos.extend(0.0);
+        let proj_view = camera.proj * camera.view;
 
-        Self { eye, view: view.mat, proj_view }
+        Self { eye, view: camera.view, proj_view }
     }
 }
 
-/// Data related to the projection matrix. This is only updated on screen resize or camera settings
-/// changes. There is only one copy.
 #[repr(C)]
 #[derive(Clone, Copy, Default, bytemuck::NoUninit)]
 pub struct ProjUniform {
     /// The projection matrix.
     proj: Mat4,
 
-    /// The inverse projection.
-    ///
-    /// Used to transform points from screen to view space.
+    /// The inverse of `proj`.
     inverse_proj: Mat4,
 
     /// The screen dimensions.
     surface_size: Vec2,
 
+    /// The camera near z-plane.
     z_near: f32,
+
+    /// THe camera far z-plane.
     z_far: f32,
 }
 
 impl ProjUniform {
-    pub fn new(proj: &Proj) -> Self {
+    pub fn new(camera: &Camera) -> Self {
         Self {
-            proj: proj.mat,
-            inverse_proj: proj.inverse_mat,
-            surface_size: proj.surface_size,
-            z_near: proj.z_near,
-            z_far: proj.z_far,
+            proj: camera.proj,
+            inverse_proj: camera.inverse_proj,
+            surface_size: camera.surface_size,
+            z_near: camera.z_near,
+            z_far: camera.z_far,
         }
     }
 }

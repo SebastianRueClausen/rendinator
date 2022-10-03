@@ -4,11 +4,11 @@ use ash::vk;
 
 use std::mem;
 
-use crate::light::{PointLight, DirLight, Lights};
+use crate::light::{self, PointLight, DirLight, Lights};
 use crate::core::*;
 use crate::resource::*;
 use crate::command::*;
-use crate::camera::{self, *};
+use crate::camera::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -338,58 +338,110 @@ impl DepthPyramid {
             height,
         })
     }
+}
 
-    fn update(
-        &self,
-        frame_index: FrameIndex,
-        depth_images: &PerFrame<Res<ImageView>>,
-        recorder: &CommandRecorder,
-    ) {
-        let depth_image = depth_images[frame_index].clone();
+fn update_depth_pyramid(
+    pyramid: &DepthPyramid,
+    frame_index: FrameIndex,
+    depth_image: &Res<ImageView>,
+    recorder: &CommandRecorder,
+) {
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        src_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        image: depth_image.image().clone(),
+        mips: depth_image.image().mip_levels(),
+    });
 
-        recorder.image_barrier(&ImageBarrierInfo {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            src_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            image: depth_image.image().clone(),
-            mips: depth_image.image().mip_levels(),
-        });
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::empty(),
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        src_mask: vk::AccessFlags2::empty(),
+        dst_mask: vk::AccessFlags2::SHADER_WRITE,
+        new_layout: vk::ImageLayout::GENERAL,
+        image: pyramid.stagings[frame_index].image().clone(),
+        mips: pyramid.stagings[frame_index].image().mip_levels(),
+    });
 
-        recorder.image_barrier(&ImageBarrierInfo {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::empty(),
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            src_mask: vk::AccessFlags2::empty(),
-            dst_mask: vk::AccessFlags2::SHADER_WRITE,
-            new_layout: vk::ImageLayout::GENERAL,
-            image: self.stagings[frame_index].image().clone(),
-            mips: self.stagings[frame_index].image().mip_levels(),
-        });
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::COMPUTE,
+        layout: pyramid.resolve.layout(),
+        descs: &[pyramid.resolve_descs[frame_index].clone()],
+    });
 
-        recorder.bind_descs(&DescBindInfo {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.resolve.layout(),
-            descs: &[self.resolve_descs[frame_index].clone()],
-        });
+    let vk::Extent3D { width, height, .. } =
+        pyramid.stagings[frame_index].image().extent(0);
 
-        let vk::Extent3D { width, height, .. } =
-            self.stagings[frame_index].image().extent(0);
+    let info = DepthResolveInfo {
+        image_size: UVec2::new(width, height),
+        // `vk::SampleCountFlags` as raw maps to the amount of samples.
+        sample: depth_image.image().sample_count().as_raw(),
+    };
 
-        let info = DepthResolveInfo {
+    recorder.push_consts(pyramid.resolve.layout(), &[PushConst {
+        stage: vk::ShaderStageFlags::COMPUTE,
+        bytes: bytemuck::bytes_of(&info),
+    }]);
+   
+    recorder.dispatch(pyramid.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
+
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        src_mask: vk::AccessFlags2::SHADER_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        new_layout: vk::ImageLayout::GENERAL,
+        image: pyramid.stagings[frame_index].image().clone(),
+        mips: pyramid.stagings[frame_index].image().mip_levels(),
+    });
+
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::empty(),
+        src_mask: vk::AccessFlags2::SHADER_READ,
+        dst_mask: vk::AccessFlags2::empty(),
+        new_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL,
+        image: depth_image.image().clone(),
+        mips: depth_image.image().mip_levels(),
+    });
+
+    //
+    // Reduce from each level to the next in depth pyramid.
+    //
+
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::COMPUTE,
+        layout: pyramid.reduce.layout(),
+        descs: &[
+            pyramid.sampled[frame_index].clone(),
+            pyramid.storage[frame_index].clone(),
+        ],
+    });
+
+    let level = &pyramid.pyramids[frame_index];
+
+    for target in level.mip_levels() {
+        let vk::Extent3D { width, height, .. } = level.extent(target);
+        let info = DepthReduceInfo {
             image_size: UVec2::new(width, height),
-            // `vk::SampleCountFlags` as raw maps to the amount of samples.
-            sample: depth_image.image().sample_count().as_raw(),
+            target,
         };
 
-        recorder.push_consts(self.resolve.layout(), &[PushConst {
+        let layout = pyramid.reduce.layout();
+
+        recorder.push_consts(layout, &[PushConst {
             stage: vk::ShaderStageFlags::COMPUTE,
             bytes: bytemuck::bytes_of(&info),
         }]);
-       
-        recorder.dispatch(self.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
+
+        recorder.dispatch(pyramid.reduce.clone(), [width / 32, height / 32, 1]);
 
         recorder.image_barrier(&ImageBarrierInfo {
             flags: vk::DependencyFlags::BY_REGION,
@@ -398,78 +450,84 @@ impl DepthPyramid {
             src_mask: vk::AccessFlags2::SHADER_WRITE,
             dst_mask: vk::AccessFlags2::SHADER_READ,
             new_layout: vk::ImageLayout::GENERAL,
-            image: self.stagings[frame_index].image().clone(),
-            mips: self.stagings[frame_index].image().mip_levels(),
+            image: level.clone(),
+            mips: target..target + 1,
         });
-
-        recorder.image_barrier(&ImageBarrierInfo {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::empty(),
-            src_mask: vk::AccessFlags2::SHADER_READ,
-            dst_mask: vk::AccessFlags2::empty(),
-            new_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL,
-            image: depth_image.image().clone(),
-            mips: depth_image.image().mip_levels(),
-        });
-
-        //
-        // Reduce from each level to the next in depth pyramid.
-        //
-
-        recorder.bind_descs(&DescBindInfo {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.reduce.layout(),
-            descs: &[
-                self.sampled[frame_index].clone(),
-                self.storage[frame_index].clone(),
-            ],
-        });
-
-        let pyramid = &self.pyramids[frame_index];
-
-        for target in pyramid.mip_levels() {
-            let vk::Extent3D { width, height, .. } = pyramid.extent(target);
-            let info = DepthReduceInfo {
-                image_size: UVec2::new(width, height),
-                target,
-            };
-
-            let layout = self.reduce.layout();
-
-            recorder.push_consts(layout, &[PushConst {
-                stage: vk::ShaderStageFlags::COMPUTE,
-                bytes: bytemuck::bytes_of(&info),
-            }]);
-
-            recorder.dispatch(self.reduce.clone(), [width / 32, height / 32, 1]);
-
-            recorder.image_barrier(&ImageBarrierInfo {
-                flags: vk::DependencyFlags::BY_REGION,
-                src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-                src_mask: vk::AccessFlags2::SHADER_WRITE,
-                dst_mask: vk::AccessFlags2::SHADER_READ,
-                new_layout: vk::ImageLayout::GENERAL,
-                image: pyramid.clone(),
-                mips: target..target + 1,
-            });
-        }
     }
 }
 
-pub struct SceneView {
-    pub desc: Res<DescSet>,
-    pub camera_desc: Res<DescSet>,
+pub struct CameraDescs {
+    pub descs: PerFrame<Res<DescSet>>,
+    pub view_buffers: PerFrame<Res<Buffer>>,
+    pub proj_buffer: Res<Buffer>,
+}
 
-    view_buffer: Res<Buffer>,
+impl CameraDescs {
+    fn new(renderer: &Renderer, camera: &Camera) -> Result<Self> {
+        let pool = &renderer.static_pool;
+
+        let view_buffers = PerFrame::try_from_fn(|_| {
+            pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
+            })
+        })?;
+
+        let proj_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
+            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+            size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
+        })?;
+
+        renderer.transfer_with(|recorder| {
+            recorder.update_buffer(proj_buffer.clone(), &ProjUniform::new(&camera));
+        })?;
+
+        let layout = Self::layout(renderer)?;
+        let descs = PerFrame::try_from_fn(|index| {
+            pool.create_desc_set(layout.clone(), &[
+                DescBinding::Buffer(proj_buffer.clone()),
+                DescBinding::Buffer(view_buffers[index].clone()),
+            ])
+        })?;
+
+        Ok(Self { descs, view_buffers, proj_buffer })
+    }
+
+    pub fn handle_resize(&self, renderer: &Renderer, camera: &Camera) -> Result<()> {
+        renderer.transfer_with(|recorder| {
+            recorder.update_buffer(self.proj_buffer.clone(), &ProjUniform::new(&camera));
+        })
+    }
+
+    pub fn layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
+        renderer.static_pool.create_desc_layout(&[
+            DescLayoutSlot {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+            DescLayoutSlot {
+                ty: vk::DescriptorType::UNIFORM_BUFFER,
+                stage: vk::ShaderStageFlags::COMPUTE
+                    | vk::ShaderStageFlags::FRAGMENT
+                    | vk::ShaderStageFlags::VERTEX,
+                array_count: None,
+            },
+        ])
+    }
+}
+
+pub struct DrawDesc {
+    desc: Res<DescSet>,
     draw_buffer: Res<Buffer>,
     draw_count_buffer: Res<Buffer>,
     draw_count_host_buffer: Res<Buffer>,
 }
 
-impl SceneView {
-    fn new(renderer: &Renderer, scene: &Scene, proj_buffer: Res<Buffer>) -> Result<Self> {
+impl DrawDesc {
+    pub fn new(renderer: &Renderer, scene: &Scene) -> Result<Self> {
         let pool = &renderer.static_pool;
 
         let draw_count_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
@@ -492,11 +550,6 @@ impl SceneView {
             size: mem::size_of::<DrawCount>() as vk::DeviceSize,
         })?;
 
-        let view_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
-        })?;
-
         renderer.transfer_with(|recorder| {
             recorder.update_buffer(draw_count_buffer.clone(), &DrawCount {
                 primitive_count: scene.primitive_count(),
@@ -504,29 +557,16 @@ impl SceneView {
             });
         })?;
 
-        let layout = Self::desc_layout(renderer)?;
+        let layout = Self::layout(renderer)?;
         let desc = pool.create_desc_set(layout, &[
             DescBinding::Buffer(draw_buffer.clone()),
             DescBinding::Buffer(draw_count_buffer.clone()),
         ])?;
 
-        let camera_layout = Self::camera_desc_layout(renderer)?;
-        let camera_desc = pool.create_desc_set(camera_layout, &[
-            DescBinding::Buffer(proj_buffer.clone()),
-            DescBinding::Buffer(view_buffer.clone()),
-        ])?;
-
-        Ok(Self {
-            draw_count_buffer,
-            draw_buffer,
-            draw_count_host_buffer,
-            camera_desc,
-            view_buffer,
-            desc,
-        })
+        Ok(Self { desc, draw_buffer, draw_count_buffer, draw_count_host_buffer })
     }
 
-    fn desc_layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
+    pub fn layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
         renderer.static_pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
@@ -540,35 +580,13 @@ impl SceneView {
             },
         ])
     }
-
-    fn camera_desc_layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
-        renderer.static_pool.create_desc_layout(&[
-            DescLayoutSlot {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-            DescLayoutSlot {
-                ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
-                array_count: None,
-            },
-        ])
-    }
 }
 
 pub struct ForwardPass {
-    pub scene_views: PerFrame<SceneView>,
     pub lights: Lights,
 
-    proj_buffer: Res<Buffer>,
-
-    pub proj: Proj,
-    pub view: View,
+    pub camera_descs: CameraDescs,
+    pub draw_descs: PerFrame<DrawDesc>,
 
     pub depth_images: PerFrame<Res<ImageView>>,
     pub color_images: PerFrame<Res<ImageView>>,
@@ -583,7 +601,7 @@ pub struct ForwardPass {
 }
 
 impl ForwardPass {
-    pub fn new(renderer: &Renderer, proj: Proj, view: View, scene: &Scene) -> Result<Self> {
+    pub fn new(renderer: &Renderer, camera: &Camera, scene: &Scene) -> Result<Self> {
         let pool = &renderer.pool;
 
         let extent = renderer.swapchain.extent_3d();
@@ -592,23 +610,15 @@ impl ForwardPass {
         let depth_images = create_depth_images(renderer, extent, samples)?;
         let color_images = create_forward_color_images(renderer, extent, samples)?;
 
+        let draw_descs = PerFrame::try_from_fn(|_| {
+            DrawDesc::new(renderer, scene)
+        })?;
+
         let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
-
-        let proj_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
-        })?;
-
-        renderer.transfer_with(|recorder| {
-            recorder.update_buffer(proj_buffer.clone(), &ProjUniform::new(&proj));
-        })?;
-
-        let scene_views = PerFrame::try_from_fn(|_| {
-            SceneView::new(renderer, scene, proj_buffer.clone())
-        })?;
+        let camera_descs = CameraDescs::new(renderer, &camera)?;
 
         let lights =
-            Lights::new(&renderer, &scene_views, &proj, scene.dir_light, &scene.point_lights)?;
+            Lights::new(&renderer, &camera_descs, &camera, scene.dir_light, &scene.point_lights)?;
 
         let render_target_info = RenderTargetInfo {
             color_format: Some(color_images.any().image().format()),
@@ -629,8 +639,8 @@ impl ForwardPass {
                 .depth_test_enable(true);
 
             let layout = pool.create_pipeline_layout(&[], &[
-                scene_views.any().camera_desc.layout(),
-                scene_views.any().desc.layout(),
+                CameraDescs::layout(renderer)?,
+                DrawDesc::layout(renderer)?,
                 scene.desc.layout(),
                 lights.descs.any().layout(),
             ])?;
@@ -656,8 +666,8 @@ impl ForwardPass {
             }];
 
             let layout = pool.create_pipeline_layout(&const_ranges, &[
-                scene_views.any().camera_desc.layout(),
-                scene_views.any().desc.layout(),
+                CameraDescs::layout(renderer)?,
+                DrawDesc::layout(renderer)?,
                 scene.desc.layout(),
                 depth_pyramid.sampled.any().layout(),
             ])?;
@@ -667,15 +677,13 @@ impl ForwardPass {
 
         Ok(Self {
             primitive_count: scene.primitive_count(),
+            camera_descs,
+            draw_descs,
             render_target_info,
             depth_images,
             color_images,
             depth_pyramid,
-            scene_views,
-            proj_buffer,
             lights,
-            proj,
-            view,
             cull,
             render,
         })
@@ -685,116 +693,14 @@ impl ForwardPass {
         self.render_target_info
     }
 
-    pub fn prepare_draw_buffers(
-        &self,
-        frame_index: FrameIndex,
-        scene: &Scene,
-        recorder: &CommandRecorder,
-    ) {
-        let scene_view = &self.scene_views[frame_index];
-
-        recorder.update_buffer(
-            scene_view.view_buffer.clone(),
-            &ViewUniform::new(&self.proj, &self.view),
-        );
-
-        recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: scene_view.view_buffer.clone(),
-            src_mask: vk::AccessFlags2::TRANSFER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            src_stage: vk::PipelineStageFlags2::TRANSFER,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        });
-
-        self.lights.prepare_lights(frame_index, scene_view, recorder);
-
-        recorder.update_buffer(scene_view.draw_count_buffer.clone(), &DrawCount {
-            primitive_count: scene.primitive_count(),
-            command_count: 0,
-        });
-
-        recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: scene_view.draw_count_buffer.clone(),
-            src_mask: vk::AccessFlags2::TRANSFER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
-            src_stage: vk::PipelineStageFlags2::TRANSFER,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        });
-
-        recorder.bind_descs(&DescBindInfo {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.cull.layout(),
-            descs: &[
-                scene_view.camera_desc.clone(),
-                scene_view.desc.clone(),
-                scene.desc.clone(),
-                self.depth_pyramid.sampled[frame_index].clone(),
-            ],
-        });
-
-        let cull_info = CullInfo {
-            frustrum_planes: camera::frustrum_planes(&self.proj, &self.view),
-            pyramid_width: self.depth_pyramid.width as f32,
-            pyramid_height: self.depth_pyramid.height as f32,
-            lod_base: 10.0,
-            lod_step: 2.0,
-        };
-
-        recorder.push_consts(self.cull.layout(), &[PushConst {
-            stage: vk::ShaderStageFlags::COMPUTE,
-            bytes: bytemuck::bytes_of(&cull_info),
-        }]);
-
-        recorder.dispatch(self.cull.clone(), [
-            self.primitive_count.div_ceil(64), 1, 1,
-        ]);
-
-        recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: scene_view.draw_buffer.clone(),
-            src_mask: vk::AccessFlags2::SHADER_WRITE,
-            dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
-        });
-
-        self.depth_pyramid.update(frame_index, &self.depth_images, recorder);
-    }
-
-    pub fn draw(&self, frame_index: FrameIndex, scene: &Scene, recorder: &DrawRecorder) {
-        let scene_view = &self.scene_views[frame_index];
-
-        recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
-        recorder.bind_graphics_pipeline(self.render.clone());
-
-        recorder.bind_descs(&DescBindInfo {
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-            layout: self.render.layout(),
-            descs: &[
-                scene_view.camera_desc.clone(),
-                scene_view.desc.clone(),
-                scene.desc.clone(),
-                self.lights.descs[frame_index].clone(),
-            ],
-        });
-        
-        recorder.draw_indexed_indirect_count(&IndexedIndirectDrawInfo {
-            draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
-            draw_buffer: scene_view.draw_buffer.clone(),
-            count_buffer: scene_view.draw_count_buffer.clone(),
-            max_draw_count: self.primitive_count,
-            count_offset: 0,
-            draw_offset: 0,
-        });
-    }
-
     pub fn pyramid_debug(
         &self,
-        frame_index: FrameIndex,
+        index: FrameIndex,
         swapchain_image: Res<Image>,
         recorder: &CommandRecorder,
         level: u32,
     ) {
-        let pyramid = &self.depth_pyramid.pyramids[frame_index];
+        let pyramid = &self.depth_pyramid.pyramids[index];
 
         recorder.blit_image(&ImageBlitInfo {
             src: pyramid.clone(),
@@ -805,11 +711,12 @@ impl ForwardPass {
         });
     }
 
-    pub fn primitives_drawn(&self, renderer: &Renderer, frame_index: FrameIndex) -> Result<u32> {
-        let scene_view = &self.scene_views[frame_index];
+    /// Get the number of primitives last drawn at `frame_index`.
+    pub fn primitives_drawn(&self, renderer: &Renderer, index: FrameIndex) -> Result<u32> {
+        let draw_desc = &self.draw_descs[index];
 
-        let src = scene_view.draw_count_buffer.clone();
-        let dst = scene_view.draw_count_host_buffer.clone();
+        let src = draw_desc.draw_count_buffer.clone();
+        let dst = draw_desc.draw_count_host_buffer.clone();
 
         renderer.transfer_with(|recorder| {
             recorder.copy_buffers(src.clone(), dst.clone())
@@ -821,18 +728,12 @@ impl ForwardPass {
         Ok(count.command_count)
     }
 
-    pub fn handle_resize(&mut self, renderer: &Renderer) -> Result<()> {
+    pub fn handle_resize(&mut self, renderer: &Renderer, camera: &Camera) -> Result<()> {
         let extent = renderer.swapchain.extent_3d();
         let samples = renderer.device.sample_count();
 
-        self.proj.update(renderer.swapchain.size());
-
-        renderer.transfer_with(|recorder| {
-            recorder.update_buffer(self.proj_buffer.clone(), &ProjUniform::new(&self.proj));
-        })?;
-
-        self.lights.handle_resize(renderer, &self.proj)?;
-
+        self.camera_descs.handle_resize(renderer, &camera)?;
+        self.lights.handle_resize(renderer, &camera)?;
         self.depth_images = create_depth_images(renderer, extent, samples)?;
         self.color_images = create_forward_color_images(renderer, extent, samples)?;
 
@@ -840,6 +741,109 @@ impl ForwardPass {
 
         Ok(())
     }
+}
+
+pub fn prepare_to_draw(
+    pass: &ForwardPass,
+    scene: &Scene,
+    camera: &Camera,
+    index: FrameIndex,
+    recorder: &CommandRecorder,
+) {
+    let view_buffer = &pass.camera_descs.view_buffers[index];
+
+    recorder.update_buffer(view_buffer.clone(), &ViewUniform::new(&camera));
+
+    recorder.buffer_barrier(&BufferBarrierInfo {
+        buffer: view_buffer.clone(),
+        src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        src_stage: vk::PipelineStageFlags2::TRANSFER,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+    });
+
+    light::prepare_lights(&pass.lights, &pass.camera_descs, index, recorder);
+
+    let draw_desc = &pass.draw_descs[index];
+
+    recorder.update_buffer(draw_desc.draw_count_buffer.clone(), &DrawCount {
+        primitive_count: scene.primitive_count(),
+        command_count: 0,
+    });
+
+    recorder.buffer_barrier(&BufferBarrierInfo {
+        buffer: draw_desc.draw_count_buffer.clone(),
+        src_mask: vk::AccessFlags2::TRANSFER_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
+        src_stage: vk::PipelineStageFlags2::TRANSFER,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+    });
+
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::COMPUTE,
+        layout: pass.cull.layout(),
+        descs: &[
+            pass.camera_descs.descs[index].clone(),
+            draw_desc.desc.clone(),
+            scene.desc.clone(),
+            pass.depth_pyramid.sampled[index].clone(),
+        ],
+    });
+
+    let cull_info = CullInfo {
+        frustrum_planes: camera.frustrum_planes(),
+        pyramid_width: pass.depth_pyramid.width as f32,
+        pyramid_height: pass.depth_pyramid.height as f32,
+        lod_base: 10.0,
+        lod_step: 2.0,
+    };
+
+    recorder.push_consts(pass.cull.layout(), &[PushConst {
+        stage: vk::ShaderStageFlags::COMPUTE,
+        bytes: bytemuck::bytes_of(&cull_info),
+    }]);
+
+    recorder.dispatch(pass.cull.clone(), [
+        pass.primitive_count.div_ceil(64), 1, 1,
+    ]);
+
+    recorder.buffer_barrier(&BufferBarrierInfo {
+        buffer: draw_desc.draw_buffer.clone(),
+        src_mask: vk::AccessFlags2::SHADER_WRITE,
+        dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
+    });
+
+    update_depth_pyramid(&pass.depth_pyramid, index, &pass.depth_images[index], recorder);
+}
+
+pub fn draw(pass: &ForwardPass, scene: &Scene, index: FrameIndex, recorder: &DrawRecorder) {
+    let camera_desc = &pass.camera_descs.descs[index];
+    let draw_desc = &pass.draw_descs[index];
+
+    recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
+    recorder.bind_graphics_pipeline(pass.render.clone());
+
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::GRAPHICS,
+        layout: pass.render.layout(),
+        descs: &[
+            camera_desc.clone(),
+            draw_desc.desc.clone(),
+            scene.desc.clone(),
+            pass.lights.descs[index].clone(),
+        ],
+    });
+    
+    recorder.draw_indexed_indirect_count(&IndexedIndirectDrawInfo {
+        draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
+        draw_buffer: draw_desc.draw_buffer.clone(),
+        count_buffer: draw_desc.draw_count_buffer.clone(),
+        max_draw_count: pass.primitive_count,
+        count_offset: 0,
+        draw_offset: 0,
+    });
 }
 
 fn create_depth_images(

@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use std::mem;
 
-use crate::scene::SceneView;
-use crate::camera::Proj;
+use crate::scene::*;
+use crate::camera::*;
 use crate::resource::*;
 use crate::command::*;
 use crate::core::*;
@@ -84,16 +84,16 @@ pub struct LightInfo {
 }
 
 impl LightInfo {
-    fn new(dir_light: DirLight, point_light_count: u32, proj: &Proj) -> Self {
-        let width = proj.surface_size.x;
-        let height = proj.surface_size.y;
+    fn new(dir_light: DirLight, point_light_count: u32, camera: &Camera) -> Self {
+        let width = camera.surface_size.x;
+        let height = camera.surface_size.y;
 
         let subdivisions = UVec4::new(12, 12, 24, 12 * 12 * 24);
         let cluster_size = UVec2::new(width as u32 / subdivisions.x, height as u32 / subdivisions.y);
 
         let depth_factors = Vec2::new(
-            subdivisions.z as f32 / (proj.z_far / proj.z_near).ln(),
-            subdivisions.z as f32 * proj.z_near.ln() / (proj.z_far / proj.z_near).ln(),
+            subdivisions.z as f32 / (camera.z_far / camera.z_near).ln(),
+            subdivisions.z as f32 * camera.z_near.ln() / (camera.z_far / camera.z_near).ln(),
         );
 
         let padding = [0x0; 3];
@@ -199,8 +199,8 @@ pub struct Lights {
 impl Lights {
     pub fn new(
         renderer: &Renderer,
-        scene_views: &PerFrame<SceneView>,
-        proj: &Proj,
+        camera_descs: &CameraDescs,
+        camera: &Camera,
         dir_light: DirLight,
         lights: &[PointLight],
     ) -> Result<Self> {
@@ -208,7 +208,7 @@ impl Lights {
 
         let point_light_count = lights.len() as u32;
 
-        let info = LightInfo::new(dir_light, point_light_count, proj);
+        let info = LightInfo::new(dir_light, point_light_count, camera);
         let cluster_count = info.cluster_count() as usize;
 
         let info_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
@@ -294,7 +294,7 @@ impl Lights {
         })?;
 
         let layout = pool.create_pipeline_layout(&[], &[
-            scene_views.any().camera_desc.layout(),
+            CameraDescs::layout(renderer)?,
             layout,
         ])?;
 
@@ -328,7 +328,7 @@ impl Lights {
                 bind_point: vk::PipelineBindPoint::COMPUTE,
                 layout: cluster_build.layout(),
                 descs: &[
-                    scene_views.any().camera_desc.clone(),
+                    camera_descs.descs.any().clone(),
                     descs.any().clone()
                 ],
             });
@@ -361,47 +361,8 @@ impl Lights {
         self.build_clusters.submit_wait_idle()
     }
 
-    pub fn prepare_lights(
-        &self,
-        frame_index: FrameIndex,
-        scene_view: &SceneView,
-        recorder: &CommandRecorder,
-    ) {
-        recorder.bind_descs(&DescBindInfo {
-            bind_point: vk::PipelineBindPoint::COMPUTE,
-            layout: self.light_update.layout(),
-            descs: &[
-                scene_view.camera_desc.clone(),
-                self.descs[frame_index].clone(),
-            ],
-        });
-
-        recorder.dispatch(self.light_update.clone(), [
-            self.light_count.div_ceil(64), 1, 1,
-        ]);
-
-        recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: self.light_pos_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags2::SHADER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        });
-
-        let group_count = self.info.cluster_subdivisions();
-        recorder.dispatch(self.cluster_update.clone(), group_count.into());
-
-        recorder.buffer_barrier(&BufferBarrierInfo {
-            buffer: self.light_mask_buffers[frame_index].clone(),
-            src_mask: vk::AccessFlags2::SHADER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
-        });
-    }
-
-    pub fn handle_resize(&mut self, renderer: &Renderer, proj: &Proj) -> Result<()> {
-        self.info = LightInfo::new(self.dir_light, self.light_count, proj);
+    pub fn handle_resize(&mut self, renderer: &Renderer, camera: &Camera) -> Result<()> {
+        self.info = LightInfo::new(self.dir_light, self.light_count, camera);
         renderer.transfer_with(|recorder| {
             recorder.update_buffer(self.info_buffer.clone(), &self.info);
         })?;
@@ -409,5 +370,46 @@ impl Lights {
         self.build_clusters()
     }
 }
+
+pub fn prepare_lights(
+    lights: &Lights,
+    camera_descs: &CameraDescs,
+    index: FrameIndex,
+    recorder: &CommandRecorder,
+) {
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::COMPUTE,
+        layout: lights.light_update.layout(),
+        descs: &[
+            camera_descs.descs[index].clone(),
+            lights.descs[index].clone(),
+        ],
+    });
+
+    recorder.dispatch(lights.light_update.clone(), [
+        lights.light_count.div_ceil(64), 1, 1,
+    ]);
+
+    recorder.buffer_barrier(&BufferBarrierInfo {
+        buffer: lights.light_pos_buffers[index].clone(),
+        src_mask: vk::AccessFlags2::SHADER_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+    });
+
+    let group_count = lights.info.cluster_subdivisions();
+    recorder.dispatch(lights.cluster_update.clone(), group_count.into());
+
+    recorder.buffer_barrier(&BufferBarrierInfo {
+        buffer: lights.light_mask_buffers[index].clone(),
+        src_mask: vk::AccessFlags2::SHADER_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
+    });
+}
+
+
 
 const MAX_LIGHT_COUNT: usize = 256;

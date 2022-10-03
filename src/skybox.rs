@@ -5,7 +5,7 @@ use ash::vk;
 use crate::command::*;
 use crate::core::*;
 use crate::resource::*;
-use crate::camera::{View, Proj};
+use crate::camera::Camera;
 use crate::light::Lights;
 
 use std::mem;
@@ -162,11 +162,7 @@ pub struct Skybox {
 }
 
 impl Skybox {
-    pub fn new(
-        renderer: &Renderer,
-        render_target_info: RenderTargetInfo,
-        lights: &Lights,
-    ) -> Result<Self> {
+    pub fn new(renderer: &Renderer, target_info: RenderTargetInfo, lights: &Lights) -> Result<Self> {
         let pool = &renderer.static_pool;
         let size = 64;
 
@@ -264,7 +260,7 @@ impl Skybox {
         }];
 
         let pipeline = pool.create_graphics_pipeline(GraphicsPipelineInfo {
-            render_target_info, 
+            render_target_info: target_info, 
             vertex_attributes,
             vertex_shader,
             fragment_shader,
@@ -275,24 +271,24 @@ impl Skybox {
 
         Ok(Self { cube_map, descriptor, pipeline, generator })
     }
+}
 
-    pub fn draw(&self, proj: &Proj, view: &View, recorder: &DrawRecorder) {
-        recorder.bind_vertex_buffer(self.cube_map.vertex_buffer.clone());
-        recorder.bind_graphics_pipeline(self.pipeline.clone());
+pub fn draw(skybox: &Skybox, camera: &Camera, recorder: &DrawRecorder) {
+    recorder.bind_vertex_buffer(skybox.cube_map.vertex_buffer.clone());
+    recorder.bind_graphics_pipeline(skybox.pipeline.clone());
 
-        recorder.bind_descs(&DescBindInfo {
-            bind_point: vk::PipelineBindPoint::GRAPHICS,
-            layout: self.pipeline.layout(),
-            descs: &[self.descriptor.clone()],
-        });
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::GRAPHICS,
+        layout: skybox.pipeline.layout(),
+        descs: &[skybox.descriptor.clone()],
+    });
 
-        let transform = proj.mat * Mat4::from_mat3(Mat3::from_mat4(view.mat));
+    let transform = camera.proj * Mat4::from_mat3(Mat3::from_mat4(camera.view));
 
-        recorder.push_consts(self.pipeline.layout(), &[PushConst {
-            stage: vk::ShaderStageFlags::VERTEX,
-            bytes: bytemuck::bytes_of(&transform),
-        }]);
+    recorder.push_consts(skybox.pipeline.layout(), &[PushConst {
+        stage: vk::ShaderStageFlags::VERTEX,
+        bytes: bytemuck::bytes_of(&transform),
+    }]);
 
-        recorder.draw(36, 0);
-    }
+    recorder.draw(36, 0);
 }

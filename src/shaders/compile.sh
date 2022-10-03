@@ -8,9 +8,6 @@ glslc depth_resolve.comp.glsl -o ../../assets/shaders/depth_resolve.comp.spv
 glslc sdf.vert.glsl -o ../../assets/shaders/sdf.vert.spv
 glslc sdf.frag.glsl -o ../../assets/shaders/sdf.frag.spv
 
-glslc shadow_pass.vert.glsl -o ../../assets/shaders/shadow_pass.vert.spv
-glslc shadow_pass.frag.glsl -o ../../assets/shaders/shadow_pass.frag.spv
-
 glslc skybox.vert.glsl -o ../../assets/shaders/skybox.vert.spv
 glslc skybox.frag.glsl -o ../../assets/shaders/skybox.frag.spv
 glslc skybox.comp.glsl -o ../../assets/shaders/skybox.comp.spv
