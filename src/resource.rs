@@ -740,8 +740,17 @@ impl Drop for ComputePipeline {
 
 #[derive(Clone, Copy)]
 pub struct RenderTargetInfo {
+    /// The format of depth image used for rendering.
     pub depth_format: vk::Format,
-    pub color_format: vk::Format,
+
+    /// The format of color image used for rendering.
+    ///
+    /// `None` if no color target should be used.
+    pub color_format: Option<vk::Format>,
+
+    /// The amount of samples used when rendering.
+    ///
+    /// All render targets should have same sample count.
     pub sample_count: vk::SampleCountFlags,
 }
 
@@ -847,7 +856,12 @@ impl ResourcePool {
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-        let color_formats = [info.render_target_info.color_format];
+        let color_formats: SmallVec<[_; 1]> =
+            if let Some(format) = info.render_target_info.color_format {
+                SmallVec::from([format])
+            } else {
+                SmallVec::new()
+            };
 
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .color_attachment_formats(&color_formats)

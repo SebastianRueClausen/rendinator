@@ -30,7 +30,7 @@ use crate::command::*;
 use crate::core::*;
 use crate::text::TextPass;
 use crate::scene::{ForwardPass, Scene};
-use crate::light::PointLight;
+use crate::light::{DirLight, PointLight};
 use crate::camera::{Proj, ProjMode, View};
 use crate::skybox::Skybox;
 
@@ -62,9 +62,10 @@ fn main() -> Result<()> {
     let view = View::new();
 
     let lights = debug_lights();
+    let dir_light = DirLight::default();
 
     let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
-    let scene = Scene::from_scene_asset(&renderer, &scene, &lights)?;
+    let scene = Scene::from_scene_asset(&renderer, &scene, dir_light, &lights)?;
 
     let mut forward_pass = ForwardPass::new(&renderer, proj, view, &scene)?;
 
@@ -114,7 +115,7 @@ fn main() -> Result<()> {
                     forward_pass.prepare_draw_buffers(frame_index, &scene, recorder);
 
                     let render_info = RenderInfo {
-                        color_target: forward_pass.color_images[frame_index].clone(),
+                        color_target: Some(forward_pass.color_images[frame_index].clone()),
                         depth_target: forward_pass.depth_images[frame_index].clone(),
                         swapchain: swapchain.clone(),
                     };

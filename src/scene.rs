@@ -4,7 +4,7 @@ use ash::vk;
 
 use std::mem;
 
-use crate::light::{PointLight, Lights};
+use crate::light::{PointLight, DirLight, Lights};
 use crate::core::*;
 use crate::resource::*;
 use crate::command::*;
@@ -402,6 +402,17 @@ impl DepthPyramid {
             mips: self.stagings[frame_index].image().mip_levels(),
         });
 
+        recorder.image_barrier(&ImageBarrierInfo {
+            flags: vk::DependencyFlags::BY_REGION,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::empty(),
+            src_mask: vk::AccessFlags2::SHADER_READ,
+            dst_mask: vk::AccessFlags2::empty(),
+            new_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL,
+            image: depth_image.image().clone(),
+            mips: depth_image.image().mip_levels(),
+        });
+
         //
         // Reduce from each level to the next in depth pyramid.
         //
@@ -562,7 +573,7 @@ pub struct ForwardPass {
     pub depth_images: PerFrame<Res<ImageView>>,
     pub color_images: PerFrame<Res<ImageView>>,
 
-    render: Res<GraphicsPipeline>, 
+    pub render: Res<GraphicsPipeline>, 
     cull: Res<ComputePipeline>,
 
     depth_pyramid: DepthPyramid,
@@ -596,10 +607,11 @@ impl ForwardPass {
             SceneView::new(renderer, scene, proj_buffer.clone())
         })?;
 
-        let lights = Lights::new(&renderer, &scene_views, &proj, &scene.point_lights)?;
+        let lights =
+            Lights::new(&renderer, &scene_views, &proj, scene.dir_light, &scene.point_lights)?;
 
         let render_target_info = RenderTargetInfo {
-            color_format: color_images.any().image().format(),
+            color_format: Some(color_images.any().image().format()),
             depth_format: depth_images.any().image().format(),
             sample_count: samples,
         };
@@ -697,7 +709,7 @@ impl ForwardPass {
         self.lights.prepare_lights(frame_index, scene_view, recorder);
 
         recorder.update_buffer(scene_view.draw_count_buffer.clone(), &DrawCount {
-            primitive_count: self.primitive_count,
+            primitive_count: scene.primitive_count(),
             command_count: 0,
         });
 
@@ -892,6 +904,7 @@ fn create_forward_color_images(
 pub struct Scene {
     primitives: Vec<Primitive>,
     point_lights: Vec<PointLight>,
+    dir_light: DirLight,
 
     desc: Res<DescSet>,
     index_buffer: Res<Buffer>,
@@ -901,6 +914,7 @@ impl Scene {
     pub fn from_scene_asset(
         renderer: &Renderer,
         scene: &asset::Scene,
+        dir_light: DirLight,
         lights: &[PointLight],
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
@@ -909,8 +923,7 @@ impl Scene {
             .iter()
             .map(|instance| InstanceData {
                 transform: instance.transform,
-                inverse_transpose_transform: instance
-                    .transform
+                inverse_transpose_transform: instance.transform
                     .inverse()
                     .transpose()
             })
@@ -1075,7 +1088,7 @@ impl Scene {
             for image in images.iter() {
                 recorder.image_barrier(&ImageBarrierInfo {
                     flags: vk::DependencyFlags::BY_REGION,
-                    mips: 0..image.mip_level_count(),
+                    mips: image.mip_levels(),
                     new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     src_stage: vk::PipelineStageFlags2::empty(),
                     dst_stage: vk::PipelineStageFlags2::TRANSFER,
@@ -1094,7 +1107,7 @@ impl Scene {
             for image in images.iter() {
                 recorder.image_barrier(&ImageBarrierInfo {
                     flags: vk::DependencyFlags::BY_REGION,
-                    mips: 0..image.mip_level_count(),
+                    mips: image.mip_levels(),
                     new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
                     src_stage: vk::PipelineStageFlags2::TRANSFER,
                     dst_stage: vk::PipelineStageFlags2::empty(),
@@ -1155,7 +1168,7 @@ impl Scene {
 
         let point_lights = Vec::from(lights);
 
-        Ok(Self { desc, primitives, index_buffer, point_lights })
+        Ok(Self { desc, primitives, index_buffer, point_lights, dir_light })
     }
 
     pub fn primitive_count(&self) -> u32 {

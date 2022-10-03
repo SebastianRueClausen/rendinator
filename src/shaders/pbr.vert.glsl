@@ -14,15 +14,15 @@ layout (set = 0, binding = 1) uniform ViewBuf {
 	View view;
 };
 
-layout (std430, set = 1, binding = 0) buffer DrawBuffer {
+layout (std430, set = 1, binding = 0) buffer DrawBuf {
 	DrawCommand draw_commands[];
 };
 
-layout (std430, set = 2, binding = 0) buffer Instances {
+layout (std430, set = 2, binding = 0) buffer InstanceBuf {
 	InstanceData instance_data[];
 };
 
-layout (std430, set = 2, binding = 2) readonly buffer Verts {
+layout (std430, set = 2, binding = 2) readonly buffer VertBuf {
 	Vert verts[];
 };
 

@@ -161,7 +161,7 @@ pub struct DescBindInfo<'a> {
 }
 
 pub struct RenderInfo {
-    pub color_target: Res<ImageView>,
+    pub color_target: Option<Res<ImageView>>,
     pub depth_target: Res<ImageView>,
     pub swapchain: Res<Swapchain>,
 }
@@ -337,7 +337,7 @@ impl<'a> DrawRecorder<'a> {
 
         self.buffer.bind_resource(pipeline);
     }
-    
+
     pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
         unsafe {
             self.device().handle.cmd_draw(
@@ -533,19 +533,23 @@ impl<'a> CommandRecorder<'a> {
     }
 
     pub fn render<F: FnOnce(&DrawRecorder)>(&self, info: &RenderInfo, f: F) {
-        let color_attachments = [
-            vk::RenderingAttachmentInfo::builder()
-                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                .image_view(info.color_target.handle)
-                .load_op(vk::AttachmentLoadOp::DONT_CARE)
-                .store_op(vk::AttachmentStoreOp::STORE)
-                .clear_value(vk::ClearValue {
-                    color: vk::ClearColorValue {
-                        float32: [0.0, 0.0, 0.0, 1.0],
-                    },
-                })
-                .build(),
-        ];
+        let color_attachments: SmallVec<[_; 1]> = if let Some(target) = &info.color_target {
+            SmallVec::from([
+                vk::RenderingAttachmentInfo::builder()
+                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                    .image_view(target.handle)
+                    .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .store_op(vk::AttachmentStoreOp::STORE)
+                    .clear_value(vk::ClearValue {
+                        color: vk::ClearColorValue {
+                            float32: [0.0, 0.0, 0.0, 1.0],
+                        },
+                    })
+                    .build()
+            ])
+        } else {
+            SmallVec::new()
+        };
 
         let depth_resolve_attachment = vk::RenderingAttachmentInfo::builder()
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)

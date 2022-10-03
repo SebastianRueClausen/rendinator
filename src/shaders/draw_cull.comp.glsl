@@ -37,11 +37,11 @@ layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 };
 
 
-layout (std430, set = 1, binding = 0) writeonly buffer DrawBuffer {
+layout (std430, set = 1, binding = 0) writeonly buffer DrawBuf {
 	DrawCommand draw_commands[];
 };
 
-layout (std430, set = 1, binding = 1) buffer DrawCount {
+layout (std430, set = 1, binding = 1) buffer DrawCountBuf {
 	uint command_count;
 	uint primitive_count;
 };

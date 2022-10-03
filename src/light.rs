@@ -178,7 +178,6 @@ struct LightMask {
 ///
 pub struct Lights {
     pub info: LightInfo,
-
     pub info_buffer: Res<Buffer>,
 
     pub light_buffer: Res<Buffer>,
@@ -187,6 +186,7 @@ pub struct Lights {
     pub light_mask_buffers: PerFrame<Res<Buffer>>,
 
     pub light_count: u32,
+    pub dir_light: DirLight,
 
     pub descs: PerFrame<Res<DescSet>>,
 
@@ -201,12 +201,12 @@ impl Lights {
         renderer: &Renderer,
         scene_views: &PerFrame<SceneView>,
         proj: &Proj,
+        dir_light: DirLight,
         lights: &[PointLight],
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
 
         let point_light_count = lights.len() as u32;
-        let dir_light = DirLight::default();
 
         let info = LightInfo::new(dir_light, point_light_count, proj);
         let cluster_count = info.cluster_count() as usize;
@@ -348,6 +348,7 @@ impl Lights {
             light_count,
             light_update,
             cluster_update,
+            dir_light,
             descs,
         };
 
@@ -399,16 +400,8 @@ impl Lights {
         });
     }
 
-    /// Handle window resize.
-    ///
-    /// # Warning
-    ///
-    /// This must only be called when the device is idle, e.g. no rendering is happening, as
-    /// during so will upload data to a buffer which might be in use.
     pub fn handle_resize(&mut self, renderer: &Renderer, proj: &Proj) -> Result<()> {
-        let dir_light = DirLight::default();
-
-        self.info = LightInfo::new(dir_light, self.light_count, proj);
+        self.info = LightInfo::new(self.dir_light, self.light_count, proj);
         renderer.transfer_with(|recorder| {
             recorder.update_buffer(self.info_buffer.clone(), &self.info);
         })?;
