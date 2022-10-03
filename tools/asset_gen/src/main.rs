@@ -2,7 +2,6 @@
 
 use anyhow::{anyhow, Result};
 use glam::{Vec2, Vec3, Vec4, Mat4};
-use intel_tex_2::{bc5, bc7};
 use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
@@ -101,8 +100,6 @@ fn main() -> Result<()> {
 fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels: usize) -> Image {
     match format {
         ImageFormat::Bc(bc) => {
-            use intel_tex_2::RgbaSurface;
-
             // Subtract 2 from the mip count to exclude mip levels of size 1x1 and 2x2, which
             // aren't allowed for block compressed textures.
             let mip_levels = mip_levels - 2;
@@ -131,35 +128,33 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
 
                     // Not effecient at all!
                     let mut mip = image.clone().into_rgba8();
-                    let (width, height, stride) = (mip.width(), mip.height(), mip.width() * 4);
+                    let (width, height) = (mip.width() as usize, mip.height() as usize);
 
-                    match bc {
+                    let format = match bc {
                         BcFormat::Bc5Unorm => {
-                            // Swizzle.
                             for px in mip.pixels_mut() {
                                 px.0[0] = px.0[1];
                                 px.0[1] = px.0[2];
                                 px.0[2] = px.0[3];
                             } 
-                      
-                            let data = mip.into_raw();
-                            let surface = RgbaSurface { width, height, stride, data: &data };
 
-                            bc5::compress_blocks(&surface)
+                            texpresso::Format::Bc5
                         }
-                        BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => {
-                            let settings = if mip.pixels().any(|px| px.0[3] != u8::MAX) {
-                                bc7::alpha_basic_settings()
-                            } else {
-                                bc7::opaque_basic_settings()
-                            };
+                        BcFormat::Bc1Unorm | BcFormat::Bc1Srgb => texpresso::Format::Bc1,
+                    };
 
-                            let data = mip.into_raw();
-                            let surface = RgbaSurface { width, height, stride, data: &data };
+                    let size = format.compressed_size(width as usize, height as usize);
+                    let data = mip.into_raw();
 
-                            bc7::compress_blocks(&settings, &surface)
-                        }
-                    }
+                    let params = texpresso::Params {
+                        algorithm: texpresso::Algorithm::IterativeClusterFit,
+                        ..Default::default()
+                    };
+
+                    let mut output = vec![0x0; size];
+                    format.compress(&data, width as usize, height as usize, params, &mut output);
+
+                    output
                 })
                 .collect();
 
@@ -327,9 +322,9 @@ fn new(path: &Path) -> Result<Self> {
                 .source();
 
             textures.extend([
-                self.load_image(ImageFormat::Bc(BcFormat::Bc7Srgb), &albedo_map)?,
+                self.load_image(ImageFormat::Bc(BcFormat::Bc1Srgb), &albedo_map)?,
                 self.load_image(ImageFormat::Bc(BcFormat::Bc5Unorm), &specular_map)?,
-                self.load_image(ImageFormat::Bc(BcFormat::Bc7Unorm), &normal_map)?,
+                self.load_image(ImageFormat::Bc(BcFormat::Bc1Unorm), &normal_map)?,
             ].into_iter());
         }
 

@@ -58,14 +58,15 @@ impl Scene {
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum BcFormat {
     Bc5Unorm = vk::Format::BC5_UNORM_BLOCK.as_raw() as isize,
-    Bc7Unorm = vk::Format::BC7_UNORM_BLOCK.as_raw() as isize,
-    Bc7Srgb = vk::Format::BC7_SRGB_BLOCK.as_raw() as isize,
+    Bc1Unorm = vk::Format::BC1_RGBA_UNORM_BLOCK.as_raw() as isize,
+    Bc1Srgb = vk::Format::BC1_RGBA_SRGB_BLOCK.as_raw() as isize,
 }
 
 impl BcFormat {
     pub fn block_size(self) -> usize {
         match self {
-            BcFormat::Bc5Unorm | BcFormat::Bc7Unorm | BcFormat::Bc7Srgb => 16,
+            BcFormat::Bc5Unorm => 16,
+            BcFormat::Bc1Unorm | BcFormat::Bc1Srgb => 8,
         }
     }
 }

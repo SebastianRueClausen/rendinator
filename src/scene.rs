@@ -521,16 +521,16 @@ impl CameraDescs {
 
 pub struct DrawDesc {
     desc: Res<DescSet>,
-    draw_buffer: Res<Buffer>,
-    draw_count_buffer: Res<Buffer>,
-    draw_count_host_buffer: Res<Buffer>,
+    cmd_buffer: Res<Buffer>,
+    count_buffer: Res<Buffer>,
+    count_host_buffer: Res<Buffer>,
 }
 
 impl DrawDesc {
     pub fn new(renderer: &Renderer, scene: &Scene) -> Result<Self> {
         let pool = &renderer.static_pool;
 
-        let draw_count_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
+        let count_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::INDIRECT_BUFFER
@@ -538,20 +538,20 @@ impl DrawDesc {
             size: mem::size_of::<DrawCount>() as vk::DeviceSize,
         })?;
 
-        let draw_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
+        let cmd_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER
                 | vk::BufferUsageFlags::TRANSFER_DST
                 | vk::BufferUsageFlags::INDIRECT_BUFFER,
             size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
         })?;
 
-        let draw_count_host_buffer = pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
+        let count_host_buffer = pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
             size: mem::size_of::<DrawCount>() as vk::DeviceSize,
         })?;
 
         renderer.transfer_with(|recorder| {
-            recorder.update_buffer(draw_count_buffer.clone(), &DrawCount {
+            recorder.update_buffer(count_buffer.clone(), &DrawCount {
                 primitive_count: scene.primitive_count(),
                 command_count: 0,
             });
@@ -559,11 +559,11 @@ impl DrawDesc {
 
         let layout = Self::layout(renderer)?;
         let desc = pool.create_desc_set(layout, &[
-            DescBinding::Buffer(draw_buffer.clone()),
-            DescBinding::Buffer(draw_count_buffer.clone()),
+            DescBinding::Buffer(cmd_buffer.clone()),
+            DescBinding::Buffer(count_buffer.clone()),
         ])?;
 
-        Ok(Self { desc, draw_buffer, draw_count_buffer, draw_count_host_buffer })
+        Ok(Self { desc, cmd_buffer, count_buffer, count_host_buffer })
     }
 
     pub fn layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
@@ -715,8 +715,8 @@ impl ForwardPass {
     pub fn primitives_drawn(&self, renderer: &Renderer, index: FrameIndex) -> Result<u32> {
         let draw_desc = &self.draw_descs[index];
 
-        let src = draw_desc.draw_count_buffer.clone();
-        let dst = draw_desc.draw_count_host_buffer.clone();
+        let src = draw_desc.count_buffer.clone();
+        let dst = draw_desc.count_host_buffer.clone();
 
         renderer.transfer_with(|recorder| {
             recorder.copy_buffers(src.clone(), dst.clone())
@@ -766,13 +766,13 @@ pub fn prepare_to_draw(
 
     let draw_desc = &pass.draw_descs[index];
 
-    recorder.update_buffer(draw_desc.draw_count_buffer.clone(), &DrawCount {
+    recorder.update_buffer(draw_desc.count_buffer.clone(), &DrawCount {
         primitive_count: scene.primitive_count(),
         command_count: 0,
     });
 
     recorder.buffer_barrier(&BufferBarrierInfo {
-        buffer: draw_desc.draw_count_buffer.clone(),
+        buffer: draw_desc.count_buffer.clone(),
         src_mask: vk::AccessFlags2::TRANSFER_WRITE,
         dst_mask: vk::AccessFlags2::SHADER_WRITE | vk::AccessFlags2::SHADER_READ,
         src_stage: vk::PipelineStageFlags2::TRANSFER,
@@ -808,7 +808,7 @@ pub fn prepare_to_draw(
     ]);
 
     recorder.buffer_barrier(&BufferBarrierInfo {
-        buffer: draw_desc.draw_buffer.clone(),
+        buffer: draw_desc.cmd_buffer.clone(),
         src_mask: vk::AccessFlags2::SHADER_WRITE,
         dst_mask: vk::AccessFlags2::INDIRECT_COMMAND_READ,
         src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
@@ -838,8 +838,8 @@ pub fn draw(pass: &ForwardPass, scene: &Scene, index: FrameIndex, recorder: &Dra
     
     recorder.draw_indexed_indirect_count(&IndexedIndirectDrawInfo {
         draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
-        draw_buffer: draw_desc.draw_buffer.clone(),
-        count_buffer: draw_desc.draw_count_buffer.clone(),
+        draw_buffer: draw_desc.cmd_buffer.clone(),
+        count_buffer: draw_desc.count_buffer.clone(),
         max_draw_count: pass.primitive_count,
         count_offset: 0,
         draw_offset: 0,
