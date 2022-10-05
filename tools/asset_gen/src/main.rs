@@ -101,7 +101,15 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels: usize) -> Image {
+fn create_image<F>(
+    mut image: image::DynamicImage,
+    format: ImageFormat,
+    encode: F,
+    mip_levels: usize,
+) -> Image
+where
+    F: FnMut(&mut image::Rgba<u8>) + Clone + Copy
+{
     match format {
         ImageFormat::Bc(bc) => {
             // Subtract 2 from the mip count to exclude mip levels of size 1x1 and 2x2, which
@@ -134,19 +142,11 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
                     let mut mip = image.clone().into_rgba8();
                     let (width, height) = (mip.width() as usize, mip.height() as usize);
 
-                    let format = match bc {
-                        BcFormat::Bc5Unorm => {
-                            for px in mip.pixels_mut() {
-                                px.0[0] = px.0[1];
-                                px.0[1] = px.0[2];
-                                px.0[2] = px.0[3];
-                            } 
+                    mip.pixels_mut().for_each(encode);
 
-                            texpresso::Format::Bc5
-                        }
-                        BcFormat::Bc1Unorm | BcFormat::Bc1Srgb => {
-                            texpresso::Format::Bc1
-                        }
+                    let format = match bc {
+                        BcFormat::Bc5Unorm => texpresso::Format::Bc5,
+                        BcFormat::Bc1Unorm | BcFormat::Bc1Srgb => texpresso::Format::Bc1,
                     };
 
                     let size = format.compressed_size(width as usize, height as usize);
@@ -233,6 +233,10 @@ fn fallback_specular_map() -> Image {
     fallback_image(RawFormat::Rg8Unorm, [0, 0])
 }
 
+fn mip_level_count(image: &image::DynamicImage) -> usize {
+    (image.width().max(image.height()) as f32).log2().floor() as usize + 1
+}
+
 struct GltfImporter {
     buffer_data: Vec<Box<[u8]>>,
     parent_path: PathBuf,
@@ -288,11 +292,7 @@ impl GltfImporter {
         &self.buffer_data[view.buffer().index()][start..end]
     }
 
-    fn load_image(
-        &self,
-        format: ImageFormat,
-        source: &gltf::image::Source,
-    ) -> Result<Image> {
+    fn load_image(&self, source: &gltf::image::Source) -> Result<image::DynamicImage> {
         let image = match source {
             gltf::image::Source::View { view, mime_type } => {
                 let format = match *mime_type {
@@ -315,14 +315,7 @@ impl GltfImporter {
             }
         };
 
-        // Calculate the number of mip levels.
-        //
-        // `(image.width().max(image.height()) as f32).log2().floor()` is the amount of times the 
-        // texture can be halved in size until it's 1x1 pixels big. The `+ 1` is to include the
-        // full resolution texture.
-        let mip_levels = (image.width().max(image.height()) as f32).log2().floor() as usize + 1;
-
-        Ok(create_image(image, format, mip_levels))
+        Ok(image)
     }
 
     fn load_scene(self) -> Result<Scene> {
@@ -337,8 +330,10 @@ impl GltfImporter {
                         .texture()
                         .source()
                         .source();
-
-                    self.load_image(ImageFormat::Bc(BcFormat::Bc1Srgb), &image)
+                    self.load_image(&image).map(|image| {
+                        let mip_levels = mip_level_count(&image);
+                        create_image(image, ImageFormat::Bc(BcFormat::Bc1Srgb), |_| {}, mip_levels)
+                    })
                 })
                 .unwrap_or_else(|| {
                     let base_color = mat
@@ -356,8 +351,10 @@ impl GltfImporter {
                         .texture()
                         .source()
                         .source();
-
-                    self.load_image(ImageFormat::Bc(BcFormat::Bc1Unorm), &image)
+                    self.load_image(&image).map(|image| {
+                        let mip_levels = mip_level_count(&image);
+                        create_image(image, ImageFormat::Bc(BcFormat::Bc1Unorm), |_| {}, mip_levels)
+                    })
                 })
                 .unwrap_or_else(|| {
                     Ok(fallback_normal_map())
@@ -371,8 +368,17 @@ impl GltfImporter {
                         .texture()
                         .source()
                         .source();
+                    self.load_image(&image).map(|image| {
+                        let mip_count = mip_level_count(&image);
+                        let format = ImageFormat::Bc(BcFormat::Bc5Unorm);
 
-                    self.load_image(ImageFormat::Bc(BcFormat::Bc5Unorm), &image)
+                        let encode = |px: &mut image::Rgba<u8>| {
+                            px.0[0] = px.0[1];
+                            px.0[1] = px.0[2];
+                        };
+
+                        create_image(image, format, encode, mip_count)
+                    })
                 })
                 .unwrap_or_else(|| {
                     let metallic_factor = mat
@@ -836,7 +842,7 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
         .collect();
 
     let glyphs = glyphs?;
-    let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm), 1);
+    let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm), |_| {}, 1);
 
     Ok(Font { size: font.info.size, atlas, glyphs })
 }

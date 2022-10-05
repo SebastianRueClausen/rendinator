@@ -52,8 +52,7 @@ uvec3 cluster_coords(vec2 coords, float view_z) {
 }
 
 vec3 get_normal() {
-	// Normal in tangent space.
-	const vec3 tangent_normal = texture(textures[in_textures.z], in_texcoord).xyz * 2.0 - 1.0;
+	const vec3 tangent_normal = texture(textures[in_textures.z], in_texcoord).xyz * 2 - 1;
 
 	const vec3 tangent = normalize(in_world_tangent.xyz);
 	const vec3 normal = normalize(in_world_normal);
@@ -164,11 +163,11 @@ void main() {
 	out_color = debug_cluster_overlay(out_color, cluster_coords, light_count);
 #endif
 
-#ifdef ROUGHNESS_DEBUG
+#ifdef METALLIC_DEBUG
 	out_color = vec4(vec3(specular_params.g), 1.0);
 #endif
 
-#ifdef METALLIC_DEBUG
+#ifdef ROUGHNESS_DEBUG
 	out_color = vec4(vec3(specular_params.r), 1.0);
 #endif
 
