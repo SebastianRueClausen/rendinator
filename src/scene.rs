@@ -794,8 +794,8 @@ pub fn prepare_to_draw(
         frustrum_planes: camera.frustrum_planes(),
         pyramid_width: pass.depth_pyramid.width as f32,
         pyramid_height: pass.depth_pyramid.height as f32,
-        lod_base: 10.0,
-        lod_step: 1.5,
+        lod_base: 20.0,
+        lod_step: 5.0,
     };
 
     recorder.push_consts(pass.cull.layout(), &[PushConst {

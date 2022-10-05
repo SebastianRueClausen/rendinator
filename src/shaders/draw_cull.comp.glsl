@@ -156,7 +156,8 @@ void main() {
 		const uint command_id = atomicAdd(command_count, 1);
 
 #ifdef LOD
-		const float lod_factor = log2(length(view_center) / cull_info.lod_base) / log2(cull_info.lod_step);
+		const float dist = max(length(view_center) - radius, 0.0);
+		const float lod_factor = log2(dist / cull_info.lod_base) / log2(cull_info.lod_step);
 		const uint lod_index = min(uint(max(lod_factor + 1, 0)), primitive.lod_count - 1);
 #else
 		const uint lod_index = 0;

@@ -19,10 +19,14 @@ pub struct Vertex {
     /// The textexture coordinates as half precision floats.
     pub texcoord: [u16; 2],
 
+    pub _pad: [u16; 2],
+
     /// The normal vector encoded via stereographic projection.
     ///
     /// https://aras-p.info/texts/CompactNormalStorage.html
-    pub normal: [u16; 2],
+    pub normal: [u16; 4],
+
+    pub tangent: [u16; 4],
 }
 
 /// All mesh and texture data for at scene.

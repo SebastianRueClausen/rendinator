@@ -46,7 +46,9 @@ struct InstanceData {
 struct Vert {
 	f16vec4 position;
 	f16vec2 texcoord;
-	f16vec2 normal;
+	f16vec2 padding;
+	f16vec4 normal;
+	f16vec4 tangent;
 };
 
 #endif

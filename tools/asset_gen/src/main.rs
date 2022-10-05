@@ -678,34 +678,12 @@ impl GltfImporter {
                     let mut vertices: Vec<_> = vertices
                         .iter()
                         .map(|vertex| {
-                            let normal = vertex.normal;
-
-                            let tb = if normal.x.abs() > normal.z.abs() {
-                                Vec3::new(-normal.y, normal.x, 0.0)
-                            } else {
-                                Vec3::new(0.0, -normal.z, normal.y)
-                            };
-
-                            let mut theta = tb.dot(vertex.tangent.truncate()).acos();
-
-                            if vertex.tangent.w.is_sign_negative() {
-                                theta *= -1.0;
-                            }
-
-                            let scale = 1.7777;
-
-                            let mut nx = vertex.normal.x / (vertex.normal.z + 1.0);
-                            let mut ny = vertex.normal.y / (vertex.normal.z + 1.0);
-
-                            nx /= scale;
-                            ny /= scale;
-
-                            nx = nx * 0.5 + 0.5;
-                            ny = ny * 0.5 + 0.5;
-
-                            let normal = [nx, ny].map(|val| {
-                                meshopt::utilities::quantize_half(val)
-                            });
+                            let normal = vertex.normal
+                                .extend(1.0)
+                                .to_array()
+                                .map(|val| {
+                                    meshopt::utilities::quantize_half(val)
+                                });
 
                             let texcoord = vertex.texcoord
                                 .to_array()
@@ -714,13 +692,21 @@ impl GltfImporter {
                                 });
 
                             let position = vertex.position
-                                .extend(theta)
+                                .extend(1.0)
                                 .to_array()
                                 .map(|val| {
                                     meshopt::utilities::quantize_half(val)
                                 });
 
-                            Vertex { position, normal, texcoord }
+                            let tangent = vertex.tangent
+                                .to_array()
+                                .map(|val| {
+                                    meshopt::utilities::quantize_half(val)
+                                });
+
+                            let _pad = [0x0; 2];
+
+                            Vertex { position, normal, texcoord, _pad, tangent }
                         })
                         .collect();
 
