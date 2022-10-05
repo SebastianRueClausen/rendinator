@@ -63,6 +63,10 @@ struct Args {
 fn main() -> Result<()> {
     use clap::Parser;
 
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(num_cpus::get())
+        .build_global()?;
+
     let args = Args::parse();
 
     match &args.asset_kind {
@@ -140,7 +144,9 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
 
                             texpresso::Format::Bc5
                         }
-                        BcFormat::Bc1Unorm | BcFormat::Bc1Srgb => texpresso::Format::Bc1,
+                        BcFormat::Bc1Unorm | BcFormat::Bc1Srgb => {
+                            texpresso::Format::Bc1
+                        }
                     };
 
                     let size = format.compressed_size(width as usize, height as usize);
@@ -204,30 +210,53 @@ fn create_image(mut image: image::DynamicImage, format: ImageFormat, mip_levels:
     }
 }
 
+fn fallback_image<const N: usize>(format: RawFormat, rgba: [u8; N]) -> Image {
+    let format = ImageFormat::Raw(format);
+    let (width, height) = (4, 4);
+
+    let mips = vec![(0..4 * 4)
+        .flat_map(|_| rgba)
+        .collect()];
+
+    Image { width, height, format, mips }
+}
+
+fn fallback_albedo_map() -> Image {
+    fallback_image(RawFormat::Rgba8Srgb, [255; 4])
+}
+
+fn fallback_normal_map() -> Image {
+    fallback_image(RawFormat::Rgba8Unorm, [128, 128, 255, 255])
+}
+
+fn fallback_specular_map() -> Image {
+    fallback_image(RawFormat::Rg8Unorm, [0, 0])
+}
+
 struct GltfImporter {
-buffer_data: Vec<Box<[u8]>>,
-parent_path: PathBuf,
-gltf: gltf::Gltf,
+    buffer_data: Vec<Box<[u8]>>,
+    parent_path: PathBuf,
+    gltf: gltf::Gltf,
 }
 
 impl GltfImporter {
-fn new(path: &Path) -> Result<Self> {
-    let file = match fs::File::open(path) {
-        Ok(file) => file,
-        Err(err) => {
-            return Err(anyhow!("can't read file {path:?}: {err}"));
-        }
-    };
+    fn new(path: &Path) -> Result<Self> {
+        let file = match fs::File::open(path) {
+            Ok(file) => file,
+            Err(err) => {
+                return Err(anyhow!("can't read file {path:?}: {err}"));
+            }
+        };
 
-    let reader = io::BufReader::new(file);
-    let gltf = gltf::Gltf::from_reader(reader)?;
+        let reader = io::BufReader::new(file);
+        let gltf = gltf::Gltf::from_reader(reader)?;
 
-    let parent_path = path
-        .parent()
-        .expect("`path` doesn't have a parent directory")
-        .to_path_buf();
+        let parent_path = path
+            .parent()
+            .expect("`path` doesn't have a parent directory")
+            .to_path_buf();
 
-    let buffer_data: Result<Vec<_>> = gltf
+        let buffer_data: Result<Vec<_>> = gltf
             .buffers()
             .map(|buffer| {
                 Ok(match buffer.source() {
@@ -303,32 +332,66 @@ fn new(path: &Path) -> Result<Self> {
             let albedo_map = mat
                 .pbr_metallic_roughness()
                 .base_color_texture()
-                .ok_or_else(|| anyhow!("no base color texture on material"))?
-                .texture()
-                .source()
-                .source();
+                .map(|texture| {
+                    let image = texture
+                        .texture()
+                        .source()
+                        .source();
+
+                    self.load_image(ImageFormat::Bc(BcFormat::Bc1Srgb), &image)
+                })
+                .unwrap_or_else(|| {
+                    let base_color = mat
+                        .pbr_metallic_roughness()
+                        .base_color_factor()
+                        .map(|factor| (255.0 / factor) as u8);
+
+                    Ok(fallback_image(RawFormat::Rgba8Srgb, base_color))
+                })?;
+
             let normal_map = mat
                 .normal_texture()
-                .ok_or_else(|| anyhow!("no normal texture in material"))?
-                .texture()
-                .source()
-                .source();
+                .map(|texture| {
+                    let image = texture
+                        .texture()
+                        .source()
+                        .source();
+
+                    self.load_image(ImageFormat::Bc(BcFormat::Bc1Unorm), &image)
+                })
+                .unwrap_or_else(|| {
+                    Ok(fallback_normal_map())
+                })?;
+
             let specular_map = mat
                 .pbr_metallic_roughness()
                 .metallic_roughness_texture()
-                .ok_or_else(|| anyhow!("no metallic roughness texture in material"))?
-                .texture()
-                .source()
-                .source();
+                .map(|texture| {
+                    let image = texture
+                        .texture()
+                        .source()
+                        .source();
 
-            textures.extend([
-                self.load_image(ImageFormat::Bc(BcFormat::Bc1Srgb), &albedo_map)?,
-                self.load_image(ImageFormat::Bc(BcFormat::Bc5Unorm), &specular_map)?,
-                self.load_image(ImageFormat::Bc(BcFormat::Bc1Unorm), &normal_map)?,
-            ].into_iter());
+                    self.load_image(ImageFormat::Bc(BcFormat::Bc5Unorm), &image)
+                })
+                .unwrap_or_else(|| {
+                    let metallic_factor = mat
+                        .pbr_metallic_roughness()
+                        .metallic_factor();
+                    let roughness_factor = mat
+                        .pbr_metallic_roughness()
+                        .roughness_factor();
+            
+                    let metallic = (255.0 / metallic_factor) as u8;
+                    let roughness = (255.0 / roughness_factor) as u8;
+
+                    Ok(fallback_image(RawFormat::Rg8Unorm, [metallic, roughness]))
+                })?;
+
+            textures.extend([albedo_map, specular_map, normal_map].into_iter());
         }
 
-        let materials: Vec<_> = self.gltf
+        let mut materials: Vec<_> = self.gltf
             .materials()
             .enumerate()
             .map(|(i, _)| i * 3)
@@ -341,15 +404,17 @@ fn new(path: &Path) -> Result<Self> {
 
         let instances: Vec<_> = self.gltf
             .nodes()
-            .filter_map(|node| node.mesh().map(|mesh| (node, mesh.index())))
+            .filter_map(|node| {
+                node.mesh().map(|mesh| (node, mesh.index()))
+            })
             .map(|(node, mesh)| Instance {
                 transform: Mat4::from_cols_array_2d(&node.transform().matrix()),
                 mesh
             })
             .collect();
 
-        let mut vertex_buffer = Vec::<Vertex>::new();
-        let mut index_buffer = Vec::<u32>::new();
+        let mut vertex_buffer: Vec<Vertex> = Vec::new();
+        let mut index_buffer: Vec<u32> = Vec::new();
 
         let meshes: Result<Vec<_>> = self.gltf
             .meshes()
@@ -357,9 +422,23 @@ fn new(path: &Path) -> Result<Self> {
                 let mut primitives = Vec::default();
 
                 for primitive in mesh.primitives() {
-                    let Some(material) = primitive.material().index() else {
-                        return Err(anyhow!("primitive {} doesn't have a material", primitive.index()));
-                    };
+                    let material = primitive.material().index().unwrap_or_else(|| {
+                        textures.extend([
+                            fallback_albedo_map(),
+                            fallback_specular_map(),
+                            fallback_normal_map(),
+                        ]);
+
+                        let index = materials.len();
+
+                        materials.push(Material {
+                            albedo_map: index * 3,
+                            specular_map: index * 3 + 1,
+                            normal_map: index * 3 + 2,
+                        });
+
+                        index
+                    });
 
                     let bounding_sphere = {
                         let bounding_box = primitive.bounding_box();
@@ -543,7 +622,7 @@ fn new(path: &Path) -> Result<Self> {
                         &mut vertices,
                     );
 
-                    let index_count = indices.len() as f32;
+                     let index_count = indices.len() as f32;
 
                     let mut lods = Vec::<asset::Lod>::with_capacity(TARGET_LOD_COUNT);
                     let mut sloppy = false;
@@ -574,6 +653,10 @@ fn new(path: &Path) -> Result<Self> {
                                 index_target,
                             )
                         };
+
+                        if i != 0 && indices.len() < 64 {
+                            break;
+                        }
 
                         if Some(indices.len()) == lods.last().map(|lod| lod.index_count as usize) {
                             if sloppy {
@@ -642,10 +725,14 @@ fn new(path: &Path) -> Result<Self> {
                         .collect();
 
                     let vertex_start = vertex_buffer.len() as u32;
-
                     vertex_buffer.append(&mut vertices);
 
-                    primitives.push(Primitive { bounding_sphere, vertex_start, material, lods })
+                    primitives.push(Primitive {
+                        bounding_sphere,
+                        vertex_start,
+                        material,
+                        lods,
+                    })
                 }
 
                 Ok(Mesh { primitives })

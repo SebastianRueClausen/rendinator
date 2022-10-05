@@ -13,6 +13,8 @@ serde = { version = "1.0.137", features = ["derive"] }
 serde_json = "1.0.81"
 clap = { version = "3.2.17", features = ["derive"] }
 meshopt = "0.1.9"
-texpresso = "2.0.1"
+texpresso = { version = "2.0.1", features = ["rayon"] }
+rayon = "*"
+num_cpus = "1.13.1"
 
 asset = { path = "../../crates/asset" }

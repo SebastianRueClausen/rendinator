@@ -795,7 +795,7 @@ pub fn prepare_to_draw(
         pyramid_width: pass.depth_pyramid.width as f32,
         pyramid_height: pass.depth_pyramid.height as f32,
         lod_base: 10.0,
-        lod_step: 2.0,
+        lod_step: 1.5,
     };
 
     recorder.push_consts(pass.cull.layout(), &[PushConst {
@@ -933,6 +933,8 @@ impl Scene {
             })
             .collect();
 
+        trace!("loading {} instances", scene.instances.len());
+
         let primitives: Vec<Primitive> = scene.instances
             .iter()
             .enumerate()
@@ -977,6 +979,8 @@ impl Scene {
                     })
             })
             .collect();
+
+        trace!("loading {} primitives", primitives.len());
 
         let staging_pool = ResourcePool::new(renderer.device.clone());
 

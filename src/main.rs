@@ -292,6 +292,7 @@ impl InputState {
     }
 }
 
+#[allow(unused)]
 fn debug_lights() -> Vec<PointLight> {
     let mut lights = Vec::default();
 
