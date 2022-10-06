@@ -846,23 +846,9 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
     Ok(Font { size: font.info.size, atlas, glyphs })
 }
 
-fn octahedron_encode_normal(mut normal: Vec3) -> Vec2 {
-    fn oct_wrap(v: Vec2) -> Vec2 {
-        let a = Vec2::splat(1.0) - v.yx().abs();
-        let b = if v.cmpge(Vec2::splat(0.0)).all() { 1.0 } else { -1.0 };
-
-        a * b
-    }
-
-    normal /= normal.x.abs() + normal.y.abs() + normal.z.abs();
-
-    let mut encoded = normal.xy();
-
-    if normal.z < 0.0 {
-        encoded = oct_wrap(encoded);
-    }
-
-    encoded * 0.5 + 0.5
+fn octahedron_encode_normal(normal: Vec3) -> Vec2 {
+    let t = normal.xy() * (1.0 / (normal.x.abs() + normal.y.abs() + normal.z.abs()));
+    Vec2::new(t.x + t.y, t.x - t.y)
 }
 
 const TARGET_LOD_COUNT: usize = 8;

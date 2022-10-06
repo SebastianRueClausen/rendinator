@@ -45,9 +45,9 @@ layout (location = 5) flat in uvec3 in_textures;
 
 layout (location = 0) out vec4 out_color;
 
-uvec3 cluster_coords(vec2 coords, float view_z) {
-	uvec2 ij = uvec2(coords / light_info.cluster_size.xy);
-	uint k = uint(log(-view_z) * light_info.depth_factors.x - light_info.depth_factors.y);
+uvec3 cluster_coords(const vec2 coords, const float view_z) {
+	const uvec2 ij = uvec2(coords / light_info.cluster_size.xy);
+	const uint k = uint(log(-view_z) * light_info.depth_factors.x - light_info.depth_factors.y);
 	return uvec3(ij, k);
 }
 

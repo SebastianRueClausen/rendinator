@@ -30,15 +30,9 @@ layout (location = 2) out vec4 out_world_tangent;
 layout (location = 3) out vec4 out_world_position;
 layout (location = 5) out uvec3 out_textures;
 
-vec3 decode_octahedron_normal(vec2 v) {
-	v = v * 2.0 - 1.0;	
-
-	vec3 normal = vec3(v.xy, 1.0 - abs(v.x) - abs(v.y));
-	const float t = clamp(-normal.z, 0.0, 1.0);
-
-	normal.xy += all(greaterThanEqual(normal.xy, vec2(0.0))) ? -t : t;
-
-	return normalize(normal);
+vec3 decode_octahedron_normal(const vec2 v) {
+	const vec2 t = vec2(v.x + v.y, v.x - v.y);
+	return normalize(vec3(t, 2.0 - abs(t.x) - abs(t.y)));
 }
 
 void main() {
@@ -50,6 +44,7 @@ void main() {
 	const vec4 world = instance.transform * position;
 
 	const vec3 normal = decode_octahedron_normal(vec2(verts[gl_VertexIndex].normal));
+	// const vec3 normal = vec3(verts[gl_VertexIndex].raw_normal);
 	const vec4 tangent = vec4(verts[gl_VertexIndex].tangent);
 
 	out_textures = uvec3(command.albedo_map, command.specular_map, command.normal_map);
