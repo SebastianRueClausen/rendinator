@@ -1,7 +1,7 @@
 #![feature(iterator_try_collect)]
 
 use anyhow::{anyhow, Result};
-use glam::{Vec2, Vec3, Vec4, Mat4, Vec2Swizzles, Vec3Swizzles};
+use glam::{Vec2, Vec3, Vec4, Mat4, Vec3Swizzles};
 use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
