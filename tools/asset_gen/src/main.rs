@@ -1,7 +1,7 @@
 #![feature(iterator_try_collect)]
 
 use anyhow::{anyhow, Result};
-use glam::{Vec2, Vec3, Vec4, Mat4, Vec3Swizzles};
+use glam::{Vec2, Vec3, Vec4, Mat4, Vec2Swizzles, Vec3Swizzles};
 use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
@@ -848,7 +848,19 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
 
 fn octahedron_encode_normal(normal: Vec3) -> Vec2 {
     let t = normal.xy() * (1.0 / (normal.x.abs() + normal.y.abs() + normal.z.abs()));
-    Vec2::new(t.x + t.y, t.x - t.y)
+
+    fn sign_not_zero(v: Vec2) -> Vec2 {
+        let x = if v.x >= 0.0 { 1.0 } else { -1.0 };
+        let y = if v.y >= 0.0 { 1.0 } else { -1.0 };
+
+        Vec2 { x, y }
+    }
+
+    if normal.z <= 0.0 {
+        (Vec2::splat(1.0) - t.yx().abs()) * sign_not_zero(t)
+    } else {
+        t
+    }
 }
 
 const TARGET_LOD_COUNT: usize = 8;
