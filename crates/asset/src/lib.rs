@@ -19,12 +19,8 @@ pub struct Vertex {
     /// The textexture coordinates as half precision floats.
     pub texcoord: [u16; 2],
 
-    pub _pad: [u16; 2],
-
-    /// The normal vector encoded via stereographic projection.
-    ///
-    /// https://aras-p.info/texts/CompactNormalStorage.html
-    pub normal: [u16; 4],
+    /// Octahedron encoded normal.
+    pub normal: [u16; 2],
 
     pub tangent: [u16; 4],
 }

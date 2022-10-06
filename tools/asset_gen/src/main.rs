@@ -1,7 +1,7 @@
 #![feature(iterator_try_collect)]
 
 use anyhow::{anyhow, Result};
-use glam::{Vec2, Vec3, Vec4, Mat4};
+use glam::{Vec2, Vec3, Vec4, Mat4, Vec2Swizzles, Vec3Swizzles};
 use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
@@ -684,8 +684,9 @@ impl GltfImporter {
                     let mut vertices: Vec<_> = vertices
                         .iter()
                         .map(|vertex| {
-                            let normal = vertex.normal
-                                .extend(1.0)
+                            let normal = octahedron_encode_normal(vertex.normal);
+
+                            let normal = normal
                                 .to_array()
                                 .map(|val| {
                                     meshopt::utilities::quantize_half(val)
@@ -710,9 +711,7 @@ impl GltfImporter {
                                     meshopt::utilities::quantize_half(val)
                                 });
 
-                            let _pad = [0x0; 2];
-
-                            Vertex { position, normal, texcoord, _pad, tangent }
+                            Vertex { position, normal, texcoord, tangent }
                         })
                         .collect();
 
@@ -845,6 +844,25 @@ pub fn load_font(metadata: &Path) -> Result<Font> {
     let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm), |_| {}, 1);
 
     Ok(Font { size: font.info.size, atlas, glyphs })
+}
+
+fn octahedron_encode_normal(mut normal: Vec3) -> Vec2 {
+    fn oct_wrap(v: Vec2) -> Vec2 {
+        let a = Vec2::splat(1.0) - v.yx().abs();
+        let b = if v.cmpge(Vec2::splat(0.0)).all() { 1.0 } else { -1.0 };
+
+        a * b
+    }
+
+    normal /= normal.x.abs() + normal.y.abs() + normal.z.abs();
+
+    let mut encoded = normal.xy();
+
+    if normal.z < 0.0 {
+        encoded = oct_wrap(encoded);
+    }
+
+    encoded * 0.5 + 0.5
 }
 
 const TARGET_LOD_COUNT: usize = 8;
