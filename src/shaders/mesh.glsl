@@ -40,7 +40,6 @@ struct Primitive {
 
 struct InstanceData {
 	mat4 transform;
-	mat4 inverse_transpose_transform;
 };
 
 struct Vert {

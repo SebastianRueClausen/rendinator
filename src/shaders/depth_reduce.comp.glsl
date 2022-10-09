@@ -9,7 +9,10 @@ layout (set = 0, binding = 0) uniform sampler2D sampled_images[];
 layout (set = 1, binding = 0, r32f) uniform writeonly image2D storage_images[];
 
 layout (push_constant, std140) uniform Consts {
+	// Size of the target image.
 	uvec2 size;
+
+	// Index of the target pyramid level.
 	uint target;
 };
 

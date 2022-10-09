@@ -16,9 +16,6 @@ use crate::camera::*;
 struct InstanceData {
     #[allow(dead_code)]
     transform: Mat4,
-
-    #[allow(dead_code)]
-    inverse_transpose_transform: Mat4,
 }
 
 /// Draw command used in draw indirect.
@@ -43,7 +40,10 @@ struct DrawCommand {
 #[repr(C)]
 #[derive(Default, Clone, Copy, bytemuck::NoUninit)]
 struct Primitive {
+    /// Center of the bounding sphere of the primitive.
     center: Vec4,
+
+    /// The radius of a bounding sphere around the primitive.
     radius: f32,
 
     _pad: u32,
@@ -89,15 +89,22 @@ struct DrawCount {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
 struct CullInfo {
+    /// All the bounding planes of the frustrum in world space.
     frustrum_planes: [Vec4; 6],
 
     lod_base: f32,
     lod_step: f32,
 
+    /// Width of the bottom pyramid level.
     pyramid_width: f32,
+
+    /// Height of the bottom pyramid level.
     pyramid_height: f32,
 
+    /// The number of mip levels of the depth pyramid.
     pyramid_mip_count: u32,
+
+    /// The [`RenderingPhase`].
     phase: u32,
 
     padding: [u32; 2],
@@ -106,44 +113,60 @@ struct CullInfo {
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
 struct DepthReduceInfo {
+    /// The size of the target pyramid level level.
     image_size: UVec2, 
+
+    /// The index of the target pyramid level.
     target: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
 struct DepthResolveInfo {
+    /// The size of the both of depth image and depth staging image.
     image_size: UVec2, 
-    sample: u32,
+
+    /// The number of samples in the depth image.
+    samples: u32,
 }
 
 struct DepthPyramid {
     /// Depth staging image.
     ///
-    /// This is used to resolve the multisampled depth image into. And it's the first level of the
-    /// depth pyramid.
+    /// This is used to resolve the multisampled depth image into. 
     stagings: PerFrame<Res<ImageView>>,
 
     /// The depth pyramid image. It has the dimensions of `depth_image` rounded down to the
     /// previous power of 2.
     pyramids: PerFrame<Res<Image>>,
 
-    /// Min sampled image array of each level in `mips`.
+    /// Descriptor of sampled image views for each mip level of the pyramid.
+    ///
+    /// The first image view is from `stagings` since it's used to reduce into the first actual
+    /// level of the pyramid.
     sampled: PerFrame<Res<DescSet>>,
 
-    /// Storage image array of each level in `mips`, besides level 0.
+    /// Storage image array of each level in `mips`.
+    ///
+    /// Unlike `sampled`, the first image is not from `stagings`.
     storage: PerFrame<Res<DescSet>>,
 
     /// Descriptor of `depth_staging` and the depth image.
     resolve_descs: PerFrame<Res<DescSet>>,
 
+    /// Compute shader to reduce one level of the pyramid into the next.
     reduce: Res<ComputePipeline>,
+
+    /// Compute shader to resolve a multisampled depth image into `stagings`.
     resolve: Res<ComputePipeline>,
 
-    // TODO: Remove.
+    /// Width of the top level of the pyramid.
     width: u32,
+
+    /// Height of the top level of the pyramid.
     height: u32,
-    
+   
+    /// The number of mip levels in the pyramid, not including the staging image.
     mip_levels: u32,
 }
 
@@ -345,122 +368,7 @@ impl DepthPyramid {
     }
 }
 
-fn update_depth_pyramid(
-    pyramid: &DepthPyramid,
-    frame_index: FrameIndex,
-    depth_image: &Res<ImageView>,
-    recorder: &CommandRecorder,
-) {
-    recorder.image_barrier(&ImageBarrierInfo {
-        flags: vk::DependencyFlags::BY_REGION,
-        src_stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
-        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        src_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
-        dst_mask: vk::AccessFlags2::SHADER_READ,
-        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-        image: depth_image.image().clone(),
-        mips: depth_image.image().mip_levels(),
-    });
-
-    recorder.image_barrier(&ImageBarrierInfo {
-        flags: vk::DependencyFlags::BY_REGION,
-        src_stage: vk::PipelineStageFlags2::empty(),
-        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        src_mask: vk::AccessFlags2::empty(),
-        dst_mask: vk::AccessFlags2::SHADER_WRITE,
-        new_layout: vk::ImageLayout::GENERAL,
-        image: pyramid.stagings[frame_index].image().clone(),
-        mips: pyramid.stagings[frame_index].image().mip_levels(),
-    });
-
-    recorder.bind_descs(&DescBindInfo {
-        bind_point: vk::PipelineBindPoint::COMPUTE,
-        layout: pyramid.resolve.layout(),
-        descs: &[pyramid.resolve_descs[frame_index].clone()],
-    });
-
-    let vk::Extent3D { width, height, .. } =
-        pyramid.stagings[frame_index].image().extent(0);
-
-    let info = DepthResolveInfo {
-        image_size: UVec2::new(width, height),
-        // `vk::SampleCountFlags` as raw maps to the amount of samples.
-        sample: depth_image.image().sample_count().as_raw(),
-    };
-
-    recorder.push_consts(pyramid.resolve.layout(), &[PushConst {
-        stage: vk::ShaderStageFlags::COMPUTE,
-        bytes: bytemuck::bytes_of(&info),
-    }]);
-   
-    recorder.dispatch(pyramid.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
-
-    recorder.image_barrier(&ImageBarrierInfo {
-        flags: vk::DependencyFlags::BY_REGION,
-        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        src_mask: vk::AccessFlags2::SHADER_WRITE,
-        dst_mask: vk::AccessFlags2::SHADER_READ,
-        new_layout: vk::ImageLayout::GENERAL,
-        image: pyramid.stagings[frame_index].image().clone(),
-        mips: pyramid.stagings[frame_index].image().mip_levels(),
-    });
-
-    recorder.image_barrier(&ImageBarrierInfo {
-        flags: vk::DependencyFlags::BY_REGION,
-        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-        dst_stage: vk::PipelineStageFlags2::empty(),
-        src_mask: vk::AccessFlags2::SHADER_READ,
-        dst_mask: vk::AccessFlags2::empty(),
-        new_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL,
-        image: depth_image.image().clone(),
-        mips: depth_image.image().mip_levels(),
-    });
-
-    //
-    // Reduce from each level to the next in depth pyramid.
-    //
-
-    recorder.bind_descs(&DescBindInfo {
-        bind_point: vk::PipelineBindPoint::COMPUTE,
-        layout: pyramid.reduce.layout(),
-        descs: &[
-            pyramid.sampled[frame_index].clone(),
-            pyramid.storage[frame_index].clone(),
-        ],
-    });
-
-    let level = &pyramid.pyramids[frame_index];
-
-    for target in level.mip_levels() {
-        let vk::Extent3D { width, height, .. } = level.extent(target);
-        let info = DepthReduceInfo {
-            image_size: UVec2::new(width, height),
-            target,
-        };
-
-        let layout = pyramid.reduce.layout();
-
-        recorder.push_consts(layout, &[PushConst {
-            stage: vk::ShaderStageFlags::COMPUTE,
-            bytes: bytemuck::bytes_of(&info),
-        }]);
-
-        recorder.dispatch(pyramid.reduce.clone(), [width / 32, height / 32, 1]);
-
-        recorder.image_barrier(&ImageBarrierInfo {
-            flags: vk::DependencyFlags::BY_REGION,
-            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
-            src_mask: vk::AccessFlags2::SHADER_WRITE,
-            dst_mask: vk::AccessFlags2::SHADER_READ,
-            new_layout: vk::ImageLayout::GENERAL,
-            image: level.clone(),
-            mips: target..target + 1,
-        });
-    }
-}
-
+/// Descriptors for each frame in flight for buffers related to the camera.
 pub struct CameraDescs {
     pub descs: PerFrame<Res<DescSet>>,
     pub view_buffers: PerFrame<Res<Buffer>>,
@@ -526,9 +434,14 @@ impl CameraDescs {
 
 pub struct DrawDesc {
     desc: Res<DescSet>,
+
+    /// Buffer of draw commands for draw indirect calls.
     cmd_buffer: Res<Buffer>,
+
+    /// Buffer of [`DrawCount`] used for draw indirect count.
     count_buffer: Res<Buffer>,
 
+    /// Cpu copy of `count_buffer` for each render phase.
     count_host_buffers: [Res<Buffer>; 2],
 }
 
@@ -600,7 +513,7 @@ impl DrawDesc {
         ])
     }
 
-    /// Get the number of primitives last drawn at `frame_index`.
+    /// Get number of primitives last drawn using this descriptor.
     pub fn primitives_drawn(&self) -> Result<u32> {
         let mut count = 0;
         
@@ -616,6 +529,7 @@ impl DrawDesc {
 
 }
 
+/// Forward pass for rendering the geometry of a scene.
 pub struct ForwardPass {
     pub lights: Lights,
 
@@ -631,7 +545,6 @@ pub struct ForwardPass {
     depth_pyramid: DepthPyramid,
 
     render_target_info: RenderTargetInfo,
-    primitive_count: u32,
 }
 
 impl ForwardPass {
@@ -710,7 +623,6 @@ impl ForwardPass {
         };
 
         Ok(Self {
-            primitive_count: scene.primitive_count(),
             camera_descs,
             draw_descs,
             render_target_info,
@@ -727,6 +639,7 @@ impl ForwardPass {
         self.render_target_info
     }
 
+    /// Blit depth pyramid level into swapchain image.
     pub fn pyramid_debug(
         &self,
         index: FrameIndex,
@@ -765,12 +678,12 @@ pub enum RenderPhase {
     /// The job of the 1st phase is to update the draw buffers using the phase 2 cull data from
     /// last frame. It still does frustrum culling.
     ///
-    /// It then draws these primitives and generates a depth buffer.
+    /// It then draws these primitives.
     Phase1 = 1,
 
     /// The 2nd phase runs after rendering the results from the 1st phase and generating a new
     /// depth pyramid. It updates the draw flags using both occlusion and frustrum culling.
-    /// It writes primitives to the draw buffers *if and only if* they wasn't drawn in phase 1.
+    /// It draws primitives *if and only if* they wasn't drawn in phase 1 and is now visible.
     Phase2 = 2,
 }
 
@@ -841,7 +754,7 @@ pub fn cull(
     }]);
 
     recorder.dispatch(pass.cull.clone(), [
-        pass.primitive_count.div_ceil(64), 1, 1,
+        scene.primitive_count().div_ceil(64), 1, 1,
     ]);
 
     recorder.buffer_barrier(&BufferBarrierInfo {
@@ -913,11 +826,127 @@ fn render(
             draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
             draw_buffer: draw_desc.cmd_buffer.clone(),
             count_buffer: draw_desc.count_buffer.clone(),
-            max_draw_count: pass.primitive_count,
+            max_draw_count: scene.primitive_count(),
             count_offset: 0,
             draw_offset: 0,
         });
     });
+}
+
+fn update_depth_pyramid(
+    pyramid: &DepthPyramid,
+    frame_index: FrameIndex,
+    depth_image: &Res<ImageView>,
+    recorder: &CommandRecorder,
+) {
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        src_mask: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+        image: depth_image.image().clone(),
+        mips: depth_image.image().mip_levels(),
+    });
+
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::empty(),
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        src_mask: vk::AccessFlags2::empty(),
+        dst_mask: vk::AccessFlags2::SHADER_WRITE,
+        new_layout: vk::ImageLayout::GENERAL,
+        image: pyramid.stagings[frame_index].image().clone(),
+        mips: pyramid.stagings[frame_index].image().mip_levels(),
+    });
+
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::COMPUTE,
+        layout: pyramid.resolve.layout(),
+        descs: &[pyramid.resolve_descs[frame_index].clone()],
+    });
+
+    let vk::Extent3D { width, height, .. } =
+        pyramid.stagings[frame_index].image().extent(0);
+
+    let info = DepthResolveInfo {
+        image_size: UVec2::new(width, height),
+        // `vk::SampleCountFlags` as raw maps to the amount of samples.
+        samples: depth_image.image().sample_count().as_raw(),
+    };
+
+    recorder.push_consts(pyramid.resolve.layout(), &[PushConst {
+        stage: vk::ShaderStageFlags::COMPUTE,
+        bytes: bytemuck::bytes_of(&info),
+    }]);
+   
+    recorder.dispatch(pyramid.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
+
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        src_mask: vk::AccessFlags2::SHADER_WRITE,
+        dst_mask: vk::AccessFlags2::SHADER_READ,
+        new_layout: vk::ImageLayout::GENERAL,
+        image: pyramid.stagings[frame_index].image().clone(),
+        mips: pyramid.stagings[frame_index].image().mip_levels(),
+    });
+
+    recorder.image_barrier(&ImageBarrierInfo {
+        flags: vk::DependencyFlags::BY_REGION,
+        src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        dst_stage: vk::PipelineStageFlags2::empty(),
+        src_mask: vk::AccessFlags2::SHADER_READ,
+        dst_mask: vk::AccessFlags2::empty(),
+        new_layout: vk::ImageLayout::ATTACHMENT_OPTIMAL,
+        image: depth_image.image().clone(),
+        mips: depth_image.image().mip_levels(),
+    });
+
+    //
+    // Reduce from each level to the next in depth pyramid.
+    //
+
+    recorder.bind_descs(&DescBindInfo {
+        bind_point: vk::PipelineBindPoint::COMPUTE,
+        layout: pyramid.reduce.layout(),
+        descs: &[
+            pyramid.sampled[frame_index].clone(),
+            pyramid.storage[frame_index].clone(),
+        ],
+    });
+
+    let level = &pyramid.pyramids[frame_index];
+
+    for target in level.mip_levels() {
+        let vk::Extent3D { width, height, .. } = level.extent(target);
+        let info = DepthReduceInfo {
+            image_size: UVec2::new(width, height),
+            target,
+        };
+
+        let layout = pyramid.reduce.layout();
+
+        recorder.push_consts(layout, &[PushConst {
+            stage: vk::ShaderStageFlags::COMPUTE,
+            bytes: bytemuck::bytes_of(&info),
+        }]);
+
+        recorder.dispatch(pyramid.reduce.clone(), [width / 32, height / 32, 1]);
+
+        recorder.image_barrier(&ImageBarrierInfo {
+            flags: vk::DependencyFlags::BY_REGION,
+            src_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            dst_stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+            src_mask: vk::AccessFlags2::SHADER_WRITE,
+            dst_mask: vk::AccessFlags2::SHADER_READ,
+            new_layout: vk::ImageLayout::GENERAL,
+            image: level.clone(),
+            mips: target..target + 1,
+        });
+    }
 }
 
 pub fn draw(
@@ -1009,12 +1038,21 @@ fn create_forward_color_images(
     })
 }
 
+/// Gpu resources of a scene.
 pub struct Scene {
+    /// All the primitives in the scene.
     primitives: Vec<Primitive>,
+
+    /// All the point lights in the scene.
     point_lights: Vec<PointLight>,
+
+    /// The directional light, lighting the scene.
     dir_light: DirLight,
 
+    /// Descriptor of textures and geometry of the scene.
     desc: Res<DescSet>,
+
+    /// Index buffer of all geomtry and lods in the scene.
     index_buffer: Res<Buffer>,
 }
 
@@ -1031,9 +1069,6 @@ impl Scene {
             .iter()
             .map(|instance| InstanceData {
                 transform: instance.transform,
-                inverse_transpose_transform: instance.transform
-                    .inverse()
-                    .transpose()
             })
             .collect();
 
