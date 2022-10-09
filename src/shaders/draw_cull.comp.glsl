@@ -26,6 +26,8 @@ layout (std430, push_constant) uniform CullInfo {
 	float pyramid_width;
 	float pyramid_height;
 
+	uint pyramid_mip_count;
+
 } cull_info;
 
 layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
@@ -58,8 +60,11 @@ layout (std430, set = 2, binding = 1) readonly buffer Primitives {
 
 layout (set = 3, binding = 0) uniform sampler2D depth_pyramid[];
 
-bool project_sphere(const vec3 center, const float radius, out vec4 aabb) {
-	if (center.z < radius + proj.z_near) return false;
+bool project_sphere(const vec3 center, const float z_near, const float radius, out vec4 aabb) {
+	// Check if we are inside the sphere. In which case we can't do any occlusion culling.
+	if (center.z < radius + z_near) {
+		return false;
+	}
 
 	const float p00 = proj.mat[0][0];
 	const float p11 = proj.mat[1][1];
@@ -132,20 +137,22 @@ void main() {
 	bool visible = true;
 #endif
 
-#ifdef OCCLUSION_CULL
-	vec4 aabb;
 	vec3 view_center = (view.mat * vec4(center, 1.0)).xyz;
-
-	view_center.y *= -1;
 	view_center.z *= -1;
 
-	if (project_sphere(view_center, radius, aabb)) {
+#ifdef OCCLUSION_CULL
+	vec4 aabb;
+
+	if (project_sphere(view_center, proj.z_near, radius, aabb)) {
 		const float width = (aabb.z - aabb.x) * cull_info.pyramid_width;
 		const float height = (aabb.w - aabb.y) * cull_info.pyramid_height;
 
-		const uint level = uint(log2(max(width, height))) + 1;
+		const float mip = ceil(log2(max(width, height)));
+		const uint level = min(uint(mip), cull_info.pyramid_mip_count) + 1;
 
-		const float depth = texture(depth_pyramid[level], (aabb.xy + aabb.zw) * 0.5).r;
+		const vec4 samples = textureGather(depth_pyramid[level], (aabb.xy + aabb.zw) * 0.5, 0);
+		const float depth = max(samples.x, max(samples.y, max(samples.z, samples.w)));
+
 		const float depth_sphere = proj.z_near / (view_center.z - radius);
 
 		visible = visible && depth_sphere > depth;

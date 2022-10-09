@@ -194,7 +194,7 @@ impl Skybox {
             image: image.clone(),
         })?;
 
-        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+        let sampler = pool.create_sampler()?;
         let generator = Generator::new(renderer, array_view, sampler.clone(), lights)?;
 
         generator.generate(renderer)?;

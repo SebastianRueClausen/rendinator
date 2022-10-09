@@ -95,6 +95,9 @@ struct CullInfo {
 
     pyramid_width: f32,
     pyramid_height: f32,
+
+    pyramid_mip_count: u32,
+    padding: [u32; 3],
 }
 
 #[repr(C)]
@@ -137,6 +140,8 @@ struct DepthPyramid {
     // TODO: Remove.
     width: u32,
     height: u32,
+    
+    mip_levels: u32,
 }
 
 impl DepthPyramid {
@@ -227,7 +232,7 @@ impl DepthPyramid {
             Ok(mips)
         })?;
 
-        let min_sampler = pool.create_sampler(vk::SamplerReductionMode::MIN)?;
+        let sampler = pool.create_sampler()?;
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
@@ -240,14 +245,10 @@ impl DepthPyramid {
         let sampled = PerFrame::try_from_fn(|frame_index| {
             pool.create_desc_set(layout.clone(), &[
                 DescBinding::ImageArray(
-                    min_sampler.clone(),
-                    vk::ImageLayout::GENERAL,
-                    &mips[frame_index],
+                    sampler.clone(), vk::ImageLayout::GENERAL, &mips[frame_index],
                 ),
             ])
         })?;
-
-        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
@@ -327,6 +328,7 @@ impl DepthPyramid {
         };
 
         Ok(Self {
+            mip_levels,
             resolve,
             reduce,
             pyramids,
@@ -796,6 +798,8 @@ pub fn prepare_to_draw(
         pyramid_height: pass.depth_pyramid.height as f32,
         lod_base: 20.0,
         lod_step: 5.0,
+        pyramid_mip_count: pass.depth_pyramid.mip_levels,
+        padding: [0x0; 3],
     };
 
     recorder.push_consts(pass.cull.layout(), &[PushConst {
@@ -1163,7 +1167,7 @@ impl Scene {
             },
         ])?;
 
-        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+        let sampler = pool.create_sampler()?;
 
         let desc = pool.create_desc_set(desc_layout, &[
             DescBinding::Buffer(instance_buffer.clone()),

@@ -66,7 +66,7 @@ impl TextPass {
         atlas_staging.get_mapped()?.fill(font.atlas.base_image_data());
 
         let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
-        let sampler = pool.create_sampler(vk::SamplerReductionMode::WEIGHTED_AVERAGE)?;
+        let sampler = pool.create_sampler()?;
    
         let glyph_atlas = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,

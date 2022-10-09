@@ -16,10 +16,14 @@ void main() {
 
 	if (pos.x > size.x || pos.y > size.y) return;
 
-	float depth = 1.0;
+	float depth = 0.0;
 	for (int i = 0; i < sample_count; i++) {
-		depth = min(depth, texelFetch(depth_image, ivec2(pos), i).r);	
+		depth = max(depth, texelFetch(depth_image, ivec2(pos), i).r);	
 	}
+
+#ifdef DEPTH_VISUALIZE
+	depth = pow(depth, 20);
+#endif
 
 	imageStore(depth_staging, ivec2(pos), vec4(depth));
 }

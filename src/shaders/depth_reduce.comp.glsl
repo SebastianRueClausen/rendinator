@@ -15,6 +15,9 @@ layout (push_constant, std140) uniform Consts {
 
 void main() {
 	const uvec2 pos = gl_GlobalInvocationID.xy;
-	const float depth = texture(sampled_images[target], (vec2(pos) + vec2(0.5)) / vec2(size)).r;
+	
+	const vec4 samples = textureGather(sampled_images[target], (vec2(pos) + vec2(0.5)) / vec2(size), 0);
+	const float depth = max(samples.x, max(samples.y, max(samples.z, samples.w)));
+
 	imageStore(storage_images[target], ivec2(pos), vec4(depth));
 }

@@ -488,7 +488,6 @@ impl Device {
             .shader_input_attachment_array_dynamic_indexing(true)
             .descriptor_binding_variable_descriptor_count(true)
             .runtime_descriptor_array(true)
-            .sampler_filter_minmax(true)
             .scalar_block_layout(true)
             .draw_indirect_count(true)
             .descriptor_indexing(true)

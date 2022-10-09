@@ -203,7 +203,12 @@ fn main() -> Result<()> {
 }
 
 fn update_camera(camera: &mut Camera, input_state: &mut InputState, dt: Duration) {
-    let movement_speed = 15.0;
+    let movement_speed = if input_state.is_key_pressed(VirtualKeyCode::LShift) {
+        30.0
+    } else {
+        15.0
+    };
+
     let rotation_speed = 1.0;
 
     let speed = movement_speed * dt.as_secs_f32();
@@ -226,7 +231,7 @@ fn update_camera(camera: &mut Camera, input_state: &mut InputState, dt: Duration
 
     let (x_delta, y_delta) = input_state.mouse_delta();
    
-    camera.yaw += x_delta as f32 * rotation_speed;
+    camera.yaw += (x_delta as f32 * rotation_speed) % 365.0;
     camera.pitch -= y_delta as f32 * rotation_speed;
     camera.pitch = camera.pitch.clamp(-89.0, 89.0);
 

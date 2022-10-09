@@ -525,10 +525,10 @@ pub struct Sampler {
 }
 
 impl ResourcePool {
-    pub fn create_sampler(&self, reduction: vk::SamplerReductionMode) -> Result<Res<Sampler>> {
+    pub fn create_sampler(&self) -> Result<Res<Sampler>> {
         let device = self.device.clone(); 
 
-        let mut create_info = vk::SamplerCreateInfo::builder()
+        let create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(vk::Filter::LINEAR)
             .min_filter(vk::Filter::LINEAR)
             .address_mode_u(vk::SamplerAddressMode::REPEAT)
@@ -544,13 +544,6 @@ impl ResourcePool {
             .mip_lod_bias(0.0)
             .min_lod(0.0)
             .max_lod(vk::LOD_CLAMP_NONE);
-
-        let mut reduction_info = vk::SamplerReductionModeCreateInfo::default();
-
-        if reduction != vk::SamplerReductionMode::WEIGHTED_AVERAGE {
-            reduction_info.reduction_mode = reduction;
-            create_info = create_info.push_next(&mut reduction_info);
-        }
 
         let handle = unsafe {
             device.handle.create_sampler(&create_info, None)?

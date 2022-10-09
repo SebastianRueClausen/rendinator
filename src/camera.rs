@@ -42,7 +42,7 @@ impl Camera {
 
     pub fn new(surface_size: Vec2) -> Self {
         let pos = Vec3::new(10.0, 10.0, 10.0);
-        let front = Vec3::splat(0.0);
+        let front = Vec3::X;
 
         let yaw = 0.0;
         let pitch = 0.0;
