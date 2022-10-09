@@ -112,16 +112,26 @@ fn main() -> Result<()> {
 
                 let swapchain = renderer.swapchain.clone();
                 let res = renderer.draw(|recorder, frame_index, swapchain_image| {
-                    scene::prepare_to_draw(&forward_pass, &scene, &camera, frame_index, recorder);
+                    scene::draw(
+                        &renderer,
+                        &forward_pass,
+                        &scene,
+                        &camera,
+                        frame_index,
+                        recorder,
+                    );
 
                     let render_info = RenderInfo {
                         color_target: Some(forward_pass.color_images[frame_index].clone()),
                         depth_target: forward_pass.depth_images[frame_index].clone(),
+    
+                        color_load_op:  vk::AttachmentLoadOp::LOAD,
+                        depth_load_op:  vk::AttachmentLoadOp::LOAD,
+
                         swapchain: swapchain.clone(),
                     };
 
                     recorder.render(&render_info, |recorder| {
-                        scene::draw(&forward_pass, &scene, frame_index, recorder);
                         skybox::draw(&skybox, &camera, recorder);
 
                         text_pass.draw_text(recorder, frame_index, |texts| {
@@ -133,8 +143,8 @@ fn main() -> Result<()> {
                                 camera.pos.z,
                             );
 
-                            let primitives_drawn = forward_pass
-                                .primitives_drawn(&renderer, frame_index.last())
+                            let primitives_drawn = forward_pass.draw_descs[frame_index]
+                                .primitives_drawn()
                                 .expect("failed to get amount of primitives drawn");
 
                             let primitives_drawn = format!("primitives: {}", primitives_drawn);

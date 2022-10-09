@@ -27,6 +27,7 @@ layout (std430, push_constant) uniform CullInfo {
 	float pyramid_height;
 
 	uint pyramid_mip_count;
+	uint phase;
 
 } cull_info;
 
@@ -38,7 +39,6 @@ layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 	View view;
 };
 
-
 layout (std430, set = 1, binding = 0) writeonly buffer DrawBuf {
 	DrawCommand draw_commands[];
 };
@@ -48,6 +48,9 @@ layout (std430, set = 1, binding = 1) buffer DrawCountBuf {
 	uint primitive_count;
 };
 
+layout (std430, set = 1, binding = 2) buffer DrawFlagBuf {
+	uint draw_flags[];
+};
 
 layout (std430, set = 2, binding = 0) readonly buffer Instances {
 	InstanceData instances[];
@@ -57,9 +60,13 @@ layout (std430, set = 2, binding = 1) readonly buffer Primitives {
 	Primitive primitives[];	
 };
 
-
 layout (set = 3, binding = 0) uniform sampler2D depth_pyramid[];
 
+bool has_been_drawn(const uint primitive) {
+	return draw_flags[primitive] == 1;
+}
+
+// Find the bounding box of a sphere in screen-space.
 bool project_sphere(const vec3 center, const float z_near, const float radius, out vec4 aabb) {
 	// Check if we are inside the sphere. In which case we can't do any occlusion culling.
 	if (center.z < radius + z_near) {
@@ -87,7 +94,7 @@ bool project_sphere(const vec3 center, const float z_near, const float radius, o
 			maxy.x / maxy.y * p11
 	);
 
-	// Transform from clip-space to uv-space.
+	// Transform from clip-space to screen-space.
 	aabb = aabb.xwzy * vec4(0.5f, -0.5f, 0.5f, -0.5f) + vec4(0.5f);
 
 	return true;
@@ -96,7 +103,17 @@ bool project_sphere(const vec3 center, const float z_near, const float radius, o
 void main() {
 	const uint draw_id = gl_GlobalInvocationID.x;
 
-	if (draw_id >= primitive_count) return;
+	if (draw_id >= primitive_count) {
+		return;
+	}
+
+	const bool phase_2 = cull_info.phase == 2;
+	const bool has_been_drawn = has_been_drawn(draw_id);
+
+	// In this case the primitive was not visible after rendering last frame.
+	if (!phase_2 && !has_been_drawn) {
+		return;
+	}
 
 	const Primitive primitive = primitives[draw_id];
 	const InstanceData instance = instances[primitive.instance];
@@ -141,25 +158,31 @@ void main() {
 	view_center.z *= -1;
 
 #ifdef OCCLUSION_CULL
-	vec4 aabb;
+	if (phase_2 && visible) {
+		vec4 aabb;
 
-	if (project_sphere(view_center, proj.z_near, radius, aabb)) {
-		const float width = (aabb.z - aabb.x) * cull_info.pyramid_width;
-		const float height = (aabb.w - aabb.y) * cull_info.pyramid_height;
+		if (project_sphere(view_center, proj.z_near, radius, aabb)) {
+			const float width = (aabb.z - aabb.x) * cull_info.pyramid_width;
+			const float height = (aabb.w - aabb.y) * cull_info.pyramid_height;
 
-		const float mip = ceil(log2(max(width, height)));
-		const uint level = min(uint(mip), cull_info.pyramid_mip_count) + 1;
+			const float mip = ceil(log2(max(width, height)));
+			const uint level = min(uint(mip), cull_info.pyramid_mip_count) + 1;
 
-		const vec4 samples = textureGather(depth_pyramid[level], (aabb.xy + aabb.zw) * 0.5, 0);
-		const float depth = max(samples.x, max(samples.y, max(samples.z, samples.w)));
+			const vec4 samples = textureGather(depth_pyramid[level], (aabb.xy + aabb.zw) * 0.5, 0);
+			const float depth = max(samples.x, max(samples.y, max(samples.z, samples.w)));
 
-		const float depth_sphere = proj.z_near / (view_center.z - radius);
+			const float depth_sphere = proj.z_near / (view_center.z - radius);
 
-		visible = visible && depth_sphere > depth;
+			visible = visible && depth_sphere >= depth;
+		}
 	}
 #endif
 
-	if (visible) {
+	// If the primitive is visible, there is two scenarios here.
+	//
+	// If we're in the 1st phase then the draw buffers should always be updated.
+	// If we're in the 2nd phase, it should only be updated if it wasn't drawn after the 1st phase.
+	if (visible && (!phase_2 || !has_been_drawn)) {
 		const uint command_id = atomicAdd(command_count, 1);
 
 #ifdef LOD
@@ -182,5 +205,9 @@ void main() {
 			primitive.specular_map,
 			primitive.normal_map
 		);
+	}
+
+	if (phase_2) {
+		draw_flags[draw_id] = uint(visible);
 	}
 }

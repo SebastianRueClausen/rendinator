@@ -163,6 +163,10 @@ pub struct DescBindInfo<'a> {
 pub struct RenderInfo {
     pub color_target: Option<Res<ImageView>>,
     pub depth_target: Res<ImageView>,
+    
+    pub color_load_op: vk::AttachmentLoadOp,
+    pub depth_load_op: vk::AttachmentLoadOp,
+
     pub swapchain: Res<Swapchain>,
 }
 
@@ -538,7 +542,7 @@ impl<'a> CommandRecorder<'a> {
                 vk::RenderingAttachmentInfo::builder()
                     .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
                     .image_view(target.handle)
-                    .load_op(vk::AttachmentLoadOp::DONT_CARE)
+                    .load_op(info.color_load_op)
                     .store_op(vk::AttachmentStoreOp::STORE)
                     .clear_value(vk::ClearValue {
                         color: vk::ClearColorValue {
@@ -554,7 +558,7 @@ impl<'a> CommandRecorder<'a> {
         let depth_resolve_attachment = vk::RenderingAttachmentInfo::builder()
             .image_layout(vk::ImageLayout::DEPTH_STENCIL_ATTACHMENT_OPTIMAL)
             .image_view(info.depth_target.handle)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
+            .load_op(info.depth_load_op)
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
