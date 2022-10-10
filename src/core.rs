@@ -900,7 +900,7 @@ impl Swapchain {
         graphics_queue: Res<Queue>,
         extent: vk::Extent2D,
     ) -> Result<Self> {
-        let (surface_formats, _present_modes, surface_caps) = unsafe {
+        let (surface_formats, present_modes, surface_caps) = unsafe {
             let format = surface
                 .loader
                 .get_physical_device_surface_formats(
@@ -952,7 +952,7 @@ impl Swapchain {
 
         let preferred_present_mode = vk::PresentModeKHR::FIFO;
 
-        let present_mode = _present_modes
+        let present_mode = present_modes
             .iter()
             .any(|mode| *mode == preferred_present_mode)
             .then_some(preferred_present_mode)

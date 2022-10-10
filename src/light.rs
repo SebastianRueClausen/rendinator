@@ -258,27 +258,22 @@ impl Lights {
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE | vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
         ])?;

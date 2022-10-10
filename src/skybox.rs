@@ -111,12 +111,10 @@ impl Generator {
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
         ])?;
@@ -223,7 +221,6 @@ impl Skybox {
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
                 array_count: None,
             },
         ])?;

@@ -948,7 +948,6 @@ impl Drop for DescPool {
 
 #[derive(PartialEq, Eq, Hash, Clone, Copy)]
 pub struct DescLayoutSlot {
-    pub stage: vk::ShaderStageFlags,
     pub ty: vk::DescriptorType,
     pub array_count: Option<u32>,
 }
@@ -982,11 +981,13 @@ impl DescLayoutSlots {
             .iter()
             .enumerate()
             .map(|(i, binding)| {
+                // TODO: Check that using `vk::ShaderStageFlags::ALL` doesn't cause any performance
+                // issues.
                 vk::DescriptorSetLayoutBinding::builder()
                     .binding(i as u32)
                     .descriptor_type(binding.ty)
                     .descriptor_count(binding.array_count.unwrap_or(1))
-                    .stage_flags(binding.stage)
+                    .stage_flags(vk::ShaderStageFlags::ALL)
                     .build()
             })
             .collect();

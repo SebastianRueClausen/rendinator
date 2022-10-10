@@ -263,7 +263,6 @@ impl DepthPyramid {
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: Some(mip_levels + 1),
             },
         ])?;
@@ -279,7 +278,6 @@ impl DepthPyramid {
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: Some(mip_levels),
             },
         ])?;
@@ -297,12 +295,10 @@ impl DepthPyramid {
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
         ])?;
@@ -416,16 +412,10 @@ impl CameraDescs {
         renderer.static_pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE
-                    | vk::ShaderStageFlags::FRAGMENT
-                    | vk::ShaderStageFlags::VERTEX,
                 array_count: None,
             },
         ])
@@ -497,17 +487,14 @@ impl DrawDesc {
         renderer.static_pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
         ])
@@ -1281,23 +1268,18 @@ impl Scene {
         let desc_layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX
-                    | vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::COMPUTE,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                stage: vk::ShaderStageFlags::VERTEX,
                 array_count: None,
             },
             DescLayoutSlot {
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                stage: vk::ShaderStageFlags::FRAGMENT,
                 array_count: Some(scene.textures.len() as u32),
             },
         ])?;

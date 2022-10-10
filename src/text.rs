@@ -110,7 +110,6 @@ impl TextPass {
 
         let layout = pool.create_desc_layout(&[DescLayoutSlot {
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            stage: vk::ShaderStageFlags::FRAGMENT,
             array_count: None,
         }])?;
 
@@ -172,8 +171,8 @@ impl TextPass {
     }
 
     pub fn handle_resize(&mut self, renderer: &Renderer) {
-        let width = renderer.swapchain.extent().width as f32;
-        let height = renderer.swapchain.extent().height as f32;
+        let width = renderer.swapchain.size().x;
+        let height = renderer.swapchain.size().y;
         self.proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
     }
 
