@@ -727,7 +727,9 @@ impl ComputePipeline {
 
 impl Drop for ComputePipeline {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_pipeline(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_pipeline(self.handle, None);
+        }
     }
 }
 
@@ -923,11 +925,7 @@ struct DescPool {
 }
 
 impl DescPool {
-    fn new(
-        device: Rc<Device>,
-        max_sets: u32,
-        sizes: &[vk::DescriptorPoolSize],
-    ) -> Result<Self> {
+    fn new(device: Rc<Device>, max_sets: u32, sizes: &[vk::DescriptorPoolSize]) -> Result<Self> {
         let info = vk::DescriptorPoolCreateInfo::builder()
             .pool_sizes(&sizes)
             .max_sets(max_sets);
@@ -942,7 +940,9 @@ impl DescPool {
 
 impl Drop for DescPool {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_descriptor_pool(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_descriptor_pool(self.handle, None);
+        }
     }
 }
 
