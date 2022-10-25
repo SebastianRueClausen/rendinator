@@ -267,7 +267,7 @@ impl TextObjects {
     pub fn add_label(&mut self, scale: f32, pos: Vec3, text: &str) {
         let index_offset = self.indices.len() as u32;
 
-        let mut index: u16 = self.vertices.len() as u16;
+        let mut index  = self.vertices.len() as u16;
         let mut screen_pos = Vec2::new(0.0, 0.0);
 
         for c in text.chars() {

@@ -370,9 +370,17 @@ impl PhysicalDevice {
                 .ok_or_else(|| anyhow!("no physical devices presented"))?
         };
 
-        let memory_properties = unsafe { instance.handle.get_physical_device_memory_properties(handle) };
-        let properties = unsafe { instance.handle.get_physical_device_properties(handle) };
-        let queue_properties = unsafe { instance.handle.get_physical_device_queue_family_properties(handle) };
+        let memory_properties = unsafe {
+            instance.handle.get_physical_device_memory_properties(handle)
+        };
+
+        let properties = unsafe {
+            instance.handle.get_physical_device_properties(handle)
+        };
+
+        let queue_properties = unsafe {
+            instance.handle.get_physical_device_queue_family_properties(handle)
+        };
 
         Ok(Self { handle, memory_properties, properties, queue_properties })
     }
@@ -390,8 +398,7 @@ impl PhysicalDevice {
                     .position(|(i, p)| {
                         p.queue_flags.contains(flags)
                             && unsafe {
-                                surface
-                                    .loader
+                                surface.loader
                                     .get_physical_device_surface_support(
                                         self.handle, i as u32, surface.handle,
                                     )
@@ -513,7 +520,9 @@ impl Device {
             .push_next(&mut vk12_features)
             .push_next(&mut vk13_features);
 
-        let handle = unsafe { instance.handle.create_device(physical.handle, &device_info, None)? };
+        let handle = unsafe {
+            instance.handle.create_device(physical.handle, &device_info, None)?
+        };
 
         Ok(Self { instance, physical, handle })
     }
@@ -552,7 +561,9 @@ impl Device {
 
 impl Drop for Device {
     fn drop(&mut self) {
-        unsafe { self.handle.destroy_device(None); }
+        unsafe {
+            self.handle.destroy_device(None);
+        }
     }
 }
 

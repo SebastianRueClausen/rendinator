@@ -515,7 +515,9 @@ impl ImageView {
 
 impl Drop for ImageView {
     fn drop(&mut self) {
-        unsafe { self.image.device.handle.destroy_image_view(self.handle, None) }
+        unsafe {
+            self.image.device.handle.destroy_image_view(self.handle, None)
+        }
     }
 }
 
