@@ -1,9 +1,9 @@
 use ttf_parser::{Face, OutlineBuilder};
 use anyhow::{anyhow, Result};
 
-use math::prelude::*;
-use math::bezier::*;
-use math::polynom;
+use rendi_math::prelude::*;
+use rendi_math::bezier::*;
+use rendi_math::polynom;
 
 use crate::GenerateInfo;
 
@@ -40,10 +40,17 @@ impl Segment {
     fn signed_dist(&self, px: Vec2) -> SignedDist {
         match self {
             Segment::Line(line) => {
+                // The method for finding the signed distance to a line segment is to first find
+                // the point where a line to `px` is perpendicular with the line segment. This is
+                // always the shortest distance. The t-value is found through a formula derived
+                // from finding the root of the derivative of `line.point(t) - px`. This is simply
+                // clamped to fit it onto the segment.
+
                 let p0_p1 = line.p1 - line.p0;  
                 let p0_px = px - line.p0;
 
-                let t = (p0_px.dot(p0_p1) / p0_p1.length_squared()).clamp(0.0, 1.0);
+                let perpendicular = p0_px.dot(p0_p1) / p0_p1.length_squared();
+                let t = perpendicular.clamp(0.0, 1.0);
 
                 let pt = line.point(t);
                 let pt_px = px - pt;
@@ -60,6 +67,12 @@ impl Segment {
                 }
             }
             Segment::Quadratic(curve) => {
+                // This method is simular to the one described above for lines. The closest point
+                // is once again guaranteed to be perpendicular to the point. Solving this comes
+                // down to finding the roots of the derivative of `curve.point(t) - p`, which means
+                // solving a cubic equation. This also means that there is more than one candidate.
+                // The one with the closest distance will be chosen.
+
                 let v0 = px - curve.p0;
                 let v1 = curve.p1 - curve.p0;
                 let v2 = curve.p2 - 2.0 * curve.p1 + curve.p0;
@@ -72,8 +85,8 @@ impl Segment {
                 let mut best_dist_squared = f32::MAX;
                 let mut best_t = 0.0;
 
-                for inf in polynom::cubic_roots(a, b, c, d).as_ref() {
-                    let t = inf.clamp(0.0, 1.0); 
+                for t in polynom::cubic_roots(a, b, c, d).as_ref() {
+                    let t = t.clamp(0.0, 1.0); 
                     let pt = curve.point(t);
 
                     let dist_squared = (px - pt).length_squared();

@@ -1,4 +1,3 @@
-use glam::{Vec4, UVec3, Vec3, Vec2, UVec4, UVec2};
 use ash::vk;
 use anyhow::Result;
 
@@ -9,6 +8,8 @@ use crate::camera::*;
 use crate::resource::*;
 use crate::command::*;
 use crate::core::*;
+
+use rendi_math::prelude::*;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::NoUninit)]

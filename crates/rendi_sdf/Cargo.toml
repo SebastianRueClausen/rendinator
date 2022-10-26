@@ -1,5 +1,5 @@
 [package]
-name = "font"
+name = "rndi_sdf"
 version = "0.1.0"
 edition = "2021"
 
@@ -8,7 +8,7 @@ ttf-parser = "0.17.1"
 anyhow = "1.0"
 image = "0.24.4"
 
-math = { path = "../math/" }
+rendi_math = { path = "../rendi_math/" }
 
 [profile.test]
 opt-level = 3

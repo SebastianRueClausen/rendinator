@@ -1,6 +1,5 @@
 use anyhow::Result;
 use ash::vk;
-use glam::{Vec3, Quat, Vec2, Mat4};
 use nohash_hasher::NoHashHasher;
 
 use std::{mem, hash};
@@ -9,7 +8,9 @@ use std::collections::HashMap;
 use crate::command::*;
 use crate::core::*;
 use crate::resource::*;
-use asset::{Font, Glyph};
+
+use rendi_asset::{Font, Glyph};
+use rendi_math::prelude::*;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::NoUninit)]

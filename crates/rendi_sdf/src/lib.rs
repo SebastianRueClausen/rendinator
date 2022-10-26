@@ -5,7 +5,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 
-use math::prelude::*;
+use rendi_math::prelude::*;
 use generate::AtlasTemplate;
 
 #[derive(Debug, Clone, Copy)]

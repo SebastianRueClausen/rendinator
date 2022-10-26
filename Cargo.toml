@@ -14,12 +14,12 @@ winit = "0.26.1"
 raw-window-handle = "^0.4.2"
 
 bytemuck = { version = "1.11.0", features = ["derive"] }
-glam = { version = "0.21.3", features = ["bytemuck", "serde"] }
 smallvec = { version = "1.8.0", features = ["union"] }
 arrayvec = "0.7.2"
 nohash-hasher = "0.2.0"
 
-asset = { path = "crates/asset" }
+rendi_asset = { path = "crates/rendi_asset/" }
+rendi_math = { path = "crates/rendi_math/" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-metal = "0.2.0"

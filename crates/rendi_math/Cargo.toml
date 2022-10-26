@@ -1,0 +1,7 @@
+[package]
+name = "rendi_math"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glam = { version = "0.21.3", features = ["bytemuck", "serde"] }

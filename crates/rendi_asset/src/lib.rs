@@ -1,7 +1,8 @@
 use anyhow::Result;
 use ash::vk;
-use glam::{Vec2, Vec3, Mat4};
 use serde::{Serialize, Deserialize};
+
+use rendi_math::prelude::*;
 
 use std::path::Path;
 use std::fs;

@@ -20,7 +20,6 @@ mod camera;
 
 use ash::vk;
 use anyhow::Result;
-use glam::Vec3;
 use winit::event::VirtualKeyCode;
 
 use std::time::{Duration, Instant};
@@ -33,6 +32,8 @@ use crate::scene::{ForwardPass, Scene};
 use crate::light::{DirLight, PointLight};
 use crate::camera::Camera;
 use crate::skybox::Skybox;
+
+use rendi_math::prelude::*;
 
 fn main() -> Result<()> {
     env_logger::init();
@@ -59,7 +60,7 @@ fn main() -> Result<()> {
     let lights = debug_lights();
     let dir_light = DirLight::default();
 
-    let scene = asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
+    let scene = rendi_asset::Scene::load(Path::new("assets/scenes/sponza.scene"))?;
     let scene = Scene::from_scene_asset(&renderer, &scene, dir_light, &lights)?;
 
     let mut forward_pass = ForwardPass::new(&renderer, &camera, &scene)?;
@@ -68,7 +69,7 @@ fn main() -> Result<()> {
 
     let skybox = Skybox::new(&renderer, render_target_info, &forward_pass.lights)?;
 
-    let font = asset::Font::load(Path::new("assets/fonts/source_code_pro.font"))?;
+    let font = rendi_asset::Font::load(Path::new("assets/fonts/source_code_pro.font"))?;
     let mut text_pass = TextPass::new(&renderer, render_target_info, &font)?;
 
     event_loop.run(move |event, _, controlflow| match event {

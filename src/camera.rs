@@ -1,4 +1,4 @@
-use glam::{Mat4, Vec2, Vec3, Vec4};
+use rendi_math::prelude::*;
 
 #[derive(Clone)]
 pub struct Camera {

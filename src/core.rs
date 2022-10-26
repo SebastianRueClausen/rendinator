@@ -1,5 +1,4 @@
 use anyhow::Result;
-use glam::Vec2;
 use ash::extensions::{ext, khr};
 use ash::vk;
 
@@ -11,6 +10,8 @@ use std::rc::Rc;
 
 use crate::resource::*;
 use crate::command::*;
+
+use rendi_math::prelude::*;
 
 pub struct Renderer {
     pub device: Rc<Device>,

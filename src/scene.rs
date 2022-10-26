@@ -1,4 +1,3 @@
-use glam::{Vec4, Mat4, UVec2};
 use anyhow::Result;
 use ash::vk;
 
@@ -10,6 +9,8 @@ use crate::core::*;
 use crate::resource::*;
 use crate::command::*;
 use crate::camera::*;
+
+use rendi_math::prelude::*;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -1046,7 +1047,7 @@ pub struct Scene {
 impl Scene {
     pub fn from_scene_asset(
         renderer: &Renderer,
-        scene: &asset::Scene,
+        scene: &rendi_asset::Scene,
         dir_light: DirLight,
         lights: &[PointLight],
     ) -> Result<Self> {
@@ -1080,7 +1081,7 @@ impl Scene {
                             };
                         }
 
-                        let asset::Material { albedo_map, specular_map, normal_map, .. } =
+                        let rendi_asset::Material { albedo_map, specular_map, normal_map, .. } =
                             scene.materials[prim.material];
 
                         let (albedo_map, specular_map, normal_map) = (

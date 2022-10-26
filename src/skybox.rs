@@ -1,6 +1,7 @@
 use anyhow::Result;
-use glam::{Mat3, Mat4, Vec3};
 use ash::vk;
+
+use std::mem;
 
 use crate::command::*;
 use crate::core::*;
@@ -8,7 +9,7 @@ use crate::resource::*;
 use crate::camera::Camera;
 use crate::light::Lights;
 
-use std::mem;
+use rendi_math::prelude::*;
 
 const CUBE_VERTICES: [Vec3; 36] = [
     Vec3::new(-1.0, 1.0, 1.0),

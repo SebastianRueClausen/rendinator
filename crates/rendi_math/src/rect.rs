@@ -37,7 +37,7 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
+    /// use rendi_math::rect::Rect;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     /// assert_eq!(rect.width(), 1.0);
@@ -55,7 +55,7 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
+    /// use rendi_math::rect::Rect;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     /// assert_eq!(rect.height(), 1.0);
@@ -72,7 +72,7 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
+    /// use rendi_math::rect::Rect;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     /// assert_eq!(rect.area(), 1.0);
@@ -87,7 +87,7 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
+    /// use rendi_math::rect::Rect;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0).translate(0.5);
     ///
@@ -110,7 +110,7 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
+    /// use rendi_math::rect::Rect;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     /// let (left, right) = rect.split_vertically(0.6);
@@ -133,7 +133,7 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
+    /// use rendi_math::rect::Rect;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     /// let (top, bottom) = rect.split_horizontally(0.5);
@@ -156,8 +156,8 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
-    /// use math::prelude::*;
+    /// use rendi_math::rect::Rect;
+    /// use rendi_math::prelude::*;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     ///
@@ -175,8 +175,8 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
-    /// use math::prelude::*;
+    /// use rendi_math::rect::Rect;
+    /// use rendi_math::prelude::*;
     ///
     /// let rect = Rect::new(0.0, 0.0, 1.0, 1.0);
     ///
@@ -193,8 +193,8 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
-    /// use math::prelude::*;
+    /// use rendi_math::rect::Rect;
+    /// use rendi_math::prelude::*;
     //
     /// let outer = Rect::new(0.0, 0.0, 10.0, 10.0);
     /// let inner = Rect::new(2.5, 2.5, 7.5, 7.5);
@@ -212,8 +212,8 @@ impl Rect {
     /// # Examples
     ///
     /// ```
-    /// use math::rect::Rect;
-    /// use math::prelude::*;
+    /// use rendi_math::rect::Rect;
+    /// use rendi_math::prelude::*;
     //
     /// let a = Rect::new(0.0, 0.0, 10.0, 10.0);
     /// let b = Rect::new(2.5, 2.5, 11.0, 11.0);
