@@ -17,4 +17,6 @@ texpresso = { version = "2.0.1", features = ["rayon"] }
 rayon = "*"
 num_cpus = "1.13.1"
 
-asset = { path = "../../crates/asset" }
+rendi_asset = { path = "../../crates/rendi_asset" }
+rendi_math = { path = "../../crates/rendi_math/" }
+

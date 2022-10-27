@@ -45,17 +45,6 @@ pub struct Scene {
     pub indices: Vec<u32>,
 }
 
-impl Scene {
-    pub fn load(path: &Path) -> Result<Self> {
-       Ok(bincode::deserialize(&fs::read(path)?)?)
-    }
-
-    pub fn store(&self, path: &Path) -> Result<()> {
-        fs::write(path, bincode::serialize(self)?)
-            .map_err(|err| anyhow::anyhow!("failed to load scene: {}", err))
-    }
-}
-
 #[derive(Copy, Clone, Debug, Serialize, Deserialize)]
 pub enum BcFormat {
     Bc5Unorm = vk::Format::BC5_UNORM_BLOCK.as_raw() as isize,
@@ -220,14 +209,16 @@ pub struct Font {
     pub glyphs: Vec<Glyph>,
 }
 
-impl Font {
-    pub fn load(path: &Path) -> Result<Self> {
-       Ok(bincode::deserialize(&fs::read(path)?)?)
-    }
+pub fn load<T: for<'a> Deserialize<'a>>(path: &Path) -> Result<T> {
+    let bytes = fs::read(path)?;
+    bincode::deserialize(&bytes).map_err(|err| {
+        anyhow::anyhow!("failed to store asset: {err}")
+    })
+}
 
-    pub fn store(&self, path: &Path) -> Result<()> {
-        fs::write(path, bincode::serialize(self)?)
-            .map_err(|err| anyhow::anyhow!("failed to load font: {}", err))
-    }
+pub fn store<T: Serialize>(asset: &T, path: &Path) -> Result<()> {
+    fs::write(path, bincode::serialize(asset)?).map_err(|err| {
+        anyhow::anyhow!("failed to load asset: {err}")
+    })
 }
 

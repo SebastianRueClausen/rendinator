@@ -1,13 +1,13 @@
 #![feature(iterator_try_collect)]
 
 use anyhow::{anyhow, Result};
-use glam::{Vec2, Vec3, Vec4, Mat4, Vec2Swizzles, Vec3Swizzles};
 use image::imageops::FilterType;
 
 use std::path::{Path, PathBuf};
 use std::{fs, io, mem};
 
-use asset::*;
+use rendi_asset::*;
+use rendi_math::prelude::*;
 
 #[repr(C)]
 #[derive(Default, Clone, Copy, bytemuck::NoUninit)]
@@ -78,7 +78,7 @@ fn main() -> Result<()> {
                 .as_ref()
                 .map(|path| path.as_path())
                 .unwrap_or(&Path::new("out.scene"));
-            let res = load_scene_from_gltf(&input)?.store(output);
+            let res = store(&load_scene_from_gltf(&input)?, output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store scene to {output:?}: {err}"));
             }
@@ -91,7 +91,7 @@ fn main() -> Result<()> {
                 .as_ref()
                 .map(|path| path.as_path())
                 .unwrap_or(&Path::new("out.font"));
-            let res = load_font(&input)?.store(output);
+            let res = store(&load_font(&input)?, output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store font to {output:?}: {err}"));
             }
@@ -630,7 +630,7 @@ impl GltfImporter {
 
                      let index_count = indices.len() as f32;
 
-                    let mut lods = Vec::<asset::Lod>::with_capacity(TARGET_LOD_COUNT);
+                    let mut lods = Vec::<Lod>::with_capacity(TARGET_LOD_COUNT);
                     let mut sloppy = false;
 
                     for i in 0..TARGET_LOD_COUNT {
