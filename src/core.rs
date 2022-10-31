@@ -350,7 +350,7 @@ impl PhysicalDevice {
                         .unwrap_or("invalid")
                         .to_string();
 
-                    trace!("device candicate: {name}");
+                    println!("device candicate: {name}");
 
                     let mut score = properties.limits.max_image_dimension2_d;
 

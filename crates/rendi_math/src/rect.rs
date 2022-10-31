@@ -1,7 +1,7 @@
 use crate::prelude::*;
 
 /// Axis aligned 2D rectangle.
-#[derive(Debug, Default, Clone, Copy, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct Rect {
     /// Min point of the rectangle.
     pub min: Vec2,

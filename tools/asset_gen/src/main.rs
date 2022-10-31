@@ -34,20 +34,7 @@ struct Args {
     /// 
     /// Font:
     ///
-    ///   A single json file in the angelcode bm font format. The bitmap is expected to be encoded
-    ///   as signed distance fields.
-    ///
-    /// Skybox:
-    ///
-    ///   A list of 6 images.
-    ///
-    ///   The images are expected to be in the order:
-    ///     - positive x
-    ///     - negaive x
-    ///     - positive y
-    ///     - negaive y
-    ///     - positive z
-    ///     - negaive z
+    ///  TTF-file.
     ///
     /// Gltf:
     ///
@@ -91,7 +78,7 @@ fn main() -> Result<()> {
                 .as_ref()
                 .map(|path| path.as_path())
                 .unwrap_or(&Path::new("out.font"));
-            let res = store(&load_font(&input)?, output);
+            let res = store(&load_sdf_atlas(&input)?, output);
             if let Err(err) = res {
                 return Err(anyhow!("failed to store font to {output:?}: {err}"));
             }
@@ -740,115 +727,26 @@ fn load_scene_from_gltf(path: &Path) -> Result<Scene> {
     GltfImporter::new(path)?.load_scene()
 }
 
-/// Glyph of the angelcode bitmap format.
-///
-/// https://www.angelcode.com/products/bmfont/
-#[derive(serde::Deserialize)]
-struct BmChar {
-    #[serde(rename = "char")]
-    codepoint: String,
+fn load_sdf_atlas(ttf: &Path) -> Result<rendi_sdf::Atlas> {
+    let data = fs::read(ttf).map_err(|err| {
+        anyhow!("can't read ttf-file {ttf:?}: {err}")
+    })?;
 
-    width: u32,
-    height: u32,
+    let shadow = 12.0;
 
-    xoffset: i32,
-    yoffset: i32,
-
-    xadvance: i32,
-    
-    x: u32,
-    y: u32,
-}
-
-/// Font info for the angelcode bitmap format.
-///
-/// https://www.angelcode.com/products/bmfont/
-#[derive(serde::Deserialize)]
-struct BmInfo {
-    size: u32,
-}
-
-/// Font metadata for the angelcode bitmap format.
-///
-/// https://www.angelcode.com/products/bmfont/
-#[derive(serde::Deserialize)]
-struct BmFont {
-    pages: Vec<String>,
-    chars: Vec<BmChar>,
-    info: BmInfo,
-}
-
-pub fn load_font(metadata: &Path) -> Result<Font> {
-    let file = match fs::File::open(metadata) {
-        Ok(file) => file,
-        Err(err) => {
-            return Err(anyhow!("can't read file {metadata:?}: {err}"));
-        }
-    };
-
-    let reader = io::BufReader::new(file);
-    let font: BmFont = serde_json::from_reader(reader)?;
-
-    let Some(atlas_name) = font.pages.iter().next() else {
-        return Err(anyhow!("no pages in font"));
-    };
-
-    let parent_path = metadata
-        .parent()
-        .expect("`path` doesn't have a parent directory")
-        .to_path_buf();
-
-    let atlas_path: PathBuf = [parent_path.as_path(), &Path::new(&atlas_name)]
-        .iter()
-        .collect();
-
-    let image = image::open(&atlas_path)?;
-
-    let width = image.width();
-    let height = image.height();
-
-    let atlas_dim = Vec2::new(width as f32, height as f32);
-
-    let size = font.info.size as f32;
-    let glyphs: Result<Vec<_>> = font.chars
-        .iter()
-        .map(|c| {
-            let Some(codepoint) = c.codepoint.chars().next() else {
-                return Err(anyhow!("empty char"));
-            };
-
-            let dim = Vec2::new(c.width as f32, c.height as f32);
-            let pos = Vec2::new(c.x as f32, c.y as f32);
-
-            let scaled_dim = dim / Vec2::splat(size);
-            let scaled_offset = Vec2::new(c.xoffset as f32, c.yoffset as f32) / Vec2::splat(size);
-
-            let dim = dim / atlas_dim;
-            let pos = pos / atlas_dim;
-
-            let texcoord_min = Vec2::new(pos.x, pos.y);
-            let texcoord_max = texcoord_min + dim;
-
-            Ok(Glyph {
-                codepoint,
-                texcoord_min,
-                texcoord_max,
-                scaled_dim,
-                scaled_offset,
-                advance: c.xadvance as f32 / size,
-            })
-        })
-        .collect();
-
-    let glyphs = glyphs?;
-    let atlas = create_image(image, ImageFormat::Raw(RawFormat::R8Unorm), |_| {}, 1);
-
-    Ok(Font { size: font.info.size, atlas, glyphs })
+    rendi_sdf::Atlas::new(&data, rendi_sdf::GenerateInfo {
+        ranges: &['\u{20}'..='\u{7e}'],
+        atlas_width: 1000,
+        atlas_height: 1000,
+        scale: 0.1,
+        shadow,
+    })
 }
 
 fn octahedron_encode_normal(normal: Vec3) -> Vec2 {
     let t = normal.xy() * (1.0 / (normal.x.abs() + normal.y.abs() + normal.z.abs()));
 
+    /// FIXME: Just use `signum`.
     fn sign_not_zero(v: Vec2) -> Vec2 {
         let x = if v.x >= 0.0 { 1.0 } else { -1.0 };
         let y = if v.y >= 0.0 { 1.0 } else { -1.0 };

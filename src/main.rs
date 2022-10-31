@@ -69,8 +69,10 @@ fn main() -> Result<()> {
 
     let skybox = Skybox::new(&renderer, render_target_info, &forward_pass.lights)?;
 
-    let font: rendi_asset::Font = rendi_asset::load(Path::new("assets/fonts/source_code_pro.font"))?;
-    let mut text_pass = TextPass::new(&renderer, render_target_info, &font)?;
+    let font: rendi_sdf::Atlas =
+        rendi_asset::load(Path::new("assets/fonts/font.font"))?;
+
+    let mut text_pass = TextPass::new(&renderer, render_target_info, font)?;
 
     event_loop.run(move |event, _, controlflow| match event {
         Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
@@ -150,9 +152,9 @@ fn main() -> Result<()> {
 
                             let primitives_drawn = format!("primitives: {}", primitives_drawn);
 
-                            texts.add_label(30.0, Vec3::new(20.0, 20.0, 0.5), &fps); 
-                            texts.add_label(30.0, Vec3::new(20.0, 60.0, 0.5), &pos);
-                            texts.add_label(30.0, Vec3::new(20.0, 100.0, 0.5), &primitives_drawn);
+                            texts.add_label(0.02, Vec3::new(10.0, 50.0, 0.5), &pos);
+                            texts.add_label(0.02, Vec3::new(10.0, 100.0, 0.5), &fps); 
+                            texts.add_label(0.02, Vec3::new(10.0, 150.0, 0.5), &primitives_drawn);
                         })
                         .expect("failed do draw text");
                     });
