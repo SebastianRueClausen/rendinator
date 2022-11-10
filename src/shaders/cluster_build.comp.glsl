@@ -10,12 +10,32 @@ layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
 	Proj proj;
 };
 
+// Not used
+layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
+	View view;
+};
+
 layout (std140, set = 1, binding = 0) readonly uniform LightInfoBuf {
 	LightInfo light_info;
 };
 
 layout (std430, set = 1, binding = 1) writeonly buffer AabbBuf {
 	Aabb aabbs[];
+};
+
+// Not used
+layout (std430, set = 1, binding = 2) readonly buffer LightBuf {
+	PointLight point_lights[];
+};
+
+// Not used
+layout (std430, set = 1, binding = 3) readonly buffer LightPosBuf {
+	LightPos light_positions[];
+};
+
+// Not used
+layout (std430, set = 1, binding = 4) writeonly buffer LightMaskBuf {
+	LightMask light_masks[];
 };
 
 vec4 screen_to_view(const vec2 screen, const float z) {

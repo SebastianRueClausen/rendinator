@@ -476,6 +476,8 @@ impl Device {
         let extensions = [
             khr::Swapchain::name().as_ptr(),
 
+            khr::PushDescriptor::name().as_ptr(),
+
             #[cfg(target_os = "macos")]
             vk::KhrPortabilitySubsetFn::name().as_ptr(),
         ];

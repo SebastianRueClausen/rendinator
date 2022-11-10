@@ -8,6 +8,7 @@ use std::rc::Rc;
 
 use crate::core::*;
 use crate::resource::*;
+use rendi_shader::BindSlot;
 
 pub struct CommandBuffer {
     pub handle: vk::CommandBuffer,
@@ -329,7 +330,7 @@ impl<'a> DrawRecorder<'a> {
         self.buffer.bind_resource(buffer);
     }
 
-    pub fn bind_graphics_pipeline(&self, pipeline: Res<GraphicsPipeline>) {
+    pub fn bind_raster_pipeline(&self, pipeline: Res<RasterPipeline>) {
         let bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
             self.device().handle.cmd_bind_pipeline(
@@ -634,3 +635,4 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(buffer);
     }
 }
+

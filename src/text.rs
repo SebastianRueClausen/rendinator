@@ -17,7 +17,7 @@ struct Vertex {
 }
 
 pub struct TextPass {
-    pub pipeline: Res<GraphicsPipeline>,
+    pub pipeline: Res<RasterPipeline>,
     pub desc: Res<DescSet>,
 
     vertex_buffers: PerFrame<Res<Buffer>>,
@@ -80,7 +80,7 @@ impl TextPass {
 
         let view = pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
-            mips: 0..glyph_atlas.mip_level_count(),
+            mips: glyph_atlas.mip_levels(),
             image: glyph_atlas.clone(),
         })?;
 
@@ -111,8 +111,9 @@ impl TextPass {
         })?;
 
         let layout = pool.create_desc_layout(&[DescLayoutSlot {
+            binding: 0,
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            array_count: None,
+            count: rendi_shader::DescCount::Single,
         }])?;
 
         let desc = pool.create_desc_set(layout.clone(), &[
@@ -128,24 +129,21 @@ impl TextPass {
             .depth_write_enable(false)
             .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
            
-        let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/sdf.vert.spv");
-        let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/sdf.frag.spv");
+        let vert_code = include_bytes_aligned_as!(u32, "../assets/shaders/sdf.vert.spv");
+        let frag_code = include_bytes_aligned_as!(u32, "../assets/shaders/sdf.frag.spv");
 
-        let vertex_shader = pool.create_shader_module("main", vertex_code)?;
-        let fragment_shader = pool.create_shader_module("main", fragment_code)?;
+        let frag_shader = pool.create_shader_module("main", frag_code)?;
+        let vert_shader = pool.create_shader_module("main", vert_code)?;
 
-        let const_ranges = [PushConstRange {
+        let push_consts = &[PushConstRange {
             size: mem::size_of::<Mat4>() as vk::DeviceSize,
             stage: vk::ShaderStageFlags::VERTEX,
         }];
 
-        let layout = pool.create_pipeline_layout(&const_ranges, &[
-            desc.layout.clone(),
-        ])?;
-
-        let pipeline = pool.create_graphics_pipeline(GraphicsPipelineInfo {
-            render_target_info,
-
+        let prog = pool.create_raster_prog(vert_shader, frag_shader)?;
+        let pipeline = pool.create_raster_pipeline(RasterPipelineInfo {
+            depth_stencil_info: &depth_stencil_info,
+            cull_mode: vk::CullModeFlags::NONE,
             vertex_attributes: &[
                 VertexAttribute {
                     format: vk::Format::R32G32B32_SFLOAT,
@@ -156,12 +154,9 @@ impl TextPass {
                     size: mem::size_of::<Vec2>() as vk::DeviceSize,
                 },
             ],
-
-            depth_stencil_info: &depth_stencil_info,
-            vertex_shader,
-            fragment_shader,
-            cull_mode: vk::CullModeFlags::NONE,
-            layout,
+            render_target_info,
+            push_consts,
+            prog,
         })?;
 
         let width = renderer.swapchain.size().x;
@@ -206,7 +201,7 @@ impl TextPass {
             .get_mapped()?
             .fill_range(0..index_size, index_data);
 
-        recorder.bind_graphics_pipeline(self.pipeline.clone());
+        recorder.bind_raster_pipeline(self.pipeline.clone());
         recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
             layout: self.pipeline.layout(),

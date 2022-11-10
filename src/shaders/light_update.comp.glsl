@@ -10,12 +10,22 @@ const uint THREAD_COUNT = 64;
 
 layout (local_size_x = THREAD_COUNT, local_size_y = 1, local_size_z = 1) in;
 
+// Not used
+layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
+	Proj proj;
+};
+
 layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 	View view;
 };
 
-layout (std430, set = 1, binding = 0) readonly uniform LightInfoBuf {
-	LightInfo light_info;		
+layout (std140, set = 1, binding = 0) readonly uniform LightInfoBuf {
+	LightInfo light_info;	
+};
+
+// Not used
+layout (std430, set = 1, binding = 1) readonly buffer AabbBuf {
+	Aabb aabbs[];
 };
 
 layout (std430, set = 1, binding = 2) readonly buffer LightBuf {
@@ -24,6 +34,11 @@ layout (std430, set = 1, binding = 2) readonly buffer LightBuf {
 
 layout (std430, set = 1, binding = 3) writeonly buffer LightPosBuf {
 	LightPos light_positions[];
+};
+
+// Not used
+layout (std430, set = 1, binding = 4) readonly buffer LightMaskBuf {
+	LightMask light_masks[];
 };
 
 void main() {

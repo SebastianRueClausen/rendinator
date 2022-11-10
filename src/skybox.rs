@@ -111,12 +111,14 @@ impl Generator {
         let pool = &renderer.static_pool;
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 1,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
         ])?;
 
@@ -127,10 +129,9 @@ impl Generator {
 
         let code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.comp.spv");
         let shader = pool.create_shader_module("main", code)?;
+        let prog = pool.create_compute_prog(shader)?;
 
-        let layout = pool.create_pipeline_layout(&[], &[layout])?;
-        let pipeline = pool.create_compute_pipeline(layout, shader)?;
-
+        let pipeline = pool.create_compute_pipeline(prog, &[])?;
         let size = image_view.image().extent(0).width;
 
         Ok(Self { pipeline, descriptor, size })
@@ -153,7 +154,7 @@ impl Generator {
 
 pub struct Skybox {
     pub cube_map: CubeMap,
-    pub pipeline: Res<GraphicsPipeline>,
+    pub pipeline: Res<RasterPipeline>,
     pub descriptor: Res<DescSet>, 
 
     #[allow(dead_code)]
@@ -221,8 +222,9 @@ impl Skybox {
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
         ])?;
 
@@ -232,23 +234,18 @@ impl Skybox {
             )
         ])?;
 
-        let const_ranges = [PushConstRange {
-            size: mem::size_of::<Mat4>() as vk::DeviceSize,
-            stage: vk::ShaderStageFlags::VERTEX,
-        }];
-
-        let layout = pool.create_pipeline_layout(&const_ranges, &[layout.clone()])?;
-
         let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
-            .depth_test_enable(true)
+            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
             .depth_write_enable(false)
-            .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL);
+            .depth_test_enable(true);
 
-        let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.vert.spv");
-        let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.frag.spv");
+        let vert_code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.vert.spv");
+        let frag_code = include_bytes_aligned_as!(u32, "../assets/shaders/skybox.frag.spv");
 
-        let vertex_shader = pool.create_shader_module("main", vertex_code)?;
-        let fragment_shader = pool.create_shader_module("main", fragment_code)?;
+        let vert_shader = pool.create_shader_module("main", vert_code)?;
+        let frag_shader = pool.create_shader_module("main", frag_code)?;
+
+        let prog = pool.create_raster_prog(vert_shader, frag_shader)?;
 
         let cull_mode = vk::CullModeFlags::FRONT;
 
@@ -257,23 +254,32 @@ impl Skybox {
             size: mem::size_of::<Vec3>() as vk::DeviceSize,
         }];
 
-        let pipeline = pool.create_graphics_pipeline(GraphicsPipelineInfo {
+        let push_consts = &[PushConstRange {
+            size: mem::size_of::<Mat4>() as vk::DeviceSize,
+            stage: vk::ShaderStageFlags::VERTEX,
+        }];
+
+        let pipeline = pool.create_raster_pipeline(RasterPipelineInfo {
             render_target_info: target_info, 
             vertex_attributes,
-            vertex_shader,
-            fragment_shader,
             depth_stencil_info,
+            push_consts,
             cull_mode,
-            layout,
+            prog,
         })?;
 
-        Ok(Self { cube_map, descriptor, pipeline, generator })
+        Ok(Self {
+            cube_map,
+            descriptor,
+            pipeline,
+            generator,
+        })
     }
 }
 
 pub fn draw(skybox: &Skybox, camera: &Camera, recorder: &DrawRecorder) {
     recorder.bind_vertex_buffer(skybox.cube_map.vertex_buffer.clone());
-    recorder.bind_graphics_pipeline(skybox.pipeline.clone());
+    recorder.bind_raster_pipeline(skybox.pipeline.clone());
 
     recorder.bind_descs(&DescBindInfo {
         bind_point: vk::PipelineBindPoint::GRAPHICS,

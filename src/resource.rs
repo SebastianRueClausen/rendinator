@@ -2,17 +2,19 @@ use anyhow::Result;
 use smallvec::{smallvec, SmallVec};
 use ash::vk;
 
+use std::{array, ops, slice, alloc, mem, fmt};
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::{array, ops, slice, alloc, mem};
 use std::rc::Rc;
 use std::cell::{UnsafeCell, Cell};
 use std::ptr::{self, NonNull};
 use std::hash::{Hash, Hasher};
 
 use crate::core::*;
+use rendi_shader::{DescKind, BindSlot, ComputeReflection, RasterReflection};
 
 type MemoryRange = ops::Range<vk::DeviceSize>;
+type PushConstRanges = SmallVec<[PushConstRange; 4]>;
 
 fn range_length(range: &MemoryRange) -> vk::DeviceSize {
     range.end - range.start
@@ -161,7 +163,9 @@ impl Drop for MemoryBlock {
     fn drop(&mut self) {
         trace!("deallocating GPU memory block of {} bytes", self.size());
 
-        unsafe { self.device.handle.free_memory(self.handle, None); }
+        unsafe {
+            self.device.handle.free_memory(self.handle, None);
+        }
     }
 }
 
@@ -179,18 +183,35 @@ pub struct BufferInfo {
     pub size: u64,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BufferKind {
+    Storage,
+    Uniform,
+}
+
+impl BufferKind {
+    pub fn desc_kind(self) -> DescKind {
+        match self {
+            BufferKind::Storage => DescKind::StorageBuffer,
+            BufferKind::Uniform => DescKind::UniformBuffer,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct Buffer {
     pub handle: vk::Buffer,
     pub block: Rc<MemoryBlock>,
     pub range: MemoryRange,
 
+    kind: BufferKind,
+
     device: Rc<Device>,
 }
 
 impl ResourcePool {
     pub fn create_buffer(&self, loc: MemoryLocation, info: &BufferInfo) -> Result<Res<Buffer>> {
-        let pool = unsafe {
+        let buffer = unsafe {
             let info = vk::BufferCreateInfo::builder()
                 .usage(info.usage)
                 .size(info.size)
@@ -210,10 +231,23 @@ impl ResourcePool {
             let range = range.start..range.start + info.size;
 
             self.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
-            self.alloc(Buffer { handle, range, block, device: self.device.clone() })
+
+            let kind = if info.usage.contains(vk::BufferUsageFlags::UNIFORM_BUFFER) {
+                BufferKind::Uniform
+            } else {
+                BufferKind::Storage
+            };
+
+            self.alloc(Buffer {
+                device: self.device.clone(),
+                handle,
+                range,
+                block,
+                kind,
+            })
         };
 
-        Ok(pool)
+        Ok(buffer)
     }
 }
 
@@ -224,6 +258,10 @@ impl Buffer {
 
     pub fn get_mapped(&self) -> Result<MappedMemory> {
         MappedMemory::new(self.block.clone(), self.range.clone())
+    }
+
+    pub fn kind(&self) -> BufferKind {
+        self.kind
     }
 }
 
@@ -275,6 +313,27 @@ enum ImageStorage {
         #[allow(dead_code)]
         block: Rc<MemoryBlock>,
     },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ImageLayout {
+    ShaderRead = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL.as_raw() as isize,
+    General = vk::ImageLayout::GENERAL.as_raw() as isize,
+    Attachment = vk::ImageLayout::ATTACHMENT_OPTIMAL.as_raw() as isize,
+    TransferSrc = vk::ImageLayout::TRANSFER_SRC_OPTIMAL.as_raw() as isize,
+    TransferDst = vk::ImageLayout::TRANSFER_DST_OPTIMAL.as_raw() as isize,
+}
+
+impl fmt::Display for ImageLayout {
+    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
+        write!(fmt, "{}", match self {
+            ImageLayout::ShaderRead => "shader read",  
+            ImageLayout::General => "general",  
+            ImageLayout::Attachment => "attachment",  
+            ImageLayout::TransferSrc => "transfer source",
+            ImageLayout::TransferDst => "transfer destination",
+        })
+    }
 }
 
 // FIXME: Swapchain images may be invalid if the swapchain is recreated or destroyed.
@@ -489,7 +548,11 @@ impl ResourcePool {
             self.device.handle.create_image_view(&view_info, None)?
         };
     
-        Ok(self.alloc(ImageView { handle, image: info.image.clone(), mips: info.mips.clone() }))
+        Ok(self.alloc(ImageView {
+            image: info.image.clone(),
+            mips: info.mips.clone(),
+            handle,
+        }))
     }
 }
 
@@ -536,13 +599,13 @@ impl ResourcePool {
             .address_mode_u(vk::SamplerAddressMode::REPEAT)
             .address_mode_v(vk::SamplerAddressMode::REPEAT)
             .address_mode_w(vk::SamplerAddressMode::REPEAT)
-            .anisotropy_enable(true)
             .max_anisotropy(device.physical.properties.limits.max_sampler_anisotropy)
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
-            .unnormalized_coordinates(false)
-            .compare_enable(false)
             .compare_op(vk::CompareOp::ALWAYS)
             .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .unnormalized_coordinates(false)
+            .anisotropy_enable(true)
+            .compare_enable(false)
             .mip_lod_bias(0.0)
             .min_lod(0.0)
             .max_lod(vk::LOD_CLAMP_NONE);
@@ -557,13 +620,79 @@ impl ResourcePool {
 
 impl Drop for Sampler {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_sampler(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_sampler(self.handle, None);
+        }
+    }
+}
+
+pub struct ComputeProg {
+    module: Res<ShaderModule>,
+    reflection: ComputeReflection,
+}
+
+impl ResourcePool {
+    pub fn create_compute_prog(&self, module: Res<ShaderModule>) -> Result<Res<ComputeProg>> {
+        let reflection = ComputeReflection::new(module.source())?;
+
+        Ok(self.alloc(ComputeProg {
+            reflection,
+            module,
+        }))
+    }
+}
+
+impl ComputeProg {
+    pub fn module(&self) -> Res<ShaderModule> {
+        self.module.clone()
+    }
+
+    pub fn reflection(&self) -> &ComputeReflection {
+        &self.reflection
+    }
+}
+
+pub struct RasterProg {
+    pub vert_module: Res<ShaderModule>,
+    pub frag_module: Res<ShaderModule>,
+    
+    pub reflection: RasterReflection,
+}
+
+impl ResourcePool {
+    pub fn create_raster_prog(
+        &self,
+        vert_module: Res<ShaderModule>,
+        frag_module: Res<ShaderModule>,
+    ) -> Result<Res<RasterProg>> {
+        let reflection = RasterReflection::new(frag_module.source(), vert_module.source())?;
+
+        Ok(self.alloc(RasterProg {
+            reflection,
+            vert_module,
+            frag_module,
+        }))
+    }
+}
+
+impl RasterProg {
+    pub fn vert_module(&self) -> Res<ShaderModule> {
+        self.vert_module.clone()
+    }
+
+    pub fn frag_module(&self) -> Res<ShaderModule> {
+        self.frag_module.clone()
+    }
+
+    pub fn reflection(&self) -> &RasterReflection {
+        &self.reflection
     }
 }
 
 pub struct ShaderModule {
     pub handle: vk::ShaderModule,
     entry: CString,
+    source: Vec<u32>,
 
     device: Rc<Device>,
 }
@@ -580,11 +709,8 @@ impl ResourcePool {
             return Err(anyhow!("shader code must be aligned to `u32`"));
         }
 
-        let code = unsafe {
-            slice::from_raw_parts(code.as_ptr() as *const u32, code.len() / 4)
-        };
-
-        let info = vk::ShaderModuleCreateInfo::builder().code(code);
+        let source = Vec::from(bytemuck::cast_slice(code));
+        let info = vk::ShaderModuleCreateInfo::builder().code(&source);
 
         let handle = unsafe {
             device.handle.create_shader_module(&info, None)?
@@ -594,11 +720,20 @@ impl ResourcePool {
             return Err(anyhow!("invalid entry name `entry`"));
         };
 
-        Ok(self.alloc(ShaderModule { device, handle, entry }))
+        Ok(self.alloc(ShaderModule {
+            source,
+            device,
+            handle,
+            entry,
+        }))
     }
 }
 
 impl ShaderModule {
+    pub fn source(&self) -> &[u32] {
+        &self.source
+    }
+    
     fn stage_create_info(
         &self,
         stage: vk::ShaderStageFlags,
@@ -635,16 +770,30 @@ impl ResourcePool {
     pub fn create_pipeline_layout(
         &self,
         consts: &[PushConstRange],
-        layouts: &[Res<DescLayout>],
+        layouts: &[(u32, Res<DescLayout>)],
     ) -> Result<Res<PipelineLayout>> {
         let device = self.device.clone();
 
         let handle = unsafe {
-            let layouts: SmallVec<[_; 12]> = layouts
+            let set_count = layouts
                 .iter()
-                .map(|layout| layout.handle)
+                .max_by_key(|(set, _)| set)
+                .map(|(set, _)| set + 1)
+                .unwrap_or(0);
+
+            let empty_desc_layout = self
+                .create_desc_layout(&[])
+                .expect("failed to create empty descriptor layout");
+
+            let layouts: SmallVec<[_; 12]> = (0..set_count)
+                .map(|target| layouts
+                    .iter()
+                    .find(|(set, _)| *set == target)
+                    .map(|(_, layout)| layout.handle)
+                    .unwrap_or(empty_desc_layout.handle)
+                )
                 .collect();
-        
+            
             let mut offset = 0;
             let consts: SmallVec<[_; 6]> = consts
                 .iter()
@@ -670,7 +819,7 @@ impl ResourcePool {
 
         let desc_layouts = layouts
             .iter()
-            .map(|layout| layout.clone())
+            .map(|(_, layout)| layout.clone())
             .collect();
 
         let push_const_ranges = consts
@@ -678,7 +827,12 @@ impl ResourcePool {
             .cloned()
             .collect();
 
-        Ok(self.alloc(PipelineLayout { handle, desc_layouts, push_const_ranges, device }))
+        Ok(self.alloc(PipelineLayout {
+            push_const_ranges,
+            desc_layouts,
+            handle,
+            device,
+        }))
     }
 }
 
@@ -690,19 +844,83 @@ impl Drop for PipelineLayout {
     }
 }
 
+fn pipeline_layout_from_desc_binds(
+    pool: &ResourcePool,
+    binds: &rendi_shader::DescBinds,
+push_const_ranges: &[PushConstRange],
+) -> Result<Res<PipelineLayout>> {
+    let mut desc_layout_slots: Vec<(u32, Vec<DescLayoutSlot>)> = Vec::new();
+
+    for (slot, binding) in binds {
+        let get_layout_slot = || {
+            let ty = match binding.kind() {
+                rendi_shader::DescKind::UniformBuffer => {
+                    vk::DescriptorType::UNIFORM_BUFFER
+                }
+                rendi_shader::DescKind::StorageBuffer => {
+                    vk::DescriptorType::STORAGE_BUFFER
+                }
+                rendi_shader::DescKind::SampledImage => {
+                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER
+                }
+                rendi_shader::DescKind::StorageImage => {
+                    vk::DescriptorType::STORAGE_IMAGE
+                }
+            };
+
+            DescLayoutSlot {
+                binding: slot.binding(), 
+                count: binding.count(),
+                ty,
+            }
+        };
+
+        match desc_layout_slots.iter_mut().find(|(set, _)| *set == slot.set()) {
+            Some((_, layout)) => layout.push(get_layout_slot()),
+            None => {
+                desc_layout_slots.push(
+                    (slot.set(), vec![get_layout_slot()])
+                );
+            }
+        }
+    }
+
+    let desc_layouts: Result<Vec<_>> = desc_layout_slots
+        .into_iter()
+        .map(|(set, layout_slots)| {
+            pool.create_desc_layout(&layout_slots)
+                .map(|layout| (set, layout))
+        })
+        .collect();
+
+    let desc_layouts = desc_layouts?;
+
+    pool.create_pipeline_layout(&push_const_ranges, &desc_layouts)
+}
+
 pub struct ComputePipeline {
     pub handle: vk::Pipeline,
+
     layout: Res<PipelineLayout>,
+    prog: Res<ComputeProg>,
+
     device: Rc<Device>,
 }
 
 impl ResourcePool {
-    pub fn create_compute_pipeline( &self,
-        layout: Res<PipelineLayout>,
-        shader: Res<ShaderModule>,
+    pub fn create_compute_pipeline(
+        &self,
+        prog: Res<ComputeProg>,
+        push_const_ranges: &[PushConstRange],
     ) -> Result<Res<ComputePipeline>> {
         let device = self.device.clone();
-        let stage = shader.stage_create_info(vk::ShaderStageFlags::COMPUTE);
+
+        let module = prog.module();
+        let stage = module.stage_create_info(vk::ShaderStageFlags::COMPUTE);
+
+        let binds = prog.reflection().desc_binds();
+        let layout = pipeline_layout_from_desc_binds(self, binds, push_const_ranges)?;
+
         let create_infos = [vk::ComputePipelineCreateInfo::builder()
             .layout(layout.handle)
             .stage(*stage)
@@ -717,13 +935,22 @@ impl ResourcePool {
                 .clone()
         };
 
-        Ok(self.alloc(ComputePipeline { device, handle, layout }))
+        Ok(self.alloc(ComputePipeline {
+            device,
+            handle,
+            layout,
+            prog,
+        }))
     }
 }
 
 impl ComputePipeline {
     pub fn layout(&self) -> Res<PipelineLayout> {
         self.layout.clone()
+    }
+    
+    pub fn prog(&self) -> Res<ComputeProg> {
+        self.prog.clone()
     }
 }
 
@@ -751,40 +978,41 @@ pub struct RenderTargetInfo {
     pub sample_count: vk::SampleCountFlags,
 }
 
-pub struct GraphicsPipelineInfo<'a> {
-    pub layout: Res<PipelineLayout>,
-
+pub struct RasterPipelineInfo<'a> {
+    pub push_consts: &'a [PushConstRange],
     pub vertex_attributes: &'a [VertexAttribute],
+
     pub depth_stencil_info: &'a vk::PipelineDepthStencilStateCreateInfo,
 
     pub render_target_info: RenderTargetInfo,
-
-    pub vertex_shader: Res<ShaderModule>,
-    pub fragment_shader: Res<ShaderModule>,
-
+    pub prog: Res<RasterProg>,
     pub cull_mode: vk::CullModeFlags,
 }
 
-pub struct GraphicsPipeline {
+pub struct RasterPipeline {
     pub handle: vk::Pipeline,
     layout: Res<PipelineLayout>,
     device: Rc<Device>,
 }
 
 impl ResourcePool {
-    pub fn create_graphics_pipeline(
-        &self,
-        info: GraphicsPipelineInfo,
-    ) -> Result<Res<GraphicsPipeline>> {
+    pub fn create_raster_pipeline(&self, info: RasterPipelineInfo) -> Result<Res<RasterPipeline>> {
         let device = self.device.clone();
 
-        let shader_stages = [
-            *info.vertex_shader.stage_create_info(vk::ShaderStageFlags::VERTEX),
-            *info.fragment_shader.stage_create_info(vk::ShaderStageFlags::FRAGMENT),
-        ];
+        let binds = info.prog.reflection().desc_binds();
+        let layout = pipeline_layout_from_desc_binds(self, binds, info.push_consts)?;
+
+        let vert_stage = *info.prog
+            .vert_module()
+            .stage_create_info(vk::ShaderStageFlags::VERTEX);
+
+        let frag_stage = *info.prog
+            .frag_module()
+            .stage_create_info(vk::ShaderStageFlags::FRAGMENT);
+
+        let shader_stages = [vert_stage, frag_stage];
 
         let mut offset = 0;
-
         let vert_attribs: SmallVec<[_; 8]> = info.vertex_attributes
             .iter()
             .enumerate()
@@ -802,14 +1030,14 @@ impl ResourcePool {
             })
             .collect();
 
-        let vertex_bindings: SmallVec<[_; 1]> = if info.vertex_attributes.len() != 0 {
-            SmallVec::from([vk::VertexInputBindingDescription {
+        let vertex_bindings: SmallVec<[_; 1]> = if info.prog.reflection().vert_inputs().has_any() {
+            smallvec![vk::VertexInputBindingDescription {
                 input_rate: vk::VertexInputRate::VERTEX,
                 stride: offset,
                 binding: 0,
-            }])
+            }]
         } else {
-            SmallVec::new()
+            smallvec![]
         };
 
         let vert_input_info = vk::PipelineVertexInputStateCreateInfo::builder()
@@ -823,8 +1051,8 @@ impl ResourcePool {
 
         let rasterize_info = vk::PipelineRasterizationStateCreateInfo::builder()
             .front_face(vk::FrontFace::CLOCKWISE)
-            .cull_mode(info.cull_mode)
             .polygon_mode(vk::PolygonMode::FILL)
+            .cull_mode(info.cull_mode)
             .line_width(1.0);
 
         let multisample_info = vk::PipelineMultisampleStateCreateInfo::builder()
@@ -849,16 +1077,17 @@ impl ResourcePool {
         let color_blend_info = vk::PipelineColorBlendStateCreateInfo::builder()
             .attachments(&color_blend_attachments);
 
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+        let dynamic_states = [
+            vk::DynamicState::VIEWPORT,
+            vk::DynamicState::SCISSOR,
+        ];
+
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-        let color_formats: SmallVec<[_; 1]> =
-            if let Some(format) = info.render_target_info.color_format {
-                SmallVec::from([format])
-            } else {
-                SmallVec::new()
-            };
+        let color_formats: SmallVec<[_; 1]> = info.render_target_info.color_format
+            .map(|format| smallvec![format])
+            .unwrap_or_default();
 
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .color_attachment_formats(&color_formats)
@@ -874,7 +1103,7 @@ impl ResourcePool {
             .multisample_state(&multisample_info)
             .depth_stencil_state(&info.depth_stencil_info)
             .color_blend_state(&color_blend_info)
-            .layout(info.layout.handle)
+            .layout(layout.handle)
             .push_next(&mut rendering_info);
 
         let handle = unsafe {
@@ -884,22 +1113,28 @@ impl ResourcePool {
                     &[pipeline_info.build()],
                     None,
                 )
-                .map_err(|(_, error)| anyhow!("failed to create pipeline: {error}"))?
+                .map_err(|(_, error)| {
+                    anyhow!("failed to create pipeline: {error}")
+                })?
                 .first()
                 .unwrap()
         };
 
-        Ok(self.alloc(GraphicsPipeline { device, handle, layout: info.layout }))
+        Ok(self.alloc(RasterPipeline {
+            layout,
+            device,
+            handle,
+        }))
     }
 }
 
-impl GraphicsPipeline {
+impl RasterPipeline {
     pub fn layout(&self) -> Res<PipelineLayout> {
         self.layout.clone()
     }
 }
 
-impl Drop for GraphicsPipeline {
+impl Drop for RasterPipeline {
     fn drop(&mut self) {
         unsafe {
             self.device.handle.destroy_pipeline(self.handle, None);
@@ -948,16 +1183,16 @@ impl Drop for DescPool {
     }
 }
 
-#[derive(PartialEq, Eq, Hash, Clone, Copy)]
+#[derive(Debug, PartialEq, Eq, Hash, Clone, Copy)]
 pub struct DescLayoutSlot {
+    pub binding: u32,
     pub ty: vk::DescriptorType,
-    pub array_count: Option<u32>,
+    pub count: rendi_shader::DescCount,
 }
 
 struct DescLayoutSlots {
     bindings: SmallVec<[vk::DescriptorSetLayoutBinding; 6]>,
     flags: SmallVec<[vk::DescriptorBindingFlags; 6]>,
-    variable_set_count: u32,
 }
 
 impl DescLayoutSlots {
@@ -967,33 +1202,33 @@ impl DescLayoutSlots {
             .map(|binding| {
                 let mut flags = vk::DescriptorBindingFlags::empty(); 
 
-                if binding.array_count.is_some() {
+                if binding.count == rendi_shader::DescCount::Unbound {
                     flags |= vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
                 }
 
                 flags
             })
             .collect();
-        let variable_set_count = bindings
-            .last()
-            .map(|b| b.array_count)
-            .flatten()
-            .unwrap_or(1);
         let bindings = bindings
             .iter()
-            .enumerate()
-            .map(|(i, binding)| {
+            .map(|binding| {
                 // TODO: Check that using `vk::ShaderStageFlags::ALL` doesn't cause any performance
                 // issues.
                 vk::DescriptorSetLayoutBinding::builder()
-                    .binding(i as u32)
+                    .binding(binding.binding)
                     .descriptor_type(binding.ty)
-                    .descriptor_count(binding.array_count.unwrap_or(1))
+                    .descriptor_count(match binding.count {
+                        rendi_shader::DescCount::Single => 1,
+                        // NOTE: This is an upper bound. Not sure of the performance if this is set
+                        // to something like 5000.
+                        rendi_shader::DescCount::Unbound => 100,
+                        rendi_shader::DescCount::Bound(count) => count,
+                    })
                     .stage_flags(vk::ShaderStageFlags::ALL)
                     .build()
             })
             .collect();
-        Self { bindings, flags, variable_set_count }
+        Self { bindings, flags }
     }
 
     fn iter(&self) -> impl Iterator<Item = &vk::DescriptorSetLayoutBinding> {
@@ -1024,7 +1259,11 @@ impl DescLayout {
             device.handle.create_descriptor_set_layout(&layout_info, None)?
         };
 
-        Ok(Self { handle, slots, device }) 
+        Ok(Self {
+            handle,
+            slots,
+            device,
+        }) 
     }
 }
 
@@ -1064,7 +1303,6 @@ pub enum DescBinding<'a> {
 
 pub struct DescSet {
     pub handle: vk::DescriptorSet,
-
     pub layout: Res<DescLayout>,
 
     #[allow(unused)]
@@ -1077,7 +1315,17 @@ pub struct DescSet {
 impl ResourcePool {
     pub fn create_desc_set(&self, layout: Res<DescLayout>, bindings: &[DescBinding]) -> Result<Res<DescSet>> {
         let device = self.device.clone();
-        let (handle, pool) = self.desc_alloc(&layout)?;
+
+        let variable_set_count = bindings
+            .last()
+            .map(|binding| match binding {
+                DescBinding::ImageArray(_, _, views) => views.len() as u32,
+                DescBinding::Buffer(_) => 0, 
+                DescBinding::Image(_, _, _) => 0, 
+            })
+            .unwrap_or(0);
+        
+        let (handle, pool) = self.desc_alloc(variable_set_count, &layout)?;
 
         struct Info {
             ty: vk::DescriptorType,
@@ -1159,7 +1407,12 @@ impl ResourcePool {
             }
         }
 
-        Ok(self.alloc(DescSet { layout, pool, handle, resources }))
+        Ok(self.alloc(DescSet {
+            resources,
+            layout,
+            handle,
+            pool,
+        }))
     }
 }
 
@@ -1380,13 +1633,14 @@ impl DescPools {
         DescPool::new(device, max_sets, &sizes).map(|pool| Rc::new(pool))
     }
 
-    pub fn alloc(
+    fn alloc(
         &mut self,
         device: Rc<Device>,
+        variable_set_count: u32,
         layout: &DescLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescPool>)> {
         let layouts = [layout.handle];
-        let set_counts = [layout.slots.variable_set_count];
+        let set_counts = [variable_set_count];
 
         let mut size_factor = 1.0;
 
@@ -1555,10 +1809,11 @@ impl ResourcePool {
     #[must_use]
     fn desc_alloc(
         &self,
+        variable_set_count: u32,
         layout: &DescLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescPool>)> {
         unsafe {
-            self.get_shared().desc_pools.alloc(self.device.clone(), layout)
+            self.get_shared().desc_pools.alloc(self.device.clone(), variable_set_count, layout)
         }
     }
 
@@ -1614,6 +1869,20 @@ impl Drop for DummyRes {
     }
 }
 
+impl PartialEq for DummyRes {
+    fn eq(&self, other: &Self) -> bool {
+        self.ptr == other.ptr
+    }
+}
+
+impl Eq for DummyRes {}
+
+impl Hash for DummyRes {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
+    }
+}
+
 /// A reference to a resource allocated from a [`ResourcePool`].
 ///
 /// The resource is guarenteed to be alive as long as a reference exists. Drop will be called for
@@ -1662,6 +1931,12 @@ impl<T> Res<T> {
 
     pub fn create_dummy(&self) -> DummyRes {
         self.clone().to_dummy()
+    }
+}
+
+impl<T> Hash for Res<T> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.ptr.hash(state);
     }
 }
 

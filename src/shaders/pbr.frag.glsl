@@ -4,10 +4,12 @@
 #extension GL_GOOGLE_include_directive: require
 #extension GL_EXT_nonuniform_qualifier: require
 #extension GL_EXT_scalar_block_layout: require
+#extension GL_EXT_shader_16bit_storage: require
 
 #include "light.glsl"
 #include "tonemap.glsl"
 #include "camera.glsl"
+#include "mesh.glsl"
 
 #ifdef CLUSTER_DEBUG
 #include "cluster_debug.glsl"
@@ -23,14 +25,55 @@ layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
 	View view;
 };
 
+// Not used.
+layout (std430, set = 1, binding = 0) writeonly buffer DrawBuf {
+	DrawCommand draw_commands[];
+};
+
+// Not used.
+layout (std430, set = 1, binding = 1) buffer DrawCountBuf {
+	uint command_count;
+	uint primitive_count;
+};
+
+// Not used.
+layout (std430, set = 1, binding = 2) buffer DrawFlagBuf {
+	uint draw_flags[];
+};
+
+// Not used.
+layout (std430, set = 2, binding = 0) readonly buffer Instances {
+	InstanceData instances[];
+};
+
+// Not used.
+layout (std430, set = 2, binding = 1) readonly buffer Primitives {
+	Primitive primitives[];	
+};
+
+// Not used
+layout (std430, set = 2, binding = 2) readonly buffer Verts {
+	Vert verts;
+};
+
 layout (set = 2, binding = 3) uniform sampler2D textures[];
 
 layout (std430, set = 3, binding = 0) readonly uniform LightInfoBuf {
 	LightInfo light_info;
 };
 
+// Not used.
+layout (std430, set = 3, binding = 1) readonly buffer AabbBuf {
+	Aabb aabbs[];
+};
+
 layout (std430, set = 3, binding = 2) readonly buffer LightBuf {
 	PointLight point_lights[];
+};
+
+// Not used.
+layout (std430, set = 3, binding = 3) readonly buffer LightPosBuf {
+	LightPos light_positions[];
 };
 
 layout (std430, set = 3, binding = 4) readonly buffer LightMaskBuf {

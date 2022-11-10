@@ -1,11 +1,22 @@
 #version 450
 #pragma shader_stage(compute)
 
+#include "camera.glsl"
 #include "light.glsl"
 
 const uint THREADS_PER_CLUSTER = 64;
 
 layout(local_size_x = THREADS_PER_CLUSTER, local_size_y = 1, local_size_z = 1) in;
+
+// Not used
+layout (std140, set = 0, binding = 0) readonly uniform ProjBuf {
+	Proj proj;
+};
+
+// Not used
+layout (std140, set = 0, binding = 1) readonly uniform ViewBuf {
+	View view;
+};
 
 layout (std140, set = 1, binding = 0) readonly uniform LightInfoBuf {
 	LightInfo light_info;	

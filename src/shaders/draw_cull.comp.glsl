@@ -60,6 +60,14 @@ layout (std430, set = 2, binding = 1) readonly buffer Primitives {
 	Primitive primitives[];	
 };
 
+// Not used
+layout (std430, set = 2, binding = 2) readonly buffer Verts {
+	Vert verts;
+};
+
+// Not used
+layout (set = 2, binding = 3) uniform sampler2D textures[];
+
 layout (set = 3, binding = 0) uniform sampler2D depth_pyramid[];
 
 bool has_been_drawn(const uint primitive) {

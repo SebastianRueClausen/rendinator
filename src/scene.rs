@@ -263,8 +263,9 @@ impl DepthPyramid {
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                array_count: Some(mip_levels + 1),
+                count: rendi_shader::DescCount::Unbound,
             },
         ])?;
 
@@ -278,8 +279,9 @@ impl DepthPyramid {
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                array_count: Some(mip_levels),
+                count: rendi_shader::DescCount::Unbound,
             },
         ])?;
 
@@ -295,12 +297,14 @@ impl DepthPyramid {
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 1,
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
         ])?;
 
@@ -320,34 +324,23 @@ impl DepthPyramid {
         let resolve = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_resolve.comp.spv");
             let shader = pool.create_shader_module("main", code)?;
+            let prog = pool.create_compute_prog(shader)?;
 
-            let const_ranges = [PushConstRange {
+            pool.create_compute_pipeline(prog, &[PushConstRange {
                 size: mem::size_of::<DepthResolveInfo>() as vk::DeviceSize,
                 stage: vk::ShaderStageFlags::COMPUTE,
-            }];
-
-            let layout = pool.create_pipeline_layout(&const_ranges, &[
-                resolve_descs.any().layout(),
-            ])?;
-
-            pool.create_compute_pipeline(layout, shader)?
+            }])?
         };
 
         let reduce = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/depth_reduce.comp.spv");
             let shader = pool.create_shader_module("main", code)?;
+            let prog = pool.create_compute_prog(shader)?;
 
-            let const_ranges = [PushConstRange {
+            pool.create_compute_pipeline(prog, &[PushConstRange {
                 size: mem::size_of::<DepthReduceInfo>() as vk::DeviceSize,
                 stage: vk::ShaderStageFlags::COMPUTE,
-            }];
-
-            let layout = pool.create_pipeline_layout(&const_ranges, &[
-                sampled.any().layout(),
-                storage.any().layout(),
-            ])?;
-
-            pool.create_compute_pipeline(layout, shader)?
+            }])?
         };
 
         Ok(Self {
@@ -412,12 +405,14 @@ impl CameraDescs {
     pub fn layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
         renderer.static_pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 1,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
         ])
     }
@@ -487,16 +482,19 @@ impl DrawDesc {
     pub fn layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
         renderer.static_pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 2,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
         ])
     }
@@ -527,7 +525,7 @@ pub struct ForwardPass {
     pub depth_images: PerFrame<Res<ImageView>>,
     pub color_images: PerFrame<Res<ImageView>>,
 
-    pub render: Res<GraphicsPipeline>, 
+    pub render: Res<RasterPipeline>, 
     cull: Res<ComputePipeline>,
 
     depth_pyramid: DepthPyramid,
@@ -562,52 +560,38 @@ impl ForwardPass {
         };
 
         let render = {
-            let vertex_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
-            let fragment_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.frag.spv");
+            let vert_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.vert.spv");
+            let frag_code = include_bytes_aligned_as!(u32, "../assets/shaders/pbr.frag.spv");
 
-            let vertex_shader = pool.create_shader_module("main", vertex_code)?;
-            let fragment_shader = pool.create_shader_module("main", fragment_code)?;
+            let vert_shader = pool.create_shader_module("main", vert_code)?;
+            let frag_shader = pool.create_shader_module("main", frag_code)?;
+
+            let prog = pool.create_raster_prog(vert_shader, frag_shader)?;
 
             let depth_stencil_info = &vk::PipelineDepthStencilStateCreateInfo::builder()
                 .depth_compare_op(vk::CompareOp::LESS_OR_EQUAL)
                 .depth_write_enable(true)
                 .depth_test_enable(true);
 
-            let layout = pool.create_pipeline_layout(&[], &[
-                CameraDescs::layout(renderer)?,
-                DrawDesc::layout(renderer)?,
-                scene.desc.layout(),
-                lights.descs.any().layout(),
-            ])?;
-
-            pool.create_graphics_pipeline(GraphicsPipelineInfo {
-                render_target_info,
+            pool.create_raster_pipeline(RasterPipelineInfo {
                 cull_mode: vk::CullModeFlags::BACK,
-                fragment_shader,
-                vertex_shader,
-                vertex_attributes: &[],
+                render_target_info,
                 depth_stencil_info,
-                layout,
+                vertex_attributes: &[],
+                push_consts: &[],
+                prog,
             })?
         };
 
         let cull = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/draw_cull.comp.spv");
             let shader = pool.create_shader_module("main", code)?;
+            let prog = pool.create_compute_prog(shader)?;
 
-            let const_ranges = [PushConstRange {
+            pool.create_compute_pipeline(prog, &[PushConstRange {
                 size: mem::size_of::<CullInfo>() as vk::DeviceSize,
                 stage: vk::ShaderStageFlags::COMPUTE,
-            }];
-
-            let layout = pool.create_pipeline_layout(&const_ranges, &[
-                CameraDescs::layout(renderer)?,
-                DrawDesc::layout(renderer)?,
-                scene.desc.layout(),
-                depth_pyramid.sampled.any().layout(),
-            ])?;
-
-            pool.create_compute_pipeline(layout, shader)?
+            }])?
         };
 
         Ok(Self {
@@ -797,7 +781,7 @@ fn render(
 
     recorder.render(&render_info, |recorder| {
         recorder.bind_index_buffer(scene.index_buffer.clone(), vk::IndexType::UINT32);
-        recorder.bind_graphics_pipeline(pass.render.clone());
+        recorder.bind_raster_pipeline(pass.render.clone());
 
         recorder.bind_descs(&DescBindInfo {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
@@ -1268,20 +1252,24 @@ impl Scene {
 
         let desc_layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 2,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 3,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                array_count: Some(scene.textures.len() as u32),
+                count: rendi_shader::DescCount::Unbound,
             },
         ])?;
 

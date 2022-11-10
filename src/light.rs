@@ -258,24 +258,29 @@ impl Lights {
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
+                binding: 0,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 2,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 3,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
             DescLayoutSlot {
+                binding: 4,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                array_count: None,
+                count: rendi_shader::DescCount::Single,
             },
         ])?;
 
@@ -289,34 +294,34 @@ impl Lights {
             ])
         })?;
 
-        let layout = pool.create_pipeline_layout(&[], &[
-            CameraDescs::layout(renderer)?,
-            layout,
-        ])?;
-
         let cluster_build = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_build.comp.spv");
-            let shader = pool.create_shader_module("main", code)?;
 
-            pool.create_compute_pipeline(layout.clone(), shader)?
+            let shader = pool.create_shader_module("main", code)?;
+            let prog = pool.create_compute_prog(shader)?;
+
+            pool.create_compute_pipeline(prog, &[])?
         };
 
         let light_update = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/light_update.comp.spv");
-            let shader = pool.create_shader_module("main", code)?;
 
-            pool.create_compute_pipeline(layout.clone(), shader)?
+            let shader = pool.create_shader_module("main", code)?;
+            let prog = pool.create_compute_prog(shader)?;
+
+            pool.create_compute_pipeline(prog, &[])?
         };
 
         let cluster_update = {
             let code = include_bytes_aligned_as!(u32, "../assets/shaders/cluster_update.comp.spv");
-            let shader = pool.create_shader_module("main", code)?;
 
-            pool.create_compute_pipeline(layout, shader)?
+            let shader = pool.create_shader_module("main", code)?;
+            let prog = pool.create_compute_prog(shader)?;
+
+            pool.create_compute_pipeline(prog, &[])?
         };
 
         let light_count = lights.len() as u32;
-
         let build_clusters = CommandBuffer::new(renderer.device.clone(), renderer.transfer_queue())?;
 
         build_clusters.record(SubmitCount::Multiple, |recorder| {
@@ -405,7 +410,5 @@ pub fn prepare_lights(
         dst_stage: vk::PipelineStageFlags2::FRAGMENT_SHADER,
     });
 }
-
-
 
 const MAX_LIGHT_COUNT: usize = 256;
