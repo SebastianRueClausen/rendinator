@@ -18,6 +18,7 @@ bytemuck = { version = "1.11.0", features = ["derive"] }
 smallvec = { version = "1.8.0", features = ["union"] }
 ahash = "0.8.1"
 
+rendi_res = { path = "crates/rendi_res/" }
 rendi_asset = { path = "crates/rendi_asset/" }
 rendi_math = { path = "crates/rendi_math/" }
 rendi_sdf = { path = "crates/rendi_sdf/" }

@@ -10,6 +10,7 @@ use crate::command::*;
 use crate::core::*;
 
 use rendi_math::prelude::*;
+use rendi_res::Res;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, bytemuck::NoUninit)]

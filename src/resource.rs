@@ -2,19 +2,19 @@ use anyhow::Result;
 use smallvec::{smallvec, SmallVec};
 use ash::vk;
 
-use std::{array, ops, slice, alloc, mem, fmt};
+use std::{array, ops, slice, mem, fmt};
 use std::collections::HashMap;
 use std::ffi::CString;
 use std::rc::Rc;
 use std::cell::{UnsafeCell, Cell};
-use std::ptr::{self, NonNull};
+use std::ptr::NonNull;
 use std::hash::{Hash, Hasher};
 
 use crate::core::*;
-use rendi_shader::{DescKind, BindSlot, ComputeReflection, RasterReflection};
+use rendi_shader::{DescKind, ComputeReflection, RasterReflection};
+use rendi_res::{DummyRes, Res, Slabs, Bump};
 
 type MemoryRange = ops::Range<vk::DeviceSize>;
-type PushConstRanges = SmallVec<[PushConstRange; 4]>;
 
 fn range_length(range: &MemoryRange) -> vk::DeviceSize {
     range.end - range.start
@@ -238,7 +238,7 @@ impl ResourcePool {
                 BufferKind::Storage
             };
 
-            self.alloc(Buffer {
+            self.alloc_buffer(Buffer {
                 device: self.device.clone(),
                 handle,
                 range,
@@ -363,7 +363,7 @@ impl ResourcePool {
         let layout = Cell::new(vk::ImageLayout::UNDEFINED);
 
         if let ImageKind::Swapchain { handle } = info.kind {
-            return Ok(self.alloc(Image {
+            return Ok(self.alloc_image(Image {
                 storage: ImageStorage::Swapchain,
                 mip_levels: info.mip_levels,
                 aspect_flags: info.aspect_flags,
@@ -428,7 +428,7 @@ impl ResourcePool {
 
         let storage = ImageStorage::Block { range: 0..memory_req.size, block };
 
-        Ok(self.alloc(Image {
+        Ok(self.alloc_image(Image {
             mip_levels: info.mip_levels,
             aspect_flags: info.aspect_flags,
             device: self.device.clone(),
@@ -548,7 +548,7 @@ impl ResourcePool {
             self.device.handle.create_image_view(&view_info, None)?
         };
     
-        Ok(self.alloc(ImageView {
+        Ok(self.alloc_image_view(ImageView {
             image: info.image.clone(),
             mips: info.mips.clone(),
             handle,
@@ -1391,17 +1391,17 @@ impl ResourcePool {
         for binding in bindings {
             match &binding {
                 DescBinding::Buffer(buffer) => {
-                    resources.push(buffer.create_dummy());
+                    resources.push(DummyRes::new(buffer.clone()));
                 }
                 DescBinding::Image(sampler, _, image) => {
-                    resources.push(sampler.create_dummy());
-                    resources.push(image.create_dummy());
+                    resources.push(DummyRes::new(sampler.clone()));
+                    resources.push(DummyRes::new(image.clone()));
                 }
                 DescBinding::ImageArray(sampler, _, array) => {
-                    resources.push(sampler.create_dummy());
+                    resources.push(DummyRes::new(sampler.clone()));
 
                     for image in *array {
-                        resources.push(image.create_dummy()); 
+                        resources.push(DummyRes::new(image.clone())); 
                     }
                 }
             }
@@ -1419,105 +1419,6 @@ impl ResourcePool {
 impl DescSet {
     pub fn layout(&self) -> Res<DescLayout> {
         self.layout.clone()
-    }
-}
-
-#[repr(C)]
-struct CpuBlock {
-    /// The first byte of the block.
-    base: NonNull<u8>,
-
-    /// The offset into `base` thats points at the first free byte.
-    offset: Cell<usize>,
-
-    /// The layout of the block.
-    layout: alloc::Layout,
-}
-
-impl CpuBlock {
-    const DEFAULT_BLOCK_SIZE: usize = 1024;
-
-    fn new(size: usize) -> Self {
-        let (base, layout) = unsafe {
-            let layout = alloc::Layout::from_size_align_unchecked(size, 1);
-            let base = NonNull::new(alloc::alloc(layout)).expect("out of memory");
-
-            (base, layout)
-        };
-
-        Self { base, layout, offset: Cell::new(0) }
-    }
-
-    fn alloc<T>(&self) -> Option<NonNull<T>> {
-        let (size, align) = (mem::size_of::<T>(), mem::align_of::<T>());
-
-        let offset = self.offset.get();
-
-        unsafe {
-            let ptr = self.base.as_ptr().add(offset);
-            let align_offset = ptr.align_offset(align);
-
-            let start = ptr.add(ptr.align_offset(align));
-            let end = start.add(size);
-
-            if end > self.base.as_ptr().add(self.layout.size()) {
-                None
-            } else {
-                self.offset.set(offset + align_offset + size);
-                Some(NonNull::new_unchecked(start.cast()))
-            }
-        }
-    }
-}
-
-impl Drop for CpuBlock {
-    fn drop(&mut self) {
-        unsafe { alloc::dealloc(self.base.as_ptr(), self.layout) }
-    }
-}
-
-struct CpuBlocks {
-    block: Rc<CpuBlock>,
-    block_size: usize,
-}
-
-impl CpuBlocks {
-    fn new(block_size: usize) -> Self {
-        Self { block: Rc::new(CpuBlock::new(block_size)), block_size }
-    }
-
-    fn alloc<T>(&mut self, val: T) -> NonNull<ResState<T>> {
-        let mut size = mem::size_of::<ResState<T>>();
-
-        let (block, ptr) = loop {
-            if let Some(ptr) = self.block.alloc::<ResState<T>>() {
-                break (self.block.clone(), ptr);
-            };
-
-            // At this point we know that the current block is too small.
-            
-            let mut block_size = self.block_size;
-            while size > block_size {
-                block_size *= 2;
-            }
-
-            // Rare (impossible?) case where the allocation fails even if the block size is
-            // the the same size as the allocation because of aligment offsets.
-            size = block_size + 1;
-
-            self.block = Rc::new(CpuBlock::new(block_size));
-        };
-
-        // SAFETY: `ptr` has just been allocated and is therefore valid.
-        unsafe {
-            ptr.as_ptr().write(ResState {
-                ref_count: Cell::new(1),
-                block, 
-                val
-            });
-        }
-       
-        ptr
     }
 }
 
@@ -1713,8 +1614,13 @@ impl DescLayouts {
 }
 
 struct SharedResources {
+    buffers: Slabs<Buffer>,
+    images: Slabs<Image>,
+    image_views: Slabs<ImageView>,
+
+    bump: Bump,
+
     /// The memory blocks where all the CPU resources are allocated.
-    cpu_blocks: CpuBlocks,
     gpu_blocks: GpuBlocks,
     desc_pools: DescPools,
     desc_layouts: DescLayouts,
@@ -1723,7 +1629,12 @@ struct SharedResources {
 impl SharedResources {
     fn new(cpu_block_size: usize, gpu_block_size: vk::DeviceSize) -> Self {
         Self {
-            cpu_blocks: CpuBlocks::new(cpu_block_size),
+            buffers: Slabs::new(),
+            images: Slabs::new(),
+            image_views: Slabs::new(),
+
+            bump: Bump::new(cpu_block_size),
+
             gpu_blocks: GpuBlocks::new(gpu_block_size),
             desc_pools: DescPools::default(),
             desc_layouts: DescLayouts::default(),
@@ -1766,7 +1677,7 @@ impl ResourcePool {
     #[inline]
     #[must_use]
     pub fn new(device: Rc<Device>) -> Self {
-        Self::with_block_size(device, CpuBlock::DEFAULT_BLOCK_SIZE, GpuBlock::DEFAULT_BLOCK_SIZE)
+        Self::with_block_size(device, 1024, GpuBlock::DEFAULT_BLOCK_SIZE)
     }
 
     /// Create new resource pool with custom block sizes.
@@ -1821,166 +1732,27 @@ impl ResourcePool {
     #[inline]
     #[must_use]
     pub fn alloc<T>(&self, val: T) -> Res<T> {
-        // SAFETY: `cpu_blocks` is only used here, and is therefore never borrowed.
-        let ptr = unsafe {
-            self.get_shared().cpu_blocks.alloc::<T>(val)
-        };
-
-        Res { ptr }
+        unsafe { self.get_shared().bump.alloc::<T>(val) }
     }
-}
 
-#[repr(C)]
-struct ResState<T> {
-    /// The number of references to the item.
-    ref_count: Cell<u32>,
-    block: Rc<CpuBlock>,  
-
-    /// The resource value.
-    val: T,
-}
-
-/// A dummy res exists to hold resources alive without holding a typed [`Res`] struct.
-///
-/// This is handy if you for instance want to have a list of resources with different types that
-/// you want to ensure lives for a certain time.
-pub struct DummyRes {
-    ptr: NonNull<ResState<()>>,
-
-    val: *mut (),
-    drop: Option<unsafe fn(*mut ())>,
-}
-
-impl Drop for DummyRes {
-    fn drop(&mut self) {
+    pub fn alloc_image_view(&self, view: ImageView) -> Res<ImageView> {
         unsafe {
-            if self.ptr.as_ref().ref_count.get() == 1 {
-                if let Some(drop_ptr) = self.drop {
-                    (drop_ptr)(self.val);
-                }
-
-                let rc = self.ptr.as_mut().block.clone();
-                Rc::decrement_strong_count(Rc::into_raw(rc));
-            } else {
-                let count = self.ptr.as_ref().ref_count.get() - 1;
-                self.ptr.as_ref().ref_count.set(count);
-            }
-        }
-    }
-}
-
-impl PartialEq for DummyRes {
-    fn eq(&self, other: &Self) -> bool {
-        self.ptr == other.ptr
-    }
-}
-
-impl Eq for DummyRes {}
-
-impl Hash for DummyRes {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
-    }
-}
-
-/// A reference to a resource allocated from a [`ResourcePool`].
-///
-/// The resource is guarenteed to be alive as long as a reference exists. Drop will be called for
-/// the resource as soon as the last reference goes out of scope. However, the memory may not be
-/// immediately reclaimed.
-pub struct Res<T> {
-    ptr: NonNull<ResState<T>>,
-}
-
-impl<T> Res<T> {
-    unsafe fn drop_in_place(&mut self) {
-        if mem::needs_drop::<T>() {
-            ptr::drop_in_place::<T>((&mut self.ptr.as_mut().val) as *mut T);
+            self.get_shared().image_views.alloc(view)
         }
     }
 
-    fn increase_ref_count(&self) {
-        if mem::needs_drop::<T>() {
-            unsafe {
-                self.ptr.as_ref().ref_count.set(self.ptr.as_ref().ref_count.get() + 1);
-            }
-        }
-    }
-
-    pub fn to_dummy(self) -> DummyRes {
-        let drop = if mem::needs_drop::<T>() {
-            Some(unsafe {
-                mem::transmute::<unsafe fn(*mut T), unsafe fn(*mut ())>(
-                    ptr::drop_in_place::<T>
-                )
-            })
-        } else {
-            None 
-        };
-
-        let val = unsafe {
-            mem::transmute::<*mut T, *mut ()>(&mut (*self.ptr.as_ptr()).val as *mut T)
-        };
-
-        let ptr = self.ptr.cast();
-
-        mem::forget(self);
-
-        DummyRes { drop, val, ptr }
-    }
-
-    pub fn create_dummy(&self) -> DummyRes {
-        self.clone().to_dummy()
-    }
-}
-
-impl<T> Hash for Res<T> {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.ptr.hash(state);
-    }
-}
-
-impl<T> Clone for Res<T> {
-    fn clone(&self) -> Self {
-        self.increase_ref_count();
-        Self { ptr: self.ptr }
-    }
-}
-
-impl<T> Drop for Res<T> {
-    fn drop(&mut self) {
+    pub fn alloc_image(&self, image: Image) -> Res<Image> {
         unsafe {
-            if self.ptr.as_ref().ref_count.get() == 1 {
-                if mem::needs_drop::<T>() {
-                    self.drop_in_place();
-                }
+            self.get_shared().images.alloc(image)
+        }
+    }
 
-                let rc = self.ptr.as_mut().block.clone();
-                Rc::decrement_strong_count(Rc::into_raw(rc));
-            } else {
-                self.ptr.as_ref().ref_count.set(self.ptr.as_ref().ref_count.get() - 1);
-            }
+    pub fn alloc_buffer(&self, buffer: Buffer) -> Res<Buffer> {
+        unsafe {
+            self.get_shared().buffers.alloc(buffer)
         }
     }
 }
-
-impl<T> PartialEq for Res<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.ptr == other.ptr
-    }
-}
-
-impl<T> Eq for Res<T> {}
-
-impl<T> ops::Deref for Res<T> {
-    type Target = T;
-
-    #[inline(always)]
-    fn deref(&self) -> &Self::Target {
-        unsafe { &self.ptr.as_ref().val }
-    }
-}
-
 
 pub const FRAMES_IN_FLIGHT: usize = 2;
 
@@ -2081,130 +1853,4 @@ impl<'a, T> IntoIterator for &'a PerFrame<T> {
 #[inline]
 pub fn align_up_to(a: u64, alignment: u64) -> u64 {
     ((a + alignment - 1) / alignment) * alignment
-}
-
-#[test]
-fn res_simple_alloc() {
-    let instance = Rc::new(Instance::new(false).unwrap());
-    let physical = PhysicalDevice::select(&instance).unwrap();
-
-    let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
-    let p1 = ResourcePool::new(device);
-
-    let nums: Vec<_> = (0..2048)
-        .map(|i| p1.alloc(i as usize))
-        .collect();
-
-    for (i, j) in nums.into_iter().enumerate() {
-        assert_eq!(i, *j);
-    }
-}
-
-#[test]
-fn res_big_alloc() {
-    let instance = Rc::new(Instance::new(false).unwrap());
-    let physical = PhysicalDevice::select(&instance).unwrap();
-
-    let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
-    let p1 = ResourcePool::new(device);
-
-    let _ = p1.alloc([0_u32; 1024]);
-    let _ = p1.alloc([0_u32; 2048]);
-}
-
-#[test]
-fn res_drop() {
-    static mut COUNT: usize = 0;
-
-    struct Test(usize);
-    impl Drop for Test {
-        fn drop(&mut self) {
-            unsafe { COUNT += 1; }
-        }
-    }
-    
-    {
-        let instance = Rc::new(Instance::new(false).unwrap());
-        let physical = PhysicalDevice::select(&instance).unwrap();
-
-        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
-        let p1 = ResourcePool::new(device);
-
-        let _ = p1.alloc(Test(0));
-        let _ = p1.alloc(Test(0));
-    }
-
-    assert_eq!(unsafe { COUNT }, 2);
-}
-
-#[test]
-fn res_with_inter_block_ref() {
-    static mut COUNT: usize = 0;
-
-    struct Test {
-        #[allow(dead_code)]
-        val: Res<usize>,
-    }
-
-    impl Drop for Test {
-        fn drop(&mut self) {
-            unsafe { COUNT += 1; }
-        }
-    }
-    
-    {
-        let instance = Rc::new(Instance::new(false).unwrap());
-        let physical = PhysicalDevice::select(&instance).unwrap();
-
-        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
-        let p1 = ResourcePool::new(device);
-
-        let val = p1.alloc(0_usize);
-
-        let _ = p1.alloc(Test { val: val.clone() });
-        let _ = p1.alloc(Test { val: val.clone() });
-    }
-
-    assert_eq!(unsafe { COUNT }, 2);
-}
-
-/// Just test it doesn't crash.
-#[test]
-fn dummy_res() {
-    let instance = Rc::new(Instance::new(false).unwrap());
-    let physical = PhysicalDevice::select(&instance).unwrap();
-
-    let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
-    let p1 = ResourcePool::new(device);
-
-    let res = p1.alloc(0);
-
-    for _ in 0..100 {
-        res.create_dummy();
-    }
-}
-
-#[test]
-fn dummy_res_drop() {
-    static mut COUNT: usize = 0;
-
-    struct Test(usize);
-    impl Drop for Test {
-        fn drop(&mut self) {
-            unsafe { COUNT += 1; }
-        }
-    }
-    
-    let _dummy = {
-        let instance = Rc::new(Instance::new(false).unwrap());
-        let physical = PhysicalDevice::select(&instance).unwrap();
-
-        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
-        let p1 = ResourcePool::new(device);
-
-        let res = p1.alloc(Test(0));
-        res.create_dummy()
-    };
-
-    assert_eq!(unsafe { COUNT }, 0);
 }

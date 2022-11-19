@@ -8,7 +8,7 @@ use std::rc::Rc;
 
 use crate::core::*;
 use crate::resource::*;
-use rendi_shader::BindSlot;
+use rendi_res::{Res, DummyRes};
 
 pub struct CommandBuffer {
     pub handle: vk::CommandBuffer,
@@ -56,7 +56,7 @@ impl CommandBuffer {
     }
 
     fn bind_resource<T>(&self, res: Res<T>) {
-        unsafe { (*self.bound_resources.get()).push(res.to_dummy()); }
+        unsafe { (*self.bound_resources.get()).push(DummyRes::new(res)); }
     }
 
     pub fn record<F, R>(&self, submit_count: SubmitCount, func: F) -> Result<R>

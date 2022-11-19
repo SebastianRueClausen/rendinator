@@ -11,6 +11,7 @@ use crate::command::*;
 use crate::camera::*;
 
 use rendi_math::prelude::*;
+use rendi_res::Res;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]

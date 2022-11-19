@@ -34,7 +34,7 @@ pub(crate) struct ResInner<T: ?Sized> {
     /// This is used to make a deallocation and keeps the block alive long enough.
     alloc: Rc<dyn ResStorage>,
 
-    val: T,
+    pub(crate) val: T,
 }
 
 impl<T> ResInner<T> {
@@ -52,18 +52,23 @@ impl<T> ResInner<T> {
 
 impl<T: ?Sized> ResInner<T> {
     #[inline(always)]
-    fn inc_ref_count(&self) {
+    pub(crate) fn inc_ref_count(&self) {
         self.ref_count.set(self.ref_count() + 1);
     }
 
     #[inline(always)]
-    fn dec_ref_count(&self) {
+    pub(crate) fn dec_ref_count(&self) {
         self.ref_count.set(self.ref_count() - 1);
     }
 
     #[inline(always)]
-    fn ref_count(&self) -> usize {
+    pub(crate) fn ref_count(&self) -> usize {
         self.ref_count.get()
+    }
+
+    #[inline(always)]
+    pub(crate) fn alloc(&self) -> Rc<dyn ResStorage> {
+        self.alloc.clone()
     }
 }
 
@@ -93,7 +98,7 @@ impl<T: ?Sized> ResInner<T> {
 /// assert_eq!(*b, 'b');
 /// ```
 pub struct Res<T: ?Sized> {
-    inner: ptr::NonNull<ResInner<T>>,
+    pub(crate) inner: ptr::NonNull<ResInner<T>>,
 }
 
 impl<T> Res<T> {
@@ -196,7 +201,7 @@ impl<T: ?Sized> Drop for Res<T> {
         self.inner().dec_ref_count();
 
         if Self::ref_count(self) == 0 {
-            let alloc = self.inner().alloc.clone();
+            let alloc = self.inner().alloc();
 
             // SAFETY: There is no longer any references to `self.inner` and can therefore be
             // dropped safely.

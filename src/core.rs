@@ -12,6 +12,7 @@ use crate::resource::*;
 use crate::command::*;
 
 use rendi_math::prelude::*;
+use rendi_res::Res;
 
 pub struct Renderer {
     pub device: Rc<Device>,
@@ -37,8 +38,9 @@ impl Renderer {
     pub fn new(window: &winit::window::Window) -> Result<Self> {
         let validate = env::var("RENDINATOR_VALIDATE")
             .as_ref()
-            .map(|var| bool::from_str(var).unwrap_or(false))
-            .unwrap_or(false);
+            .map_or(false, |var| {
+                bool::from_str(var).unwrap_or(false)
+            });
 
         let instance = Rc::new(Instance::new(validate)?);
         let physical = PhysicalDevice::select(&instance)?;

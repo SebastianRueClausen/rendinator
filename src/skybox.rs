@@ -10,6 +10,7 @@ use crate::camera::Camera;
 use crate::light::Lights;
 
 use rendi_math::prelude::*;
+use rendi_res::Res;
 
 const CUBE_VERTICES: [Vec3; 36] = [
     Vec3::new(-1.0, 1.0, 1.0),
