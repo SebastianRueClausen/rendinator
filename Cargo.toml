@@ -20,6 +20,7 @@ nohash-hasher = "0.2.0"
 
 rendi_asset = { path = "crates/rendi_asset/" }
 rendi_math = { path = "crates/rendi_math/" }
+rendi_sdf = { path = "crates/rendi_sdf/" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-metal = "0.2.0"

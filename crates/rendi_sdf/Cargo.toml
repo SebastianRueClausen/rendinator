@@ -1,14 +1,16 @@
 [package]
-name = "rndi_sdf"
+name = "rendi_sdf"
 version = "0.1.0"
 edition = "2021"
 
 [dependencies]
+serde = { version = "1.0.137", features = ["derive"] }
 ttf-parser = "0.17.1"
 anyhow = "1.0"
 image = "0.24.4"
 
 rendi_math = { path = "../rendi_math/" }
+rendi_asset = { path = "../rendi_asset/" }
 
 [profile.test]
 opt-level = 3

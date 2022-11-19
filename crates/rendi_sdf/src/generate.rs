@@ -1,9 +1,9 @@
-use ttf_parser::{Face, OutlineBuilder};
 use anyhow::{anyhow, Result};
+use ttf_parser::{Face, GlyphId, OutlineBuilder};
 
-use rendi_math::prelude::*;
 use rendi_math::bezier::*;
 use rendi_math::polynom;
+use rendi_math::prelude::*;
 
 use crate::GenerateInfo;
 
@@ -34,7 +34,7 @@ impl Segment {
             Segment::Quadratic(curve) => curve.bounding_box(),
         }
     }
-   
+
     /// Get the signed distance from `px` to the closest point of the segment.
     #[inline]
     fn signed_dist(&self, px: Vec2) -> SignedDist {
@@ -46,7 +46,7 @@ impl Segment {
                 // from finding the root of the derivative of `line.point(t) - px`. This is simply
                 // clamped to fit it onto the segment.
 
-                let p0_p1 = line.p1 - line.p0;  
+                let p0_p1 = line.p1 - line.p0;
                 let p0_px = px - line.p0;
 
                 let perpendicular = p0_px.dot(p0_p1) / p0_p1.length_squared();
@@ -68,10 +68,7 @@ impl Segment {
             }
             Segment::Quadratic(curve) => {
                 // This method is simular to the one described above for lines. The closest point
-                // is once again guaranteed to be perpendicular to the point. Solving this comes
-                // down to finding the roots of the derivative of `curve.point(t) - p`, which means
-                // solving a cubic equation. This also means that there is more than one candidate.
-                // The one with the closest distance will be chosen.
+                // is once again guaranteed to be perpendicular to the point.
 
                 let v0 = px - curve.p0;
                 let v1 = curve.p1 - curve.p0;
@@ -86,7 +83,7 @@ impl Segment {
                 let mut best_t = 0.0;
 
                 for t in polynom::cubic_roots(a, b, c, d).as_ref() {
-                    let t = t.clamp(0.0, 1.0); 
+                    let t = t.clamp(0.0, 1.0);
                     let pt = curve.point(t);
 
                     let dist_squared = (px - pt).length_squared();
@@ -156,36 +153,16 @@ pub(crate) struct Shape {
 impl Shape {
     /// Get the bounding box of the shape.
     #[inline]
-    fn bounding_box(&self) -> Rect {
+    pub fn bounding_box(&self) -> Rect {
         let mut abs_bb: Option<Rect> = None;
 
         for bb in self.segments.iter().map(Segment::bounding_box) {
-            abs_bb.replace(abs_bb
-                .map(|abs_bb| abs_bb.bounding_rect(bb))
-                .unwrap_or(bb)
-            );
+            abs_bb.replace(abs_bb.map(|abs_bb| abs_bb.bounding_rect(bb)).unwrap_or(bb));
         }
 
         abs_bb.unwrap_or_default()
     }
-
-    /// Scale the shape by `scale`.
-    #[inline]
-    fn scale(&mut self, scale: f32) {
-        for seg in &mut self.segments {
-            *seg = seg.scale(scale);
-        }
-    }
-
-    /// Translate the shape by `delta`.
-    #[inline]
-    fn translate(&mut self, delta: Vec2) {
-        for seg in &mut self.segments {
-            *seg = seg.translate(delta);
-        }
-    }
 }
-
 
 #[derive(Default)]
 struct ShapeBuilder {
@@ -241,17 +218,18 @@ struct AtlasAllocator {
 impl AtlasAllocator {
     fn new(width: f32, height: f32) -> Self {
         let used_rects = Vec::new();
-        let free_rects = vec![
-            Rect::from_corners(Vec2::ZERO, Vec2::new(width, height)),
-        ];
+        let free_rects = vec![Rect::from_corners(Vec2::ZERO, Vec2::new(width, height))];
 
-        Self { free_rects, used_rects}
+        Self {
+            free_rects,
+            used_rects,
+        }
     }
 
     /// Allocate area with exactly the dimensions of `width` and `height`.
     fn alloc(&mut self, width: f32, height: f32) -> Option<Rect> {
         let index = self.free_rects.iter().position(|area| {
-            area.width() >= width && area.height() >= height 
+            area.width() >= width && area.height() >= height
         })?;
 
         let area = self.free_rects.swap_remove(index);
@@ -259,19 +237,17 @@ impl AtlasAllocator {
         let (area, left_margin) = area.split_vertically(width);
         let (area, bottom_margin) = area.split_horizontally(height);
 
-        if bottom_margin.width() > 0.0 && bottom_margin.height() > 0.0 {
+        if bottom_margin.area() > 0.0 {
             self.free_rects.push(bottom_margin);
         }
 
-        if left_margin.width() > 0.0 && left_margin.height() > 0.0 {
+        if left_margin.area() > 0.0 {
             self.free_rects.push(left_margin);
         }
 
         self.used_rects.push(area);
-        self.free_rects.sort_unstable_by_key(|a| {
-            a.area() as u32
-        });
-        
+        self.free_rects.sort_unstable_by_key(|a| a.area() as u32);
+
         Some(area)
     }
 
@@ -286,15 +262,12 @@ impl AtlasAllocator {
     }
 }
 
-fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphTemplate) {
-    let atlas_bb = glyph.atlas_bb;
-
-    let x_range = (atlas_bb.min.x.floor() as u32)..=(atlas_bb.max.x.ceil() as u32);
-    let y_range = (atlas_bb.min.y.floor() as u32)..=(atlas_bb.max.y.ceil() as u32);
+fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, bb: Rect, shape: &GlyphShape) {
+    let x_range = (bb.min.x.floor() as u32)..=(bb.max.x.ceil() as u32);
+    let y_range = (bb.min.y.floor() as u32)..=(bb.max.y.ceil() as u32);
 
     let shadow_recip = info.shadow.recip();
 
-    // Iterate through x and y in pixel space.
     for y in y_range {
         for x in x_range.clone() {
             let pixel = image.get_pixel_mut(x, y);
@@ -302,17 +275,12 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphT
             // Point at the center of the pixel.
             let mut point = Vec2::new(x as f32 + 0.5, y as f32 + 0.5);
 
-            // Translate the point from "atlas" space into "glyph" space and flip the y-coordinate.
-            point -= atlas_bb.min;
-            point.y = atlas_bb.height() - point.y;
-
-            point.x -= info.left_padding;
-            point.y -= info.top_padding;
+            point -= bb.min + info.shadow;
 
             let mut distance = f32::MAX;
             let mut orthogonality = 0.0;
 
-            for seg in &glyph.shape.segments {
+            for seg in &shape.scaled_shape.segments {
                 let sd = seg.signed_dist(point);
 
                 // If the distances are close, we use the orthogonality as a sort of tie breaker.
@@ -320,7 +288,7 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphT
                 let closer = if (sd.distance.abs() - distance.abs()).abs() <= 0.001 {
                     sd.orthogonality > orthogonality
                 } else {
-                    sd.distance.abs() < distance.abs()  
+                    sd.distance.abs() < distance.abs()
                 };
 
                 if closer {
@@ -337,26 +305,51 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphT
     }
 }
 
-pub(crate) fn load_glyph_shapes(data: &[u8], info: GenerateInfo) -> Result<Vec<Shape>> {
-    let face = Face::parse(data, 0)?;
+pub(crate) struct GlyphShape {
+    pub codepoint: char,
+    pub id: GlyphId,
+    pub offset: Vec2,
 
+    pub scaled_shape: Shape,
+    pub shape: Shape,
+}
+
+pub(crate) fn load_glyph_shapes(face: &Face, info: GenerateInfo) -> Result<Vec<GlyphShape>> {
     let shapes: Result<Vec<_>> = info.ranges
         .iter()
         .flat_map(|range| {
             range.clone().map(|codepoint| {
-                let Some(index) = face.glyph_index(codepoint) else {
+                let Some(id) = face.glyph_index(codepoint) else {
                     return Err(anyhow!("codepoint '{codepoint}' doesn't exist in font"));
                 };
 
                 let mut builder = ShapeBuilder::default();
-                face.outline_glyph(index, &mut builder);
+
+                if codepoint != ' ' && face.outline_glyph(id, &mut builder).is_none() {
+                    return Err(anyhow!("glyp outline of '{codepoint}' is malformed"));
+                }
 
                 // Scale the shapes. Then translate them such that their bounding box minimum lies
                 // at zero.
-                builder.shape.scale(info.scale);
-                builder.shape.translate(Vec2::ZERO - builder.shape.bounding_box().min);
 
-                Ok(builder.shape)
+                let offset = builder.shape.bounding_box().min * -1.0;
+                let scaled_shape = Shape {
+                    segments: builder.shape.segments
+                        .iter()
+                        .map(|seg| seg
+                            .translate(offset)
+                            .scale(info.scale)
+                        )
+                        .collect(),
+                };
+
+                Ok(GlyphShape {
+                    shape: builder.shape,
+                    scaled_shape,
+                    codepoint,
+                    offset,
+                    id,
+                })
             })
         })
         .collect();
@@ -364,25 +357,20 @@ pub(crate) fn load_glyph_shapes(data: &[u8], info: GenerateInfo) -> Result<Vec<S
     let mut shapes = shapes?;
 
     // Sort the shapes to largest area to smallest.
-    shapes.sort_unstable_by_key(|shape| {
-        std::cmp::Reverse(shape.bounding_box().area() as u32)
+    shapes.sort_unstable_by_key(|glyph| {
+        std::cmp::Reverse(glyph.shape.bounding_box().area() as u32)
     });
 
     Ok(shapes)
 }
 
-pub(crate) struct GlyphTemplate<'a> {
-    shape: &'a Shape,
-    atlas_bb: Rect,
-}
-
 pub(crate) struct AtlasTemplate<'a> {
-    glyphs: Vec<GlyphTemplate<'a>>,
-    image: image::GrayImage,
+    pub glyphs: Vec<(Rect, &'a GlyphShape)>,
+    pub image: image::GrayImage,
 }
 
 impl<'a> AtlasTemplate<'a> {
-    pub(crate) fn new(shapes: &'a [Shape], info: GenerateInfo) -> Self {
+    pub(crate) fn new(shapes: &'a [GlyphShape], info: GenerateInfo) -> Self {
         let mut dim = Vec2::new(info.atlas_width as f32, info.atlas_height as f32);
         let mut allocator = AtlasAllocator::new(dim.x, dim.y);
 
@@ -390,19 +378,14 @@ impl<'a> AtlasTemplate<'a> {
             let glyphs: Option<Vec<_>> = shapes
                 .iter()
                 .map(|shape| {
-                    let glyph_bb = shape.bounding_box();
+                    let glyph_bb = shape.scaled_shape.bounding_box();
 
-                    let width = glyph_bb.width()
-                        + info.right_padding
-                        + info.left_padding;
+                    let width = glyph_bb.width() + info.shadow * 2.0;
+                    let height = glyph_bb.height() + info.shadow * 2.0;
 
-                    let height = glyph_bb.height()
-                        + info.top_padding
-                        + info.bottom_padding;
+                    let atlas_bb = allocator.alloc(width, height)?;
 
-                    let atlas_bb = allocator.alloc(width.ceil(), height.ceil())?;
-
-                    Some(GlyphTemplate { shape, atlas_bb })
+                    Some((atlas_bb, shape))
                 })
                 .collect();
 
@@ -417,16 +400,14 @@ impl<'a> AtlasTemplate<'a> {
         };
 
         let (width, height) = allocator.dimensions();
-        let image = image::GrayImage::new(width, height); 
+        let image = image::GrayImage::new(width, height);
 
         Self { glyphs, image }
     }
 
-    pub(crate) fn render(mut self, info: GenerateInfo) -> image::GrayImage {
-        for glyph in &self.glyphs {
-            render_glyph(&mut self.image, info, glyph);
+    pub(crate) fn render(&mut self, info: GenerateInfo) {
+        for (bb, glyph_shape) in &self.glyphs {
+            render_glyph(&mut self.image, info, *bb, glyph_shape);
         }
-
-        self.image
     }
 }

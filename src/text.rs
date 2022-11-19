@@ -1,15 +1,12 @@
 use anyhow::Result;
 use ash::vk;
-use nohash_hasher::NoHashHasher;
 
-use std::{mem, hash};
-use std::collections::HashMap;
+use std::mem;
 
 use crate::command::*;
 use crate::core::*;
 use crate::resource::*;
 
-use rendi_asset::{Font, Glyph};
 use rendi_math::prelude::*;
 
 #[repr(C)]
@@ -38,10 +35,9 @@ impl TextPass {
     pub fn new(
         renderer: &Renderer,
         render_target_info: RenderTargetInfo,
-        font: &Font,
+        atlas: rendi_sdf::Atlas,
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
-        let text_objects = TextObjects::new(FontAtlas::new(font));
 
         let vertex_buffers = PerFrame::try_from_fn(|_| {
             pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
@@ -61,19 +57,24 @@ impl TextPass {
 
         let atlas_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
             usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: font.atlas.base_image_data().len() as vk::DeviceSize,
+            size: atlas.image().base_image_data().len() as vk::DeviceSize,
         })?;
 
-        atlas_staging.get_mapped()?.fill(font.atlas.base_image_data());
+        atlas_staging.get_mapped()?.fill(atlas.image().base_image_data());
 
-        let extent = vk::Extent3D { width: font.atlas.width, height: font.atlas.height, depth: 1 };
+        let extent = vk::Extent3D {
+            width: atlas.image().width,
+            height: atlas.image().height,
+            depth: 1,
+        };
+
         let sampler = pool.create_sampler()?;
    
         let glyph_atlas = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
             usage: vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST,
             aspect_flags: vk::ImageAspectFlags::COLOR,
             kind: ImageKind::Texture, extent,
-            format: font.atlas.format.into(),
+            format: atlas.image().format.into(),
             mip_levels: 1,
         })?;
 
@@ -159,7 +160,7 @@ impl TextPass {
             depth_stencil_info: &depth_stencil_info,
             vertex_shader,
             fragment_shader,
-            cull_mode: vk::CullModeFlags::BACK,
+            cull_mode: vk::CullModeFlags::NONE,
             layout,
         })?;
 
@@ -167,6 +168,7 @@ impl TextPass {
         let height = renderer.swapchain.size().y;
 
         let proj = Mat4::orthographic_lh(0.0, width, 0.0, height, 0.0, 1.0);
+        let text_objects = TextObjects::new(atlas);
 
         Ok(Self { text_objects, proj, pipeline, desc, index_buffers, vertex_buffers })
     }
@@ -217,7 +219,7 @@ impl TextPass {
         for label in &self.text_objects.labels {
             let proj_transform = self.proj * Mat4::from_scale_rotation_translation(
                 Vec3::splat(label.scale),
-                Quat::IDENTITY,
+                Quat::from_xyzw(0.0, 0.0, 0.0, -1.0),
                 label.pos,
             );
 
@@ -246,17 +248,17 @@ struct TextLabel {
 }
 
 pub struct TextObjects {
-    font_atlas: FontAtlas,
+    atlas: rendi_sdf::Atlas,
     labels: Vec<TextLabel>,
     vertices: Vec<Vertex>,
     indices: Vec<u16>,
 }
 
 impl TextObjects {
-    fn new(font_atlas: FontAtlas) -> Self {
+    fn new(atlas: rendi_sdf::Atlas) -> Self {
         let vertices = Vec::with_capacity(MAX_VERTEX_COUNT);
         let indices = Vec::with_capacity(MAX_INDEX_COUNT);
-        Self { font_atlas, labels: Vec::new(), vertices, indices }
+        Self { atlas, labels: Vec::new(), vertices, indices }
     }
 
     fn clear(&mut self) {
@@ -271,52 +273,60 @@ impl TextObjects {
         let mut index  = self.vertices.len() as u16;
         let mut screen_pos = Vec2::new(0.0, 0.0);
 
-        for c in text.chars() {
-            let glyph = &self.font_atlas.glyph_map[&(c as u32)];
-           
-            screen_pos.y = glyph.scaled_offset.y;
+        let mut prev_ch = None;
+
+        for ch in text.chars() {
+            let glyph = &self.atlas.glyph(ch).unwrap_or_else(|| {
+                panic!("no char '{ch}' in atlas");
+            });
+
+            screen_pos.y = glyph.offset().y;
+
+            if let Some(prev_ch) = prev_ch {
+                screen_pos.x += self.atlas.kerning(prev_ch, ch);
+            }
 
             self.vertices.extend_from_slice(&[
                 Vertex {
                     texcoord: Vec2::new(
-                        glyph.texcoord_max.x,
-                        glyph.texcoord_max.y,
+                        glyph.atlas_rect().max.x,
+                        glyph.atlas_rect().max.y,
                     ),
                     pos: Vec3::new(
-                        screen_pos.x + glyph.scaled_dim.x + glyph.scaled_offset.x,
-                        screen_pos.y + glyph.scaled_dim.y,
+                        screen_pos.x + glyph.dim().x + glyph.offset().x,
+                        screen_pos.y - glyph.dim().y,
                         0.0,
                     ),
                 },
                 Vertex {
                     texcoord: Vec2::new(
-                        glyph.texcoord_min.x,
-                        glyph.texcoord_max.y,
+                        glyph.atlas_rect().min.x,
+                        glyph.atlas_rect().max.y,
                     ),
                     pos: Vec3::new(
-                        screen_pos.x + glyph.scaled_offset.x,
-                        screen_pos.y + glyph.scaled_dim.y,
+                        screen_pos.x + glyph.offset().x,
+                        screen_pos.y - glyph.dim().y,
                         0.0,
                     ),
                 },
                 Vertex {
                     texcoord: Vec2::new(
-                        glyph.texcoord_min.x,
-                        glyph.texcoord_min.y,
+                        glyph.atlas_rect().min.x,
+                        glyph.atlas_rect().min.y,
                     ),
                     pos: Vec3::new(
-                        screen_pos.x + glyph.scaled_offset.x,
+                        screen_pos.x + glyph.offset().x,
                         screen_pos.y,
                         0.0,
                     ),
                 },
                 Vertex {
                     texcoord: Vec2::new(
-                        glyph.texcoord_max.x,
-                        glyph.texcoord_min.y,
+                        glyph.atlas_rect().max.x,
+                        glyph.atlas_rect().min.y,
                     ),
                     pos: Vec3::new(
-                        screen_pos.x + glyph.scaled_dim.x + glyph.scaled_offset.x,
+                        screen_pos.x + glyph.dim().x + glyph.offset().x,
                         screen_pos.y,
                         0.0,
                     ),
@@ -333,32 +343,18 @@ impl TextObjects {
             ]);
 
             index += 4;
-            screen_pos.x += glyph.advance;
+            screen_pos.x += glyph.advance();
+            prev_ch = Some(ch);
         }
 
         let index_count = self.indices.len() as u32 - index_offset;
      
-        self.labels.push(TextLabel { index_offset, index_count, pos, scale });
-    }
-}
-
-type GlyphMap = HashMap<u32, Glyph, hash::BuildHasherDefault<NoHashHasher<u32>>>;
-
-struct FontAtlas {
-    glyph_map: GlyphMap,
-}
-
-impl FontAtlas {
-    fn new(font: &Font) -> Self {
-        let hasher = hash::BuildHasherDefault::default();
-        let mut glyph_map = GlyphMap::with_capacity_and_hasher(font.glyphs.len(), hasher);
-
-        for glyph in font.glyphs.iter() {
-            let codepoint = u32::from(glyph.codepoint.clone());
-            glyph_map.insert(codepoint, glyph.clone());
-        }
-
-        Self { glyph_map }
+        self.labels.push(TextLabel {
+            index_offset,
+            index_count,
+            scale,
+            pos,
+        });
     }
 }
 
