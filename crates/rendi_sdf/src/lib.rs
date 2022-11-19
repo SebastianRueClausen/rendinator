@@ -1,3 +1,5 @@
+#![warn(clippy::all)]
+
 mod generate;
 
 use anyhow::Result;
@@ -134,7 +136,7 @@ impl Atlas {
         let kernings = face
             .tables()
             .kern
-            .map(|kern| kern.subtables
+            .and_then(|kern| kern.subtables
                 .into_iter()
                 .next()
                 .map(|subtable| {
@@ -153,7 +155,6 @@ impl Atlas {
                     pairs
                 })
             )
-            .flatten()
             .unwrap_or_default();
 
         let format = ImageFormat::Raw(RawFormat::R8Unorm);

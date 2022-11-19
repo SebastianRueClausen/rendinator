@@ -11,7 +11,6 @@ mod macros;
 
 mod resource;
 mod command;
-mod pass;
 mod core;
 mod scene;
 mod skybox;

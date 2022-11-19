@@ -268,7 +268,7 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, bb: Rect, shap
 
     let shadow_recip = info.shadow.recip();
 
-    for y in y_range.clone() {
+    for y in y_range {
         for x in x_range.clone() {
             let pixel = image.get_pixel_mut(x, y);
 
@@ -325,10 +325,8 @@ pub(crate) fn load_glyph_shapes(face: &Face, info: GenerateInfo) -> Result<Vec<G
 
                 let mut builder = ShapeBuilder::default();
 
-                if codepoint != ' ' {
-                    if face.outline_glyph(id, &mut builder).is_none() {
-                        return Err(anyhow!("glyp outline of '{codepoint}' is malformed"));
-                    };
+                if codepoint != ' ' && face.outline_glyph(id, &mut builder).is_none() {
+                    return Err(anyhow!("glyp outline of '{codepoint}' is malformed"));
                 }
 
                 // Scale the shapes. Then translate them such that their bounding box minimum lies
