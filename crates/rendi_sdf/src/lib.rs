@@ -1,3 +1,5 @@
+#![warn(clippy::all)]
+
 mod generate;
 
 use anyhow::Result;

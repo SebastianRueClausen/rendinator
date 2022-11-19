@@ -149,7 +149,7 @@ impl Segment {
 
 /// A shape consisting of a number of segments.
 #[derive(Debug, Default, Clone)]
-struct Shape {
+pub(crate) struct Shape {
     segments: Vec<Segment>,
 }
 
@@ -295,7 +295,7 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphT
     let shadow_recip = info.shadow.recip();
 
     // Iterate through x and y in pixel space.
-    for y in y_range.clone() {
+    for y in y_range {
         for x in x_range.clone() {
             let pixel = image.get_pixel_mut(x, y);
 
@@ -312,7 +312,7 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphT
             let mut distance = f32::MAX;
             let mut orthogonality = 0.0;
 
-            for seg in &glyph.glyph_shape.shape.segments {
+            for seg in &glyph.shape.segments {
                 let sd = seg.signed_dist(point);
 
                 // If the distances are close, we use the orthogonality as a sort of tie breaker.
@@ -337,12 +337,7 @@ fn render_glyph(image: &mut image::GrayImage, info: GenerateInfo, glyph: &GlyphT
     }
 }
 
-pub(crate) struct GlyphShape {
-    shape: Shape,
-    codepoint: char,
-}
-
-pub(crate) fn load_glyph_shapes(data: &[u8], info: GenerateInfo) -> Result<Vec<GlyphShape>> {
+pub(crate) fn load_glyph_shapes(data: &[u8], info: GenerateInfo) -> Result<Vec<Shape>> {
     let face = Face::parse(data, 0)?;
 
     let shapes: Result<Vec<_>> = info.ranges
@@ -361,7 +356,7 @@ pub(crate) fn load_glyph_shapes(data: &[u8], info: GenerateInfo) -> Result<Vec<G
                 builder.shape.scale(info.scale);
                 builder.shape.translate(Vec2::ZERO - builder.shape.bounding_box().min);
 
-                Ok(GlyphShape { shape: builder.shape, codepoint })
+                Ok(builder.shape)
             })
         })
         .collect();
@@ -369,15 +364,15 @@ pub(crate) fn load_glyph_shapes(data: &[u8], info: GenerateInfo) -> Result<Vec<G
     let mut shapes = shapes?;
 
     // Sort the shapes to largest area to smallest.
-    shapes.sort_unstable_by_key(|glyph| {
-        std::cmp::Reverse(glyph.shape.bounding_box().area() as u32)
+    shapes.sort_unstable_by_key(|shape| {
+        std::cmp::Reverse(shape.bounding_box().area() as u32)
     });
 
     Ok(shapes)
 }
 
 pub(crate) struct GlyphTemplate<'a> {
-    glyph_shape: &'a GlyphShape,
+    shape: &'a Shape,
     atlas_bb: Rect,
 }
 
@@ -387,15 +382,15 @@ pub(crate) struct AtlasTemplate<'a> {
 }
 
 impl<'a> AtlasTemplate<'a> {
-    pub(crate) fn new(shapes: &'a [GlyphShape], info: GenerateInfo) -> Self {
+    pub(crate) fn new(shapes: &'a [Shape], info: GenerateInfo) -> Self {
         let mut dim = Vec2::new(info.atlas_width as f32, info.atlas_height as f32);
         let mut allocator = AtlasAllocator::new(dim.x, dim.y);
 
         let glyphs = loop {
             let glyphs: Option<Vec<_>> = shapes
                 .iter()
-                .map(|glyph_shape| {
-                    let glyph_bb = glyph_shape.shape.bounding_box();
+                .map(|shape| {
+                    let glyph_bb = shape.bounding_box();
 
                     let width = glyph_bb.width()
                         + info.right_padding
@@ -407,7 +402,7 @@ impl<'a> AtlasTemplate<'a> {
 
                     let atlas_bb = allocator.alloc(width.ceil(), height.ceil())?;
 
-                    Some(GlyphTemplate { glyph_shape, atlas_bb })
+                    Some(GlyphTemplate { shape, atlas_bb })
                 })
                 .collect();
 
