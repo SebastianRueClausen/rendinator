@@ -1,3 +1,5 @@
+#![warn(clippy::all)]
+
 use anyhow::{anyhow, Result};
 
 use std::cmp::Ordering;
@@ -386,14 +388,14 @@ pub struct ComputeProg<'a> {
 impl<'a> ComputeProg<'a> {
     /// Create new source code for 
     pub fn new(code: &'a [u32]) -> Result<Self> {
-        let (desc_binds, _, push_const) = get_shader_info(&code)?;
+        let (desc_binds, _, push_const) = get_shader_info(code)?;
 
         Ok(Self { desc_binds, code, push_const })
     }
 
     /// Get a slice of the raw SPIR-V code of the shader.
     pub fn code(&self) -> &[u32] {
-        &self.code
+        self.code
     }
 
     /// Get descriptor bindings.
@@ -465,12 +467,12 @@ impl<'a> RasterProg<'a> {
 
     /// Get a slice of the raw SPIR-V code of the fragment shader.
     pub fn frag_code(&self) -> &[u32] {
-        &self.frag_code
+        self.frag_code
     }
 
     /// Get a slice of the raw SPIR-V code of the vertex shader.
     pub fn vert_code(&self) -> &[u32] {
-        &self.vert_code
+        self.vert_code
     }
 
     /// Get descriptor bindings.
@@ -532,7 +534,7 @@ struct InsIter<'a> {
 
 impl<'a> InsIter<'a> {
     fn new(binary: &'a [u32]) -> Result<Self> {
-        if binary.get(0).cloned() != Some(SPIRV_MAGIC_VALUE) {
+        if binary.first().cloned() != Some(SPIRV_MAGIC_VALUE) {
             return Err(anyhow!("invalid magic value"));
         }
 
@@ -575,10 +577,10 @@ struct Reflection<'a> {
 
 impl<'a> Reflection<'a> {
     fn new(binary: &'a [u32]) -> Result<Self> {
-        let mut inss = InsIter::new(binary)?;
+        let inss = InsIter::new(binary)?;
         let mut reflection = Reflection::default();
 
-        while let Some(ins) = inss.next() {
+        for ins in inss {
             match ins.opcode() {
                 OP_CONST => {
                     // NOTE: For now we treat every constant as an 32-bit unsigned integer since
@@ -753,7 +755,7 @@ impl<'a> Reflection<'a> {
                         (deco.struct_ty_id == ty.id && deco.kind == DecoKind::Offset)
                             .then(|| {
                                 deco.args
-                                    .get(0)
+                                    .first()
                                     .copied()
                                     .map(|offset| {
                                         (offset, deco.member)
@@ -886,8 +888,7 @@ fn get_shader_info(binary: &[u32]) -> Result<(DescBinds, Inputs, Option<PushCons
         // If it's not a type we save in `Reflection::types`, it's not a variable we care about.
         let Some(mut ty) = reflection
             .find_type(var.ty)
-            .map(|ty| reflection.fetch_through_ptr(ty))
-            .flatten()
+            .and_then(|ty| reflection.fetch_through_ptr(ty))
         else {
             continue;
         };
@@ -925,7 +926,7 @@ fn get_shader_info(binary: &[u32]) -> Result<(DescBinds, Inputs, Option<PushCons
                         .iter()
                         .filter_map(|deco| {
                             (deco.struct_ty_id == ty.id && deco.kind == DecoKind::Offset)
-                                .then(|| deco.args.get(0).copied())
+                                .then(|| deco.args.first().copied())
                                 .flatten()
                         })
                         .inspect(|_| count += 1)
@@ -996,8 +997,7 @@ fn get_shader_info(binary: &[u32]) -> Result<(DescBinds, Inputs, Option<PushCons
 
                 let Some(location) = reflection
                     .find_deco(DecoKind::Location, var.id)
-                    .map(|deco| deco.args.first().cloned())
-                    .flatten()
+                    .and_then(|deco| deco.args.first().cloned())
                 else {
                     continue;
                 };
