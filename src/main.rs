@@ -17,6 +17,8 @@ mod skybox;
 mod light;
 mod text;
 mod camera;
+mod frame;
+mod pass;
 
 use ash::vk;
 use anyhow::Result;

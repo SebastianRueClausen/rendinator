@@ -3,6 +3,7 @@ use ash::vk;
 
 use std::mem;
 
+use crate::frame::{PerFrame, FrameIndex};
 use crate::command::*;
 use crate::core::*;
 use crate::resource::*;
@@ -61,7 +62,9 @@ impl TextPass {
             size: atlas.image().base_image_data().len() as vk::DeviceSize,
         })?;
 
-        atlas_staging.get_mapped()?.fill(atlas.image().base_image_data());
+        atlas_staging
+            .get_mapped()?
+            .fill(atlas.image().base_image_data());
 
         let extent = vk::Extent3D {
             width: atlas.image().width,

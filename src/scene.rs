@@ -5,6 +5,7 @@ use std::mem;
 use std::array;
 
 use crate::light::{self, PointLight, DirLight, Lights};
+use crate::frame::{FrameIndex, PerFrame};
 use crate::core::*;
 use crate::resource::*;
 use crate::command::*;

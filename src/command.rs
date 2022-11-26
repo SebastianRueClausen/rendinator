@@ -40,7 +40,14 @@ impl CommandBuffer {
             device.handle.allocate_command_buffers(&info)?
         };
 
-        Ok(Self { handle: *handles.first().unwrap(), queue, device, bound_resources })
+        let handle = handles[0];
+
+        Ok(Self {
+            handle,
+            bound_resources,
+            queue,
+            device,
+        })
     }
 
     pub fn reset(&self) -> Result<()> {

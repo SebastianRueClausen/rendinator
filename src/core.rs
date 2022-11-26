@@ -8,6 +8,7 @@ use std::cell::{RefCell, Cell};
 use std::str::FromStr;
 use std::rc::Rc;
 
+use crate::frame::{FrameIndex, PerFrame, FRAMES_IN_FLIGHT};
 use crate::resource::*;
 use crate::command::*;
 

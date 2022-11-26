@@ -3,6 +3,7 @@ use anyhow::Result;
 
 use std::mem;
 
+use crate::frame::{FrameIndex, PerFrame};
 use crate::scene::*;
 use crate::camera::*;
 use crate::resource::*;

@@ -1,18 +1,20 @@
 use anyhow::Result;
-use smallvec::{smallvec, SmallVec};
 use ash::vk;
+use ash::vk::Handle;
+use smallvec::{smallvec, SmallVec};
 
-use std::{array, ops, slice, mem, fmt};
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::rc::Rc;
-use std::cell::{UnsafeCell, Cell};
-use std::ptr::NonNull;
 use std::hash::{Hash, Hasher};
+use std::ptr::NonNull;
+use std::rc::Rc;
+use std::{fmt, mem, ops, slice};
 
 use crate::core::*;
-use rendi_shader::{DescKind, ComputeReflection, RasterReflection};
-use rendi_res::{DummyRes, Res, Slabs, Bump};
+use rendi_data_structs::SortedMap;
+use rendi_res::{Bump, DummyRes, Res, Slabs};
+use rendi_shader::{ComputeReflection, DescKind, RasterReflection};
 
 type MemoryRange = ops::Range<vk::DeviceSize>;
 
@@ -48,14 +50,12 @@ pub struct MappedMemory {
 impl MappedMemory {
     pub fn new(block: Rc<MemoryBlock>, range: MemoryRange) -> Result<Self> {
         let ptr = unsafe {
-            NonNull::new_unchecked(
-                block.get_mapped()?.as_ptr().offset(range.start as isize)
-            )
+            NonNull::new_unchecked(block.get_mapped()?.as_ptr().offset(range.start as isize))
         };
 
         let size = range_length(&range);
 
-        Ok(MappedMemory { size, block, ptr, })
+        Ok(MappedMemory { size, block, ptr })
     }
 
     unsafe fn as_slice_range_unchecked(&self, range: MemoryRange) -> &mut [u8] {
@@ -70,9 +70,7 @@ impl MappedMemory {
     }
 
     pub fn as_slice(&self) -> &[u8] {
-        unsafe {
-            slice::from_raw_parts(self.ptr.as_ptr(), self.size as usize)
-        }
+        unsafe { slice::from_raw_parts(self.ptr.as_ptr(), self.size as usize) }
     }
 
     /// Fill memory with the memory of `bytes`.
@@ -85,7 +83,7 @@ impl MappedMemory {
         if self.size != bytes.len() as vk::DeviceSize {
             panic!("bytes is not the same size as the mapped memory range");
         }
-    
+
         unsafe { self.as_slice_mut().copy_from_slice(bytes) };
     }
 
@@ -100,7 +98,7 @@ impl MappedMemory {
         if range_length(&range) != bytes.len() as vk::DeviceSize {
             panic!("bytes is not the same size as the range");
         }
-       
+
         // The end should always be greater than start, but just to be sure.
         if range.start.max(range.end) > self.block.size() {
             panic!("range goes past the end of the mapped memory");
@@ -127,14 +125,17 @@ pub struct MemoryBlock {
 
 impl MemoryBlock {
     fn new(device: Rc<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
-        let handle = unsafe {
-            device.handle.allocate_memory(info, None)?
-        };
+        let handle = unsafe { device.handle.allocate_memory(info, None)? };
 
         let size = info.allocation_size;
         let mapped = Cell::new(None);
 
-        Ok(Self { device, mapped, handle, size })
+        Ok(Self {
+            device,
+            mapped,
+            handle,
+            size,
+        })
     }
 
     fn get_mapped(&self) -> Result<NonNull<u8>> {
@@ -142,7 +143,8 @@ impl MemoryBlock {
             mapped
         } else {
             unsafe {
-                self.device.handle
+                self.device
+                    .handle
                     .map_memory(self.handle, 0, self.size, vk::MemoryMapFlags::empty())
                     .map(|ptr| NonNull::new_unchecked(ptr as *mut u8))?
             }
@@ -189,8 +191,8 @@ pub enum BufferKind {
     Uniform,
 }
 
-impl BufferKind {
-    pub fn desc_kind(self) -> DescKind {
+impl Into<DescKind> for BufferKind {
+    fn into(self) -> DescKind {
         match self {
             BufferKind::Storage => DescKind::StorageBuffer,
             BufferKind::Uniform => DescKind::UniformBuffer,
@@ -223,14 +225,18 @@ impl ResourcePool {
 
             let memory_flags: vk::MemoryPropertyFlags = loc.into();
 
-            let memory_type = self.device.physical
+            let memory_type = self
+                .device
+                .physical
                 .get_memory_type_index(req.memory_type_bits, memory_flags)
                 .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
             let (block, range) = self.gpu_alloc(memory_type, req.size, req.alignment)?;
             let range = range.start..range.start + info.size;
 
-            self.device.handle.bind_buffer_memory(handle, block.handle, range.start)?;
+            self.device
+                .handle
+                .bind_buffer_memory(handle, block.handle, range.start)?;
 
             let kind = if info.usage.contains(vk::BufferUsageFlags::UNIFORM_BUFFER) {
                 BufferKind::Uniform
@@ -267,7 +273,23 @@ impl Buffer {
 
 impl Drop for Buffer {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_buffer(self.handle, None); }
+        unsafe {
+            self.device.handle.destroy_buffer(self.handle, None);
+        }
+    }
+}
+
+impl PartialEq for Buffer {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+impl Eq for Buffer {}
+
+impl Hash for Buffer {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.handle.as_raw().hash(state);
     }
 }
 
@@ -286,7 +308,9 @@ pub enum ImageKind {
         queue: Res<Queue>,
     },
 
-    Swapchain { handle: vk::Image },
+    Swapchain {
+        handle: vk::Image,
+    },
 }
 
 pub struct ImageInfo {
@@ -298,7 +322,6 @@ pub struct ImageInfo {
     pub mip_levels: u32,
 }
 
-/// Enum of different image owners.
 enum ImageStorage {
     /// Images created from the swapchain is owned by the swapchain.
     ///
@@ -317,22 +340,38 @@ enum ImageStorage {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ImageLayout {
-    ShaderRead = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL.as_raw() as isize,
-    General = vk::ImageLayout::GENERAL.as_raw() as isize,
-    Attachment = vk::ImageLayout::ATTACHMENT_OPTIMAL.as_raw() as isize,
-    TransferSrc = vk::ImageLayout::TRANSFER_SRC_OPTIMAL.as_raw() as isize,
-    TransferDst = vk::ImageLayout::TRANSFER_DST_OPTIMAL.as_raw() as isize,
+    ShaderRead,
+    General,
+    Attachment,
+    TransferSrc,
+    TransferDst,
+}
+
+impl Into<vk::ImageLayout> for ImageLayout {
+    fn into(self) -> vk::ImageLayout {
+        match self {
+            ImageLayout::ShaderRead => vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+            ImageLayout::General => vk::ImageLayout::GENERAL,
+            ImageLayout::Attachment => vk::ImageLayout::ATTACHMENT_OPTIMAL,
+            ImageLayout::TransferSrc => vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+            ImageLayout::TransferDst => vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+        }
+    }
 }
 
 impl fmt::Display for ImageLayout {
     fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        write!(fmt, "{}", match self {
-            ImageLayout::ShaderRead => "shader read",  
-            ImageLayout::General => "general",  
-            ImageLayout::Attachment => "attachment",  
-            ImageLayout::TransferSrc => "transfer source",
-            ImageLayout::TransferDst => "transfer destination",
-        })
+        write!(
+            fmt,
+            "{}",
+            match self {
+                ImageLayout::ShaderRead => "shader read",
+                ImageLayout::General => "general",
+                ImageLayout::Attachment => "attachment",
+                ImageLayout::TransferSrc => "transfer source",
+                ImageLayout::TransferDst => "transfer destination",
+            }
+        )
     }
 }
 
@@ -397,36 +436,37 @@ impl ResourcePool {
                         .queue_family_indices(&queue_families)
                         .samples(*samples)
                         .clone();
-                   
-                    unsafe {
-                        self.device.handle.create_image(&create_info, None)?
-                    }
+
+                    unsafe { self.device.handle.create_image(&create_info, None)? }
                 }
-                _ => unsafe {
-                    self.device.handle.create_image(&create_info, None)?
-                }
+                _ => unsafe { self.device.handle.create_image(&create_info, None)? },
             }
         };
 
-        let memory_req = unsafe {
-            self.device.handle.get_image_memory_requirements(handle)
-        };
+        let memory_req = unsafe { self.device.handle.get_image_memory_requirements(handle) };
 
         let memory_flags: vk::MemoryPropertyFlags = loc.into();
-         
-        let memory_type = self.device.physical
+
+        let memory_type = self
+            .device
+            .physical
             .get_memory_type_index(memory_req.memory_type_bits, memory_flags)
             .ok_or_else(|| anyhow!("no compatible memory type"))?;
 
         let (block, range) = self.gpu_alloc(memory_type, memory_req.size, memory_req.alignment)?;
 
         unsafe {
-            self.device.handle.bind_image_memory(handle, block.handle, range.start)?;
+            self.device
+                .handle
+                .bind_image_memory(handle, block.handle, range.start)?;
         }
 
         let kind = info.kind.clone();
 
-        let storage = ImageStorage::Block { range: 0..memory_req.size, block };
+        let storage = ImageStorage::Block {
+            range: 0..memory_req.size,
+            block,
+        };
 
         Ok(self.alloc_image(Image {
             mip_levels: info.mip_levels,
@@ -470,7 +510,7 @@ impl Image {
             1
         }
     }
-    
+
     pub fn aspect_flags(&self) -> vk::ImageAspectFlags {
         self.aspect_flags
     }
@@ -507,6 +547,20 @@ impl Drop for Image {
     }
 }
 
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+impl Eq for Image {}
+
+impl Hash for Image {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.handle.as_raw().hash(state);
+    }
+}
+
 pub struct ImageViewInfo {
     pub image: Res<Image>,
     pub view_type: vk::ImageViewType,
@@ -526,7 +580,7 @@ impl ResourcePool {
             "mip levels outside range of image mips, is {} max is {}",
             info.mips.end,
             info.image.mip_level_count(),
-        ); 
+        );
 
         let mip_count = info.mips.end - info.mips.start;
 
@@ -544,10 +598,8 @@ impl ResourcePool {
             .image(info.image.handle)
             .build();
 
-        let handle = unsafe {
-            self.device.handle.create_image_view(&view_info, None)?
-        };
-    
+        let handle = unsafe { self.device.handle.create_image_view(&view_info, None)? };
+
         Ok(self.alloc_image_view(ImageView {
             image: info.image.clone(),
             mips: info.mips.clone(),
@@ -579,7 +631,10 @@ impl ImageView {
 impl Drop for ImageView {
     fn drop(&mut self) {
         unsafe {
-            self.image.device.handle.destroy_image_view(self.handle, None)
+            self.image
+                .device
+                .handle
+                .destroy_image_view(self.handle, None)
         }
     }
 }
@@ -591,7 +646,7 @@ pub struct Sampler {
 
 impl ResourcePool {
     pub fn create_sampler(&self) -> Result<Res<Sampler>> {
-        let device = self.device.clone(); 
+        let device = self.device.clone();
 
         let create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(vk::Filter::LINEAR)
@@ -610,9 +665,7 @@ impl ResourcePool {
             .min_lod(0.0)
             .max_lod(vk::LOD_CLAMP_NONE);
 
-        let handle = unsafe {
-            device.handle.create_sampler(&create_info, None)?
-        };
+        let handle = unsafe { device.handle.create_sampler(&create_info, None)? };
 
         Ok(self.alloc(Sampler { handle, device }))
     }
@@ -635,10 +688,7 @@ impl ResourcePool {
     pub fn create_compute_prog(&self, module: Res<ShaderModule>) -> Result<Res<ComputeProg>> {
         let reflection = ComputeReflection::new(module.source())?;
 
-        Ok(self.alloc(ComputeProg {
-            reflection,
-            module,
-        }))
+        Ok(self.alloc(ComputeProg { reflection, module }))
     }
 }
 
@@ -655,7 +705,7 @@ impl ComputeProg {
 pub struct RasterProg {
     pub vert_module: Res<ShaderModule>,
     pub frag_module: Res<ShaderModule>,
-    
+
     pub reflection: RasterReflection,
 }
 
@@ -712,9 +762,7 @@ impl ResourcePool {
         let source = Vec::from(bytemuck::cast_slice(code));
         let info = vk::ShaderModuleCreateInfo::builder().code(&source);
 
-        let handle = unsafe {
-            device.handle.create_shader_module(&info, None)?
-        };
+        let handle = unsafe { device.handle.create_shader_module(&info, None)? };
 
         let Ok(entry) = CString::new(entry) else {
             return Err(anyhow!("invalid entry name `entry`"));
@@ -733,7 +781,7 @@ impl ShaderModule {
     pub fn source(&self) -> &[u32] {
         &self.source
     }
-    
+
     fn stage_create_info(
         &self,
         stage: vk::ShaderStageFlags,
@@ -753,7 +801,6 @@ impl Drop for ShaderModule {
     }
 }
 
-#[derive(Clone)]
 pub struct PipelineLayout {
     pub handle: vk::PipelineLayout,
 
@@ -761,9 +808,15 @@ pub struct PipelineLayout {
     pub push_const_ranges: SmallVec<[PushConstRange; 4]>,
 
     #[allow(unused)]
-    desc_layouts: SmallVec<[Res<DescLayout>; 4]>,
+    desc_layouts: SortedMap<u32, Res<DescLayout>>,
 
     device: Rc<Device>,
+}
+
+impl PipelineLayout {
+    pub fn get_desc_layout(&self, set: u32) -> Option<&Res<DescLayout>> {
+        self.desc_layouts.get(&set)
+    }
 }
 
 impl ResourcePool {
@@ -786,14 +839,15 @@ impl ResourcePool {
                 .expect("failed to create empty descriptor layout");
 
             let layouts: SmallVec<[_; 12]> = (0..set_count)
-                .map(|target| layouts
-                    .iter()
-                    .find(|(set, _)| *set == target)
-                    .map(|(_, layout)| layout.handle)
-                    .unwrap_or(empty_desc_layout.handle)
-                )
+                .map(|target| {
+                    layouts
+                        .iter()
+                        .find(|(set, _)| *set == target)
+                        .map(|(_, layout)| layout.handle)
+                        .unwrap_or(empty_desc_layout.handle)
+                })
                 .collect();
-            
+
             let mut offset = 0;
             let consts: SmallVec<[_; 6]> = consts
                 .iter()
@@ -817,19 +871,9 @@ impl ResourcePool {
             device.handle.create_pipeline_layout(&info, None)?
         };
 
-        let desc_layouts = layouts
-            .iter()
-            .map(|(_, layout)| layout.clone())
-            .collect();
-
-        let push_const_ranges = consts
-            .iter()
-            .cloned()
-            .collect();
-
         Ok(self.alloc(PipelineLayout {
-            push_const_ranges,
-            desc_layouts,
+            push_const_ranges: consts.iter().cloned().collect(),
+            desc_layouts: layouts.iter().cloned().collect(),
             handle,
             device,
         }))
@@ -839,48 +883,43 @@ impl ResourcePool {
 impl Drop for PipelineLayout {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle.destroy_pipeline_layout(self.handle, None);
+            self.device
+                .handle
+                .destroy_pipeline_layout(self.handle, None);
         }
     }
 }
 
 fn pipeline_layout_from_desc_binds(
     pool: &ResourcePool,
-    binds: &rendi_shader::DescBinds,
-push_const_ranges: &[PushConstRange],
+    binds: &rendi_shader::Descs,
+    push_const_ranges: &[PushConstRange],
 ) -> Result<Res<PipelineLayout>> {
     let mut desc_layout_slots: Vec<(u32, Vec<DescLayoutSlot>)> = Vec::new();
 
-    for (slot, binding) in binds {
+    for (slot, binding) in binds.binds() {
         let get_layout_slot = || {
             let ty = match binding.kind() {
-                rendi_shader::DescKind::UniformBuffer => {
-                    vk::DescriptorType::UNIFORM_BUFFER
-                }
-                rendi_shader::DescKind::StorageBuffer => {
-                    vk::DescriptorType::STORAGE_BUFFER
-                }
-                rendi_shader::DescKind::SampledImage => {
-                    vk::DescriptorType::COMBINED_IMAGE_SAMPLER
-                }
-                rendi_shader::DescKind::StorageImage => {
-                    vk::DescriptorType::STORAGE_IMAGE
-                }
+                DescKind::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
+                DescKind::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
+                DescKind::SampledImage => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+                DescKind::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
             };
 
             DescLayoutSlot {
-                binding: slot.binding(), 
+                binding: slot.binding(),
                 count: binding.count(),
                 ty,
             }
         };
 
-        match desc_layout_slots.iter_mut().find(|(set, _)| *set == slot.set()) {
+        match desc_layout_slots
+            .iter_mut()
+            .find(|(set, _)| *set == slot.set())
+        {
             Some((_, layout)) => layout.push(get_layout_slot()),
             None => {
-                desc_layout_slots.push(
-                    (slot.set(), vec![get_layout_slot()])
-                );
+                desc_layout_slots.push((slot.set(), vec![get_layout_slot()]));
             }
         }
     }
@@ -918,7 +957,7 @@ impl ResourcePool {
         let module = prog.module();
         let stage = module.stage_create_info(vk::ShaderStageFlags::COMPUTE);
 
-        let binds = prog.reflection().desc_binds();
+        let binds = prog.reflection().descs();
         let layout = pipeline_layout_from_desc_binds(self, binds, push_const_ranges)?;
 
         let create_infos = [vk::ComputePipelineCreateInfo::builder()
@@ -927,7 +966,8 @@ impl ResourcePool {
             .build()];
 
         let handle = unsafe {
-            device.handle
+            device
+                .handle
                 .create_compute_pipelines(vk::PipelineCache::null(), &create_infos, None)
                 .map_err(|(_, err)| err)?
                 .first()
@@ -948,7 +988,7 @@ impl ComputePipeline {
     pub fn layout(&self) -> Res<PipelineLayout> {
         self.layout.clone()
     }
-    
+
     pub fn prog(&self) -> Res<ComputeProg> {
         self.prog.clone()
     }
@@ -999,21 +1039,24 @@ impl ResourcePool {
     pub fn create_raster_pipeline(&self, info: RasterPipelineInfo) -> Result<Res<RasterPipeline>> {
         let device = self.device.clone();
 
-        let binds = info.prog.reflection().desc_binds();
+        let binds = info.prog.reflection().descs();
         let layout = pipeline_layout_from_desc_binds(self, binds, info.push_consts)?;
 
-        let vert_stage = *info.prog
+        let vert_stage = *info
+            .prog
             .vert_module()
             .stage_create_info(vk::ShaderStageFlags::VERTEX);
 
-        let frag_stage = *info.prog
+        let frag_stage = *info
+            .prog
             .frag_module()
             .stage_create_info(vk::ShaderStageFlags::FRAGMENT);
 
         let shader_stages = [vert_stage, frag_stage];
 
         let mut offset = 0;
-        let vert_attribs: SmallVec<[_; 8]> = info.vertex_attributes
+        let vert_attribs: SmallVec<[_; 8]> = info
+            .vertex_attributes
             .iter()
             .enumerate()
             .map(|(i, attrib)| {
@@ -1074,18 +1117,17 @@ impl ResourcePool {
             )
             .build()];
 
-        let color_blend_info = vk::PipelineColorBlendStateCreateInfo::builder()
-            .attachments(&color_blend_attachments);
+        let color_blend_info =
+            vk::PipelineColorBlendStateCreateInfo::builder().attachments(&color_blend_attachments);
 
-        let dynamic_states = [
-            vk::DynamicState::VIEWPORT,
-            vk::DynamicState::SCISSOR,
-        ];
+        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
 
         let dynamic_state =
             vk::PipelineDynamicStateCreateInfo::builder().dynamic_states(&dynamic_states);
 
-        let color_formats: SmallVec<[_; 1]> = info.render_target_info.color_format
+        let color_formats: SmallVec<[_; 1]> = info
+            .render_target_info
+            .color_format
             .map(|format| smallvec![format])
             .unwrap_or_default();
 
@@ -1107,15 +1149,14 @@ impl ResourcePool {
             .push_next(&mut rendering_info);
 
         let handle = unsafe {
-            *device.handle
+            *device
+                .handle
                 .create_graphics_pipelines(
                     vk::PipelineCache::null(),
                     &[pipeline_info.build()],
                     None,
                 )
-                .map_err(|(_, error)| {
-                    anyhow!("failed to create pipeline: {error}")
-                })?
+                .map_err(|(_, error)| anyhow!("failed to create pipeline: {error}"))?
                 .first()
                 .unwrap()
         };
@@ -1144,7 +1185,7 @@ impl Drop for RasterPipeline {
 
 #[derive(Clone, Copy)]
 pub struct PushConstRange {
-    pub stage: vk::ShaderStageFlags, 
+    pub stage: vk::ShaderStageFlags,
     pub size: vk::DeviceSize,
 }
 
@@ -1156,7 +1197,7 @@ pub struct VertexAttribute {
     pub size: vk::DeviceSize,
 }
 
-struct DescPool {
+pub(crate) struct DescPool {
     pub handle: vk::DescriptorPool,
     device: Rc<Device>,
 }
@@ -1167,9 +1208,7 @@ impl DescPool {
             .pool_sizes(&sizes)
             .max_sets(max_sets);
 
-        let handle = unsafe {
-            device.handle.create_descriptor_pool(&info, None)?
-        };
+        let handle = unsafe { device.handle.create_descriptor_pool(&info, None)? };
 
         Ok(Self { handle, device })
     }
@@ -1178,7 +1217,9 @@ impl DescPool {
 impl Drop for DescPool {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle.destroy_descriptor_pool(self.handle, None);
+            self.device
+                .handle
+                .destroy_descriptor_pool(self.handle, None);
         }
     }
 }
@@ -1196,11 +1237,11 @@ struct DescLayoutSlots {
 }
 
 impl DescLayoutSlots {
-    fn new(bindings: &[DescLayoutSlot]) -> Self  {
+    fn new(bindings: &[DescLayoutSlot]) -> Self {
         let flags = bindings
             .iter()
             .map(|binding| {
-                let mut flags = vk::DescriptorBindingFlags::empty(); 
+                let mut flags = vk::DescriptorBindingFlags::empty();
 
                 if binding.count == rendi_shader::DescCount::Unbound {
                     flags |= vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
@@ -1239,7 +1280,7 @@ impl DescLayoutSlots {
 pub struct DescLayout {
     pub handle: vk::DescriptorSetLayout,
     slots: DescLayoutSlots,
-    device: Rc<Device>, 
+    device: Rc<Device>,
 }
 
 impl DescLayout {
@@ -1256,30 +1297,28 @@ impl DescLayout {
             .build();
 
         let handle = unsafe {
-            device.handle.create_descriptor_set_layout(&layout_info, None)?
+            device
+                .handle
+                .create_descriptor_set_layout(&layout_info, None)?
         };
 
         Ok(Self {
             handle,
             slots,
             device,
-        }) 
+        })
     }
 }
 
 impl ResourcePool {
     pub fn create_desc_layout(&self, slots: &[DescLayoutSlot]) -> Result<Res<DescLayout>> {
-        let shared = unsafe {
-            self.get_shared()
-        };
+        let shared = unsafe { self.get_shared() };
 
         if let Some(layout) = shared.desc_layouts.get(slots) {
             return Ok(layout);
         }
 
-        let layout = self.alloc(
-            DescLayout::new(self.device.clone(), slots)?
-        );
+        let layout = self.alloc(DescLayout::new(self.device.clone(), slots)?);
 
         shared.desc_layouts.insert(slots, layout.clone());
 
@@ -1290,7 +1329,9 @@ impl ResourcePool {
 impl Drop for DescLayout {
     fn drop(&mut self) {
         unsafe {
-            self.device.handle.destroy_descriptor_set_layout(self.handle, None);
+            self.device
+                .handle
+                .destroy_descriptor_set_layout(self.handle, None);
         }
     }
 }
@@ -1313,18 +1354,18 @@ pub struct DescSet {
 }
 
 impl ResourcePool {
-    pub fn create_desc_set(&self, layout: Res<DescLayout>, bindings: &[DescBinding]) -> Result<Res<DescSet>> {
+    pub fn create_desc_set(
+        &self,
+        layout: Res<DescLayout>,
+        bindings: &[DescBinding],
+    ) -> Result<Res<DescSet>> {
         let device = self.device.clone();
 
-        let variable_set_count = bindings
-            .last()
-            .map(|binding| match binding {
-                DescBinding::ImageArray(_, _, views) => views.len() as u32,
-                DescBinding::Buffer(_) => 0, 
-                DescBinding::Image(_, _, _) => 0, 
-            })
-            .unwrap_or(0);
-        
+        let variable_set_count = bindings.last().map_or(0, |binding| match binding {
+            DescBinding::ImageArray(_, _, views) => views.len() as u32,
+            DescBinding::Buffer(..) | DescBinding::Image(..) => 0,
+        });
+
         let (handle, pool) = self.desc_alloc(variable_set_count, &layout)?;
 
         struct Info {
@@ -1333,7 +1374,8 @@ impl ResourcePool {
             images: SmallVec<[vk::DescriptorImageInfo; 1]>,
         }
 
-        let infos: SmallVec<[Info; 12]> = bindings.iter()
+        let infos: SmallVec<[Info; 12]> = bindings
+            .iter()
             .zip(layout.slots.iter())
             .map(|(binding, layout_binding)| match &binding {
                 DescBinding::Buffer(buffer) => Info {
@@ -1365,7 +1407,7 @@ impl ResourcePool {
                             sampler: sampler.handle,
                         })
                         .collect(),
-                }
+                },
             })
             .collect();
 
@@ -1383,9 +1425,7 @@ impl ResourcePool {
             })
             .collect();
 
-        unsafe {
-            device.handle.update_descriptor_sets(&writes, &[])
-        }
+        unsafe { device.handle.update_descriptor_sets(&writes, &[]) }
 
         let mut resources: SmallVec<[_; 32]> = SmallVec::default();
         for binding in bindings {
@@ -1401,7 +1441,7 @@ impl ResourcePool {
                     resources.push(DummyRes::new(sampler.clone()));
 
                     for image in *array {
-                        resources.push(DummyRes::new(image.clone())); 
+                        resources.push(DummyRes::new(image.clone()));
                     }
                 }
             }
@@ -1431,7 +1471,10 @@ impl GpuBlock {
     const DEFAULT_BLOCK_SIZE: vk::DeviceSize = 6 * 1024 * 1024;
 
     fn new(block: MemoryBlock) -> Self {
-        Self { block: Rc::new(block), offset: 0 }
+        Self {
+            block: Rc::new(block),
+            offset: 0,
+        }
     }
 
     fn alloc(&mut self, size: vk::DeviceSize, alignment: vk::DeviceSize) -> Option<MemoryRange> {
@@ -1439,7 +1482,7 @@ impl GpuBlock {
         let end = start + size;
 
         if end > self.block.size() {
-            return None; 
+            return None;
         }
 
         self.offset = end;
@@ -1450,12 +1493,15 @@ impl GpuBlock {
 
 struct GpuBlocks {
     block_size: vk::DeviceSize,
-    blocks: Vec<(u32, GpuBlock)>, 
+    blocks: Vec<(u32, GpuBlock)>,
 }
 
 impl GpuBlocks {
     fn new(block_size: vk::DeviceSize) -> Self {
-        Self { block_size, blocks: Vec::new() }
+        Self {
+            block_size,
+            blocks: Vec::new(),
+        }
     }
 
     fn alloc(
@@ -1465,13 +1511,16 @@ impl GpuBlocks {
         size: vk::DeviceSize,
         aligment: vk::DeviceSize,
     ) -> Result<(Rc<MemoryBlock>, MemoryRange)> {
-        let index = self.blocks.iter().position(|(type_index, _)| *type_index == memory_type);
+        let index = self
+            .blocks
+            .iter()
+            .position(|(type_index, _)| *type_index == memory_type);
 
         let create_new_block = || -> Result<GpuBlock> {
             let mut block_size = self.block_size;
 
             while block_size < size {
-                block_size += GpuBlock::DEFAULT_BLOCK_SIZE; 
+                block_size += GpuBlock::DEFAULT_BLOCK_SIZE;
             }
 
             trace!("allocating a new {block_size} byte GPU block");
@@ -1480,9 +1529,12 @@ impl GpuBlocks {
                 .allocation_size(block_size)
                 .memory_type_index(memory_type);
 
-            Ok(GpuBlock::new(MemoryBlock::new(device.clone(), &alloc_info)?))
+            Ok(GpuBlock::new(MemoryBlock::new(
+                device.clone(),
+                &alloc_info,
+            )?))
         };
-       
+
         let (_, block) = if let Some(index) = index {
             &mut self.blocks[index]
         } else {
@@ -1500,12 +1552,11 @@ impl GpuBlocks {
 
         Ok((block.block.clone(), range))
     }
-
 }
 
 #[derive(Default)]
 struct DescPools {
-    current_pool: Option<Rc<DescPool>>, 
+    current_pool: Option<Rc<DescPool>>,
 }
 
 impl DescPools {
@@ -1566,9 +1617,7 @@ impl DescPools {
             };
 
             match handles {
-                Ok(handles) => {
-                    break (handles, current_pool.clone())
-                }
+                Ok(handles) => break (handles, current_pool.clone()),
 
                 Err(vk::Result::ERROR_FRAGMENTED_POOL | vk::Result::ERROR_OUT_OF_POOL_MEMORY) => {
                     self.current_pool = None;
@@ -1592,7 +1641,7 @@ struct DescLayoutKey {
 
 #[derive(Default)]
 struct DescLayouts {
-    layouts: HashMap<DescLayoutKey, Res<DescLayout>>, 
+    layouts: HashMap<DescLayoutKey, Res<DescLayout>>,
 }
 
 impl DescLayouts {
@@ -1608,7 +1657,7 @@ impl DescLayouts {
         let key = DescLayoutKey {
             slots: SmallVec::from_slice(bindings),
         };
-      
+
         self.layouts.get(&key).cloned()
     }
 }
@@ -1643,19 +1692,10 @@ impl SharedResources {
 }
 
 /// A pool of resources.
-///
-/// When allocating an item of type `T` via `alloc`, you receivce an reference object of type
-/// `Res<T>`. This is guarenteed to be valid for it's whole lifetime.
-///
-/// This should be kept in mind when used. A single [`Res`] may keep the whole pool alive longer
-/// than expected, which could be a waste of memory.
-///
-/// If `T` implements `Drop`, then drop will be called for each [`Res`] once the last copy goes out
-/// of scope.
 #[derive(Clone)]
 pub struct ResourcePool {
     shared: Rc<UnsafeCell<SharedResources>>,
-    device: Rc<Device>,
+    pub(crate) device: Rc<Device>,
 }
 
 impl PartialEq for ResourcePool {
@@ -1688,9 +1728,10 @@ impl ResourcePool {
         cpu_block_size: usize,
         gpu_block_size: vk::DeviceSize,
     ) -> Self {
-        let shared = Rc::new(
-            UnsafeCell::new(SharedResources::new(cpu_block_size, gpu_block_size))
-        );
+        let shared = Rc::new(UnsafeCell::new(SharedResources::new(
+            cpu_block_size,
+            gpu_block_size,
+        )));
 
         Self { device, shared }
     }
@@ -1711,20 +1752,24 @@ impl ResourcePool {
         trace!("allocating {size} bytes on the GPU");
 
         unsafe {
-            self.get_shared().gpu_blocks.alloc(self.device.clone(), memory_type, size, alignment)
+            self.get_shared()
+                .gpu_blocks
+                .alloc(self.device.clone(), memory_type, size, alignment)
         }
     }
 
     /// Allocate descriptor set.
     #[inline]
     #[must_use]
-    fn desc_alloc(
+    pub(crate) fn desc_alloc(
         &self,
         variable_set_count: u32,
         layout: &DescLayout,
     ) -> Result<(vk::DescriptorSet, Rc<DescPool>)> {
         unsafe {
-            self.get_shared().desc_pools.alloc(self.device.clone(), variable_set_count, layout)
+            self.get_shared()
+                .desc_pools
+                .alloc(self.device.clone(), variable_set_count, layout)
         }
     }
 
@@ -1736,116 +1781,15 @@ impl ResourcePool {
     }
 
     pub fn alloc_image_view(&self, view: ImageView) -> Res<ImageView> {
-        unsafe {
-            self.get_shared().image_views.alloc(view)
-        }
+        unsafe { self.get_shared().image_views.alloc(view) }
     }
 
     pub fn alloc_image(&self, image: Image) -> Res<Image> {
-        unsafe {
-            self.get_shared().images.alloc(image)
-        }
+        unsafe { self.get_shared().images.alloc(image) }
     }
 
     pub fn alloc_buffer(&self, buffer: Buffer) -> Res<Buffer> {
-        unsafe {
-            self.get_shared().buffers.alloc(buffer)
-        }
-    }
-}
-
-pub const FRAMES_IN_FLIGHT: usize = 2;
-
-#[derive(Default, Clone, Copy)]
-pub struct FrameIndex {
-    index: u8,
-}
-
-impl FrameIndex {
-    pub fn enumerate() -> impl Iterator<Item = Self> {
-        (0..FRAMES_IN_FLIGHT as u8).map(|index| Self { index })
-    }
-
-    pub fn last(self) -> Self {
-        Self {
-            index: self.index.wrapping_sub(1) % FRAMES_IN_FLIGHT as u8
-        }
-    }
-
-    pub fn next(self) -> Self {
-        Self {
-            index: self.index.wrapping_add(1) % FRAMES_IN_FLIGHT as u8
-        }
-    }
-}
-pub struct PerFrame<T> {
-    items: [T; FRAMES_IN_FLIGHT],
-}
-
-impl<T> PerFrame<T> {
-    pub fn from_fn<F>(func: F) -> Self
-    where F: Fn(FrameIndex) -> T
-    {
-        let items = array::from_fn(|index| {
-            let frame_index = FrameIndex { index: index as u8 };
-            func(frame_index)
-        });
-
-        Self { items }
-    }
-
-    pub fn try_from_fn<F>(func: F) -> Result<Self>
-    where F: Fn(FrameIndex) -> Result<T>
-    {
-        let items = array::try_from_fn(|index| {
-            let frame_index = FrameIndex { index: index as u8 };
-            func(frame_index)
-        })?;
-
-        Ok(Self { items })
-    }
-
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.items.iter()
-    }
-
-    pub fn any(&self) -> &T {
-        &self[FrameIndex { index: 0 }]
-    }
-}
-
-impl<T> ops::Index<FrameIndex> for PerFrame<T> {
-    type Output = T;
-
-    fn index(&self, index: FrameIndex) -> &Self::Output {
-        &self.items[index.index as usize]
-    }
-}
-
-impl<T> ops::IndexMut<FrameIndex> for PerFrame<T> {
-    fn index_mut(&mut self, index: FrameIndex) -> &mut Self::Output {
-        &mut self.items[index.index as usize]
-    }
-}
-
-impl<T: Clone> Clone for PerFrame<T> {
-    fn clone(&self) -> Self {
-        Self { items: self.items.clone() }
-    }
-}
-
-impl<T> Into<[T; FRAMES_IN_FLIGHT]> for PerFrame<T> {
-    fn into(self) -> [T; FRAMES_IN_FLIGHT] {
-        self.items
-    }
-}
-
-impl<'a, T> IntoIterator for &'a PerFrame<T> {
-    type Item = &'a T;
-    type IntoIter = slice::Iter<'a, T>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        self.items.as_slice().iter()
+        unsafe { self.get_shared().buffers.alloc(buffer) }
     }
 }
 

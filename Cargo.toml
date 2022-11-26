@@ -23,6 +23,7 @@ rendi_asset = { path = "crates/rendi_asset/" }
 rendi_math = { path = "crates/rendi_math/" }
 rendi_sdf = { path = "crates/rendi_sdf/" }
 rendi_shader = { path = "crates/rendi_shader/" }
+rendi_data_structs = { path = "crates/rendi_data_structs/" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-metal = "0.2.0"
