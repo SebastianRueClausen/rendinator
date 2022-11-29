@@ -679,6 +679,10 @@ impl Drop for Sampler {
     }
 }
 
+pub trait Prog {
+    fn descs(&self) -> &rendi_shader::Descs;
+}
+
 pub struct ComputeProg {
     module: Res<ShaderModule>,
     reflection: ComputeReflection,
@@ -699,6 +703,12 @@ impl ComputeProg {
 
     pub fn reflection(&self) -> &ComputeReflection {
         &self.reflection
+    }
+}
+
+impl Prog for ComputeProg {
+    fn descs(&self) -> &rendi_shader::Descs {
+        self.reflection.descs()
     }
 }
 
@@ -736,6 +746,12 @@ impl RasterProg {
 
     pub fn reflection(&self) -> &RasterReflection {
         &self.reflection
+    }
+}
+
+impl Prog for RasterProg {
+    fn descs(&self) -> &rendi_shader::Descs {
+        self.reflection.descs()
     }
 }
 
@@ -1032,6 +1048,7 @@ pub struct RasterPipelineInfo<'a> {
 pub struct RasterPipeline {
     pub handle: vk::Pipeline,
     layout: Res<PipelineLayout>,
+    prog: Res<RasterProg>,
     device: Rc<Device>,
 }
 
@@ -1162,6 +1179,7 @@ impl ResourcePool {
         };
 
         Ok(self.alloc(RasterPipeline {
+            prog: info.prog,
             layout,
             device,
             handle,
@@ -1172,6 +1190,10 @@ impl ResourcePool {
 impl RasterPipeline {
     pub fn layout(&self) -> Res<PipelineLayout> {
         self.layout.clone()
+    }
+
+    pub fn prog(&self) -> Res<RasterProg> {
+        self.prog.clone()
     }
 }
 

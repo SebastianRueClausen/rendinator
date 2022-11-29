@@ -1,10 +1,11 @@
-use anyhow::{Result, anyhow};
+use anyhow::{anyhow, Result};
 use ash::vk;
 
 use std::cmp::Ordering;
 use std::fmt;
 
 use crate::RwFlags;
+use crate::ShaderStage;
 
 /// The slot where a [`DescBind`] is defined.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -55,22 +56,30 @@ impl fmt::Display for BindSlot {
 }
 
 bitflags::bitflags! {
-    pub struct AccessFlags: u8 {
+    pub struct DescAccess: u8 {
         const READ = 0b01;
         const WRITE = 0b10;
         const READ_WRITE = Self::READ.bits | Self::WRITE.bits;
     }
 }
 
-impl AccessFlags {
+impl DescAccess {
+    pub fn reads(self) -> bool {
+        self.contains(DescAccess::READ)
+    }
+
+    pub fn writes(self) -> bool {
+        self.contains(DescAccess::WRITE)
+    }
+}
+
+impl DescAccess {
     pub(crate) fn from_rw_flags(flags: RwFlags) -> Result<Self> {
         let access_flags = match (flags.non_readable, flags.non_writeable) {
-            (true, false) => AccessFlags::WRITE,
-            (false, true) => AccessFlags::READ,
-            (false, false) => AccessFlags::READ_WRITE,
-            (true, true) => return Err(anyhow!(
-                "descriptor both non-readable and non-writeable")
-            ),
+            (true, false) => DescAccess::WRITE,
+            (false, true) => DescAccess::READ,
+            (false, false) => DescAccess::READ_WRITE,
+            (true, true) => return Err(anyhow!("descriptor both non-readable and non-writeable")),
         };
 
         Ok(access_flags)
@@ -99,16 +108,20 @@ impl Into<vk::DescriptorType> for DescKind {
 
 impl fmt::Display for DescKind {
     fn fmt(&self, fmt: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(fmt, "{}", match self {
-            DescKind::UniformBuffer => "uniform buffer",
-            DescKind::StorageBuffer => "storage buffer",
-            DescKind::SampledImage => "sampled image",
-            DescKind::StorageImage => "storage image",
-        })
+        write!(
+            fmt,
+            "{}",
+            match self {
+                DescKind::UniformBuffer => "uniform buffer",
+                DescKind::StorageBuffer => "storage buffer",
+                DescKind::SampledImage => "sampled image",
+                DescKind::StorageImage => "storage image",
+            }
+        )
     }
 }
 
-/// This indicates the number of descriptor bound to a slot. 
+/// This indicates the number of descriptor bound to a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DescCount {
     /// A single descriptor.
@@ -131,11 +144,11 @@ impl fmt::Display for DescCount {
     }
 }
 
-
 /// A descriptor binding as defined in a shader.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DescBind {
-    pub(crate) access_flags: AccessFlags,
+    pub(crate) stage: ShaderStage,
+    pub(crate) access_flags: DescAccess,
     pub(crate) kind: DescKind,
     pub(crate) count: DescCount,
 }
@@ -152,8 +165,12 @@ impl DescBind {
     }
 
     /// Get the access flags of the binding.
-    pub fn access_flags(&self) -> AccessFlags {
+    pub fn access(&self) -> DescAccess {
         self.access_flags
+    }
+
+    pub fn stage(&self) -> ShaderStage {
+        self.stage
     }
 }
 
@@ -161,9 +178,10 @@ impl DescBind {
 impl Default for DescBind {
     fn default() -> Self {
         Self {
-            access_flags: AccessFlags::READ, 
+            access_flags: DescAccess::READ,
             count: DescCount::Single,
             kind: DescKind::UniformBuffer,
+            stage: ShaderStage::Compute,
         }
     }
 }

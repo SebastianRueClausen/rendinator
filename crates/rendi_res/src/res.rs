@@ -1,8 +1,10 @@
 use std::cell::Cell;
-use std::rc::Rc;
 use std::cmp::Ordering;
 use std::hash::{Hash, Hasher};
-use std::{alloc, borrow, ops, ptr, fmt};
+use std::marker::Unsize;
+use std::ops::CoerceUnsized;
+use std::rc::Rc;
+use std::{alloc, borrow, fmt, ops, ptr};
 
 /// Storage interface for the [`Res`] type.
 pub(crate) trait ResStorage {
@@ -276,6 +278,8 @@ impl<T: ?Sized> fmt::Pointer for Res<T> {
         fmt::Pointer::fmt(&(&**self as *const T), f)
     }
 }
+
+impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Res<U>> for Res<T> {}
 
 #[cfg(test)]
 mod test {

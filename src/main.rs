@@ -1,4 +1,4 @@
-#![feature(int_roundings, array_try_from_fn)]
+#![feature(int_roundings, array_try_from_fn, once_cell)]
 
 #[macro_use]
 extern crate log;
@@ -9,38 +9,38 @@ extern crate anyhow;
 #[macro_use]
 mod macros;
 
-mod resource;
+mod camera;
 mod command;
 mod core;
+mod frame;
+mod light;
+mod pass;
+mod resource;
 mod scene;
 mod skybox;
-mod light;
 mod text;
-mod camera;
-mod frame;
-mod pass;
 
-use ash::vk;
 use anyhow::Result;
+use ash::vk;
 use winit::event::VirtualKeyCode;
 
-use std::time::{Duration, Instant};
 use std::path::Path;
+use std::time::{Duration, Instant};
 
+use crate::camera::Camera;
 use crate::command::*;
 use crate::core::*;
-use crate::text::TextPass;
-use crate::scene::{ForwardPass, Scene};
 use crate::light::{DirLight, PointLight};
-use crate::camera::Camera;
+use crate::scene::{ForwardPass, Scene};
 use crate::skybox::Skybox;
+use crate::text::TextPass;
 
 use rendi_math::prelude::*;
 
 fn main() -> Result<()> {
     env_logger::init();
 
-    use winit::event::{Event, WindowEvent, ElementState};
+    use winit::event::{ElementState, Event, WindowEvent};
     use winit::event_loop::ControlFlow;
 
     let event_loop = winit::event_loop::EventLoop::new();
@@ -71,16 +71,21 @@ fn main() -> Result<()> {
 
     let skybox = Skybox::new(&renderer, render_target_info, &forward_pass.lights)?;
 
-    let font: rendi_sdf::Atlas =
-        rendi_asset::load(Path::new("assets/fonts/font.font"))?;
+    let font: rendi_sdf::Atlas = rendi_asset::load(Path::new("assets/fonts/font.font"))?;
 
     let mut text_pass = TextPass::new(&renderer, render_target_info, font)?;
 
     event_loop.run(move |event, _, controlflow| match event {
-        Event::WindowEvent { event: WindowEvent::CloseRequested, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CloseRequested,
+            ..
+        } => {
             *controlflow = ControlFlow::Exit;
         }
-        Event::WindowEvent { event: WindowEvent::KeyboardInput { input, .. }, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::KeyboardInput { input, .. },
+            ..
+        } => {
             if let Some(key) = input.virtual_keycode {
                 match input.state {
                     ElementState::Pressed => input_state.key_pressed(key),
@@ -88,10 +93,16 @@ fn main() -> Result<()> {
                 }
             }
         }
-        Event::WindowEvent { event: WindowEvent::CursorMoved { position, .. }, .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::CursorMoved { position, .. },
+            ..
+        } => {
             input_state.mouse_moved((position.x, position.y));
         }
-        Event::WindowEvent { event: WindowEvent::Resized(size), .. } => {
+        Event::WindowEvent {
+            event: WindowEvent::Resized(size),
+            ..
+        } => {
             if size.width == 0 && size.height == 0 {
                 minimized = true
             } else {
@@ -129,9 +140,9 @@ fn main() -> Result<()> {
                     let render_info = RenderInfo {
                         color_target: Some(forward_pass.color_images[frame_index].clone()),
                         depth_target: forward_pass.depth_images[frame_index].clone(),
-    
-                        color_load_op:  vk::AttachmentLoadOp::LOAD,
-                        depth_load_op:  vk::AttachmentLoadOp::LOAD,
+
+                        color_load_op: vk::AttachmentLoadOp::LOAD,
+                        depth_load_op: vk::AttachmentLoadOp::LOAD,
 
                         swapchain: swapchain.clone(),
                     };
@@ -139,26 +150,29 @@ fn main() -> Result<()> {
                     recorder.render(&render_info, |recorder| {
                         skybox::draw(&skybox, &camera, recorder);
 
-                        text_pass.draw_text(recorder, frame_index, |texts| {
-                            let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
-                            let pos = format!(
-                                "position: ({}, {}, {})",
-                                camera.pos.x,
-                                camera.pos.y,
-                                camera.pos.z,
-                            );
+                        text_pass
+                            .draw_text(recorder, frame_index, |texts| {
+                                let fps = format!("fps: {}", 1.0 / elapsed.as_secs_f64());
+                                let pos = format!(
+                                    "position: ({}, {}, {})",
+                                    camera.pos.x, camera.pos.y, camera.pos.z,
+                                );
 
-                            let primitives_drawn = forward_pass.draw_descs[frame_index]
-                                .primitives_drawn()
-                                .expect("failed to get amount of primitives drawn");
+                                let primitives_drawn = forward_pass.draw_descs[frame_index]
+                                    .primitives_drawn()
+                                    .expect("failed to get amount of primitives drawn");
 
-                            let primitives_drawn = format!("primitives: {}", primitives_drawn);
+                                let primitives_drawn = format!("primitives: {}", primitives_drawn);
 
-                            texts.add_label(0.02, Vec3::new(10.0, 50.0, 0.5), &pos);
-                            texts.add_label(0.02, Vec3::new(10.0, 100.0, 0.5), &fps); 
-                            texts.add_label(0.02, Vec3::new(10.0, 150.0, 0.5), &primitives_drawn);
-                        })
-                        .expect("failed do draw text");
+                                texts.add_label(0.02, Vec3::new(10.0, 50.0, 0.5), &pos);
+                                texts.add_label(0.02, Vec3::new(10.0, 100.0, 0.5), &fps);
+                                texts.add_label(
+                                    0.02,
+                                    Vec3::new(10.0, 150.0, 0.5),
+                                    &primitives_drawn,
+                                );
+                            })
+                            .expect("failed do draw text");
                     });
 
                     let color_image = forward_pass.color_images[frame_index].image().clone();
@@ -194,7 +208,12 @@ fn main() -> Result<()> {
                     });
 
                     if false {
-                        forward_pass.pyramid_debug(frame_index, swapchain_image.clone(), recorder, 4);
+                        forward_pass.pyramid_debug(
+                            frame_index,
+                            swapchain_image.clone(),
+                            recorder,
+                            4,
+                        );
                     }
 
                     // Transition swapchain image to present layout.
@@ -245,7 +264,7 @@ fn update_camera(camera: &mut Camera, input_state: &mut InputState, dt: Duration
     }
 
     let (x_delta, y_delta) = input_state.mouse_delta();
-   
+
     camera.yaw += (x_delta as f32 * rotation_speed) % 365.0;
     camera.pitch -= y_delta as f32 * rotation_speed;
     camera.pitch = camera.pitch.clamp(-89.0, 89.0);
@@ -283,7 +302,7 @@ impl InputState {
             mouse_delta.1 + (mouse_pos.1 - pos.1),
         ));
 
-        self.mouse_pos = Some(pos);   
+        self.mouse_pos = Some(pos);
     }
 
     pub fn key_pressed(&mut self, key: VirtualKeyCode) {
@@ -296,14 +315,14 @@ impl InputState {
     pub fn key_released(&mut self, key: VirtualKeyCode) {
         let major = key as usize / 64;
         let minor = key as usize % 64;
-    
+
         self.key_pressed[major] &= !(1 << minor);
     }
 
     pub fn is_key_pressed(&self, key: VirtualKeyCode) -> bool {
         let major = key as usize / 64;
         let minor = key as usize % 64;
-   
+
         self.key_pressed[major] & (1 << minor) != 0
     }
 
@@ -325,11 +344,8 @@ fn debug_lights() -> Vec<PointLight> {
 
         let position = start.lerp(end, i as f32 / 20.0);
 
-        lights.push(PointLight::new(
-            position,
-            Vec3::new(red, 1.0, blue) * 6.0,
-        ));
+        lights.push(PointLight::new(position, Vec3::new(red, 1.0, blue) * 6.0));
     }
 
-    lights 
+    lights
 }

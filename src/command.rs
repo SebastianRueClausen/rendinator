@@ -1,22 +1,19 @@
-use ash::vk;
 use anyhow::Result;
+use ash::vk;
 use smallvec::SmallVec;
 
-use std::{mem, ops};
 use std::cell::UnsafeCell;
 use std::rc::Rc;
+use std::{mem, ops};
 
 use crate::core::*;
 use crate::resource::*;
-use rendi_res::{Res, DummyRes};
+use rendi_res::{DummyRes, Res};
 
 pub struct CommandBuffer {
     pub handle: vk::CommandBuffer,
 
     /// This keeps track of all the items used by the command buffer.
-    ///
-    /// It's not free since clearing this means jumping through a pointer for each item, but it
-    /// makes sure the items live as long as they are used by the buffer.
     bound_resources: UnsafeCell<Vec<DummyRes>>,
 
     pub queue: Res<Queue>,
@@ -36,9 +33,7 @@ impl CommandBuffer {
             .command_buffer_count(1);
 
         let bound_resources = UnsafeCell::new(Vec::new());
-        let handles = unsafe {
-            device.handle.allocate_command_buffers(&info)?
-        };
+        let handles = unsafe { device.handle.allocate_command_buffers(&info)? };
 
         let handle = handles[0];
 
@@ -53,7 +48,9 @@ impl CommandBuffer {
     pub fn reset(&self) -> Result<()> {
         unsafe {
             let flags = vk::CommandBufferResetFlags::empty();
-            self.device.handle.reset_command_buffer(self.handle, flags)?;
+            self.device
+                .handle
+                .reset_command_buffer(self.handle, flags)?;
 
             // We can clear all the bound items when the buffer is reset.
             (*self.bound_resources.get()).clear();
@@ -63,12 +60,14 @@ impl CommandBuffer {
     }
 
     fn bind_resource<T>(&self, res: Res<T>) {
-        unsafe { (*self.bound_resources.get()).push(DummyRes::new(res)); }
+        unsafe {
+            (*self.bound_resources.get()).push(DummyRes::new(res));
+        }
     }
 
     pub fn record<F, R>(&self, submit_count: SubmitCount, func: F) -> Result<R>
     where
-        F: FnOnce(&CommandRecorder) -> R
+        F: FnOnce(&CommandRecorder) -> R,
     {
         let flags = match submit_count {
             SubmitCount::OneTime => vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT,
@@ -77,7 +76,9 @@ impl CommandBuffer {
 
         unsafe {
             let begin_info = vk::CommandBufferBeginInfo::builder().flags(flags);
-            self.device.handle.begin_command_buffer(self.handle, &begin_info)?;
+            self.device
+                .handle
+                .begin_command_buffer(self.handle, &begin_info)?;
         }
 
         let recorder = CommandRecorder { buffer: &self };
@@ -97,10 +98,14 @@ impl CommandBuffer {
 
 impl Drop for CommandBuffer {
     fn drop(&mut self) {
-        self.queue.wait_idle().expect("failed to wait for idle queue");
+        self.queue
+            .wait_idle()
+            .expect("failed to wait for idle queue");
 
         unsafe {
-            self.device.handle.free_command_buffers(self.queue.pool, &[self.handle]);
+            self.device
+                .handle
+                .free_command_buffers(self.queue.pool, &[self.handle]);
         }
     }
 }
@@ -171,7 +176,7 @@ pub struct DescBindInfo<'a> {
 pub struct RenderInfo {
     pub color_target: Option<Res<ImageView>>,
     pub depth_target: Res<ImageView>,
-    
+
     pub color_load_op: vk::AttachmentLoadOp,
     pub depth_load_op: vk::AttachmentLoadOp,
 
@@ -215,10 +220,7 @@ macro_rules! impl_shared_commands {
 
         #[allow(unused)]
         pub fn bind_descs(&self, info: &DescBindInfo) {
-            let descs: SmallVec<[_; 12]> = info.descs
-                .iter()
-                .map(|desc| desc.handle)
-                .collect();
+            let descs: SmallVec<[_; 12]> = info.descs.iter().map(|desc| desc.handle).collect();
 
             unsafe {
                 self.device().handle.cmd_bind_descriptor_sets(
@@ -267,7 +269,9 @@ macro_rules! impl_shared_commands {
                 .image_memory_barriers(&barriers);
 
             unsafe {
-                self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
+                self.device()
+                    .handle
+                    .cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
             }
 
             self.buffer.bind_resource(info.image.clone());
@@ -292,12 +296,14 @@ macro_rules! impl_shared_commands {
                 .buffer_memory_barriers(&barriers);
 
             unsafe {
-                self.device().handle.cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
+                self.device()
+                    .handle
+                    .cmd_pipeline_barrier2(self.buffer.handle, &dependency_info);
             }
 
             self.buffer.bind_resource(info.buffer.clone());
         }
-    }
+    };
 }
 
 pub struct DrawRecorder<'a> {
@@ -340,11 +346,9 @@ impl<'a> DrawRecorder<'a> {
     pub fn bind_raster_pipeline(&self, pipeline: Res<RasterPipeline>) {
         let bind_point = vk::PipelineBindPoint::GRAPHICS;
         unsafe {
-            self.device().handle.cmd_bind_pipeline(
-                self.buffer.handle,
-                bind_point,
-                pipeline.handle,
-            );
+            self.device()
+                .handle
+                .cmd_bind_pipeline(self.buffer.handle, bind_point, pipeline.handle);
         }
 
         self.buffer.bind_resource(pipeline);
@@ -352,13 +356,9 @@ impl<'a> DrawRecorder<'a> {
 
     pub fn draw(&self, vertex_count: u32, vertex_start: u32) {
         unsafe {
-            self.device().handle.cmd_draw(
-                self.buffer.handle,
-                vertex_count,
-                1,
-                vertex_start,
-                0,
-            );
+            self.device()
+                .handle
+                .cmd_draw(self.buffer.handle, vertex_count, 1, vertex_start, 0);
         }
     }
 
@@ -417,8 +417,10 @@ impl<'a> CommandRecorder<'a> {
             .dst_buffer(dst.handle)
             .regions(&regions);
 
-        unsafe { 
-            self.device().handle.cmd_copy_buffer2(self.buffer.handle, &info);
+        unsafe {
+            self.device()
+                .handle
+                .cmd_copy_buffer2(self.buffer.handle, &info);
         }
 
         self.buffer.bind_resource(src);
@@ -432,7 +434,7 @@ impl<'a> CommandRecorder<'a> {
             .base_array_layer(0)
             .layer_count(dst.layer_count())
             .build();
-        
+
         let extent = dst.extent(mip_level);
 
         let regions = [vk::BufferImageCopy2::builder()
@@ -450,7 +452,9 @@ impl<'a> CommandRecorder<'a> {
             .regions(&regions);
 
         unsafe {
-            self.device().handle.cmd_copy_buffer_to_image2(self.buffer.handle, &info);
+            self.device()
+                .handle
+                .cmd_copy_buffer_to_image2(self.buffer.handle, &info);
         }
 
         self.buffer.bind_resource(src);
@@ -478,14 +482,16 @@ impl<'a> CommandRecorder<'a> {
             .extent(info.src.extent(info.src_mip))
             .build()];
         let resolve_info = vk::ResolveImageInfo2::builder()
-           .src_image(info.src.handle)
-           .dst_image(info.dst.handle)
-           .src_image_layout(info.src.layout())
-           .dst_image_layout(info.dst.layout())
-           .regions(&regions);
+            .src_image(info.src.handle)
+            .dst_image(info.dst.handle)
+            .src_image_layout(info.src.layout())
+            .dst_image_layout(info.dst.layout())
+            .regions(&regions);
 
         unsafe {
-            self.device().handle.cmd_resolve_image2(self.buffer.handle, &resolve_info);
+            self.device()
+                .handle
+                .cmd_resolve_image2(self.buffer.handle, &resolve_info);
         }
 
         self.buffer.bind_resource(info.src.clone());
@@ -529,15 +535,17 @@ impl<'a> CommandRecorder<'a> {
             .dst_subresource(dst_subresource)
             .build()];
         let blit_info = vk::BlitImageInfo2::builder()
-           .src_image(info.src.handle)
-           .dst_image(info.dst.handle)
-           .src_image_layout(info.src.layout())
-           .dst_image_layout(info.dst.layout())
-           .filter(info.filter)
-           .regions(&regions);
+            .src_image(info.src.handle)
+            .dst_image(info.dst.handle)
+            .src_image_layout(info.src.layout())
+            .dst_image_layout(info.dst.layout())
+            .filter(info.filter)
+            .regions(&regions);
 
         unsafe {
-            self.device().handle.cmd_blit_image2(self.buffer.handle, &blit_info);
+            self.device()
+                .handle
+                .cmd_blit_image2(self.buffer.handle, &blit_info);
         }
 
         self.buffer.bind_resource(info.src.clone());
@@ -546,19 +554,17 @@ impl<'a> CommandRecorder<'a> {
 
     pub fn render<F: FnOnce(&DrawRecorder)>(&self, info: &RenderInfo, f: F) {
         let color_attachments: SmallVec<[_; 1]> = if let Some(target) = &info.color_target {
-            SmallVec::from([
-                vk::RenderingAttachmentInfo::builder()
-                    .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-                    .image_view(target.handle)
-                    .load_op(info.color_load_op)
-                    .store_op(vk::AttachmentStoreOp::STORE)
-                    .clear_value(vk::ClearValue {
-                        color: vk::ClearColorValue {
-                            float32: [0.0, 0.0, 0.0, 1.0],
-                        },
-                    })
-                    .build()
-            ])
+            SmallVec::from([vk::RenderingAttachmentInfo::builder()
+                .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                .image_view(target.handle)
+                .load_op(info.color_load_op)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .clear_value(vk::ClearValue {
+                    color: vk::ClearColorValue {
+                        float32: [0.0, 0.0, 0.0, 1.0],
+                    },
+                })
+                .build()])
         } else {
             SmallVec::new()
         };
@@ -588,15 +594,21 @@ impl<'a> CommandRecorder<'a> {
         let scissors = info.swapchain.scissors();
 
         unsafe {
-            self.device().handle.cmd_begin_rendering(self.buffer.handle, &rendering_info);
-            self.device().handle.cmd_set_viewport(self.buffer.handle, 0, &viewports);
-            self.device().handle.cmd_set_scissor(self.buffer.handle, 0, &scissors);
+            self.device()
+                .handle
+                .cmd_begin_rendering(self.buffer.handle, &rendering_info);
+            self.device()
+                .handle
+                .cmd_set_viewport(self.buffer.handle, 0, &viewports);
+            self.device()
+                .handle
+                .cmd_set_scissor(self.buffer.handle, 0, &scissors);
         }
 
         let draw_recorder = DrawRecorder {
             buffer: self.buffer,
         };
-        
+
         f(&draw_recorder);
 
         unsafe {
@@ -607,11 +619,9 @@ impl<'a> CommandRecorder<'a> {
     pub fn dispatch(&self, pipeline: Res<ComputePipeline>, group_count: [u32; 3]) {
         let bind_point = vk::PipelineBindPoint::COMPUTE;
         unsafe {
-            self.device().handle.cmd_bind_pipeline(
-                self.buffer.handle,
-                bind_point,
-                pipeline.handle,
-            );
+            self.device()
+                .handle
+                .cmd_bind_pipeline(self.buffer.handle, bind_point, pipeline.handle);
             self.device().handle.cmd_dispatch(
                 self.buffer.handle,
                 group_count[0],
@@ -642,4 +652,3 @@ impl<'a> CommandRecorder<'a> {
         self.buffer.bind_resource(buffer);
     }
 }
-

@@ -8,10 +8,23 @@ use ash::vk;
 
 use std::slice;
 
+pub use crate::desc::{BindSlot, DescAccess, DescBind, DescCount, DescKind};
 use rendi_data_structs::SortedMap;
-pub use crate::desc::{
-    BindSlot, AccessFlags, DescKind, DescCount, DescBind 
-};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ShaderStage {
+    /// Compute shader.
+    Compute,
+
+    /// Fragment shader.
+    Fragment,
+
+    /// Vertex shader.
+    Vertex,
+
+    /// Both vertex and fragment shader.
+    Raster,
+}
 
 /// The base kind of an shader input.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,7 +79,7 @@ impl Input {
     }
 
     pub fn format(self) -> vk::Format {
-        use { InputKind::*, InputShape::* };
+        use {InputKind::*, InputShape::*};
 
         match (self.kind(), self.shape()) {
             (Int, Scalar) => vk::Format::R32_SINT,
@@ -142,9 +155,9 @@ impl DecoKind {
 /// SPIR-V decoration. This is to give attributes to variables and types.
 #[derive(Clone, Copy, Debug)]
 struct Deco<'a> {
-    id: u32, 
+    id: u32,
     kind: DecoKind,
-    args: &'a [u32]
+    args: &'a [u32],
 }
 
 /// SPIR-V decoration. This is to give attributes to struct members.
@@ -243,7 +256,7 @@ enum TypeKind<'a> {
     },
     Struct {
         /// ID's of each member.
-        member_ids: &'a [u32], 
+        member_ids: &'a [u32],
     },
     Prim {
         /// The size of the type in bytes.
@@ -255,7 +268,7 @@ enum TypeKind<'a> {
         ty_id: u32,
 
         /// The Cardinality of the vector.
-        card: u32
+        card: u32,
     },
 }
 
@@ -309,17 +322,18 @@ impl ImageSamples {
 
 /// Code and reflections for a compute shader.
 pub struct ComputeReflection {
-    descs: Descs,
     push_const: Option<PushConstRange>,
+    descs: Descs,
 }
 
 impl ComputeReflection {
-    /// Create new source code for 
     pub fn new(code: &[u32]) -> Result<Self> {
-        let (desc_binds, _, push_const) = get_shader_info(code)?;
-        let descs = Descs::new(desc_binds);
+        let (desc_binds, _, push_const) = get_shader_info(code, ShaderStage::Compute)?;
 
-        Ok(Self { descs, push_const })
+        Ok(Self {
+            descs: Descs::new(desc_binds),
+            push_const,
+        })
     }
 
     /// Get descriptor bindings.
@@ -338,31 +352,34 @@ pub struct RasterReflection {
     desc_binds: Descs,
     vert_inputs: Inputs,
 
-    vert_push_const: Option<PushConstRange>, 
-    frag_push_const: Option<PushConstRange>, 
+    vert_push_const: Option<PushConstRange>,
+    frag_push_const: Option<PushConstRange>,
 }
 
 impl RasterReflection {
     pub fn new(frag_code: &[u32], vert_code: &[u32]) -> Result<Self> {
-        let (frag_binds, _, frag_push_const) = get_shader_info(frag_code)?;
-        let (vert_binds, vert_inputs, vert_push_const) = get_shader_info(vert_code)?;
+        let (frag_binds, _, frag_push_const) = get_shader_info(frag_code, ShaderStage::Fragment)?;
+        let (vert_binds, vert_inputs, vert_push_const) =
+            get_shader_info(vert_code, ShaderStage::Vertex)?;
 
         let mut desc_binds = vert_binds.clone();
 
         // Go through each binding in the fragment shader and add it to the vertex bindings if not
         // present already. If it's present, then make sure they match.
         for (slot, frag_bind) in &frag_binds {
-            let Some(vert_bind) = vert_binds.get(slot) else {
+            let Some(vert_bind) = desc_binds.get_mut(slot) else {
                 desc_binds.insert(*slot, *frag_bind);
                 continue;
             };
+
+            vert_bind.stage = ShaderStage::Raster;
 
             if vert_bind.kind() != frag_bind.kind() {
                 return Err(anyhow!(
                     "descriptor type at {slot} doesn't match in vertex and fragment shader, {} vs {}",
                     vert_bind.kind(),
                     frag_bind.kind(),
-                )); 
+                ));
             }
 
             if vert_bind.count() != frag_bind.count() {
@@ -370,7 +387,7 @@ impl RasterReflection {
                     "descriptor count at {slot} doesn't match in vertex and fragment shader, {} vs {}",
                     vert_bind.count(),
                     frag_bind.count(),
-                )); 
+                ));
             }
         }
 
@@ -409,7 +426,7 @@ impl RasterReflection {
 #[derive(Clone, Copy)]
 struct Ins<'a> {
     opcode: u16,
-    args: &'a [u32], 
+    args: &'a [u32],
 }
 
 impl<'a> Ins<'a> {
@@ -424,9 +441,10 @@ impl<'a> Ins<'a> {
     /// returned.
     #[inline]
     fn expect_arg(self, index: usize) -> Result<u32> {
-        self.args.get(index).cloned().ok_or_else(|| {
-            anyhow!("unexpected end of instruction")
-        })
+        self.args
+            .get(index)
+            .cloned()
+            .ok_or_else(|| anyhow!("unexpected end of instruction"))
     }
 
     /// Get the arguments of the instruction. This includes the first word.
@@ -447,7 +465,9 @@ impl<'a> InsIter<'a> {
             return Err(anyhow!("invalid magic value"));
         }
 
-        Ok(Self { binary: &binary[5..] })
+        Ok(Self {
+            binary: &binary[5..],
+        })
     }
 }
 
@@ -455,18 +475,15 @@ impl<'a> Iterator for InsIter<'a> {
     type Item = Ins<'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let ins = self.binary
-            .first()
-            .cloned()
-            .map(|w| {
-                let opcode = w as u16;
-                let word_count = (w >> 16) as usize;
+        let ins = self.binary.first().cloned().map(|w| {
+            let opcode = w as u16;
+            let word_count = (w >> 16) as usize;
 
-                let (args, binary) = self.binary.split_at(word_count);
-                self.binary = binary;
+            let (args, binary) = self.binary.split_at(word_count);
+            self.binary = binary;
 
-                Ins { opcode, args }
-            })?;
+            Ins { opcode, args }
+        })?;
 
         Some(ins)
     }
@@ -519,14 +536,19 @@ impl<'a> Reflection<'a> {
                     };
 
                     let args = ins.args().get(4..).unwrap_or_default();
-    
-                    reflection.member_decos.push(MemberDeco { struct_ty_id, member, args, kind });
+
+                    reflection.member_decos.push(MemberDeco {
+                        struct_ty_id,
+                        member,
+                        args,
+                        kind,
+                    });
                 }
                 OP_VAR => {
                     let ty = ins.expect_arg(1)?;
                     let id = ins.expect_arg(2)?;
                     let storage = ins.expect_arg(3)?;
-            
+
                     let Some(storage) = StorageClass::from_ins(storage) else {
                         continue;
                     };
@@ -543,7 +565,7 @@ impl<'a> Reflection<'a> {
                     let Some(samples) = ImageSamples::from_ins(ins.expect_arg(6)?) else {
                         continue;
                     };
-        
+
                     reflection.types.push(Type {
                         kind: TypeKind::Image { dim, samples },
                         id,
@@ -555,7 +577,7 @@ impl<'a> Reflection<'a> {
 
                     reflection.types.push(Type {
                         kind: TypeKind::ImageSampled { ty_id },
-                        id, 
+                        id,
                     });
                 }
                 OP_TYPE_POINTER => {
@@ -564,7 +586,7 @@ impl<'a> Reflection<'a> {
 
                     reflection.types.push(Type {
                         kind: TypeKind::Pointer { ty_id },
-                        id, 
+                        id,
                     });
                 }
                 OP_TYPE_STRUCT => {
@@ -587,7 +609,7 @@ impl<'a> Reflection<'a> {
                     });
                 }
                 OP_TYPE_RUNTIME_ARRAY => {
-                    let id = ins.expect_arg(1)?; 
+                    let id = ins.expect_arg(1)?;
                     let ty_id = ins.expect_arg(2)?;
 
                     reflection.types.push(Type {
@@ -634,7 +656,7 @@ impl<'a> Reflection<'a> {
                         id,
                     });
                 }
-                _ => ()
+                _ => (),
             }
         }
 
@@ -655,9 +677,7 @@ impl<'a> Reflection<'a> {
     /// the type doesn't have a size such as an image.
     fn find_type_size(&self, ty: Type<'a>) -> Option<u32> {
         let size = match ty.kind {
-            TypeKind::Pointer { ty_id } => {
-                self.find_type_size(self.find_type(ty_id)?)?
-            }
+            TypeKind::Pointer { ty_id } => self.find_type_size(self.find_type(ty_id)?)?,
             TypeKind::Array { ty_id, len_id, .. } => {
                 let len = self.find_const(len_id)?.val;
                 let elem_size = self.find_type_size(self.find_type(ty_id)?)?;
@@ -706,23 +726,15 @@ impl<'a> Reflection<'a> {
 
     fn rw_flags(&self, id: u32) -> RwFlags {
         RwFlags {
-            non_readable: self
-                .find_deco(DecoKind::NonReadable, id)
-                .is_some(),
-            non_writeable: self
-                .find_deco(DecoKind::NonWriteable, id)
-                .is_some(),
+            non_readable: self.find_deco(DecoKind::NonReadable, id).is_some(),
+            non_writeable: self.find_deco(DecoKind::NonWriteable, id).is_some(),
         }
     }
 
     fn member_rw_flags(&self, id: u32) -> RwFlags {
         RwFlags {
-            non_readable: self
-                .find_member_deco(DecoKind::NonReadable, id)
-                .is_some(),
-            non_writeable: self
-                .find_member_deco(DecoKind::NonWriteable, id)
-                .is_some(),
+            non_readable: self.find_member_deco(DecoKind::NonReadable, id).is_some(),
+            non_writeable: self.find_member_deco(DecoKind::NonWriteable, id).is_some(),
         }
     }
 
@@ -742,18 +754,14 @@ impl<'a> Reflection<'a> {
     fn find_deco(&self, kind: DecoKind, id: u32) -> Option<Deco> {
         self.decos
             .iter()
-            .find(|deco| {
-                deco.id == id && deco.kind == kind
-            })
+            .find(|deco| deco.id == id && deco.kind == kind)
             .copied()
     }
 
     fn find_member_deco(&self, kind: DecoKind, id: u32) -> Option<MemberDeco> {
         self.member_decos
             .iter()
-            .find(|deco| {
-                deco.struct_ty_id == id && deco.kind == kind
-            })
+            .find(|deco| deco.struct_ty_id == id && deco.kind == kind)
             .copied()
     }
 }
@@ -797,19 +805,20 @@ impl Descs {
 
                 let binds = binds
                     .iter()
-                    .map(|(bind_slot, bind)| {
-                        (bind_slot.binding(), bind.clone())
-                    })
+                    .map(|(bind_slot, bind)| (bind_slot.binding(), bind.clone()))
                     .collect();
 
-                (set, DescSet {
-                    binds: SortedMap::from_sorted(binds)
-                })
+                (
+                    set,
+                    DescSet {
+                        binds: SortedMap::from_sorted(binds),
+                    },
+                )
             })
             .collect();
 
         Self {
-            sets: SortedMap::from_sorted(sets)
+            sets: SortedMap::from_sorted(sets),
         }
     }
 
@@ -831,21 +840,18 @@ impl Descs {
     pub fn min_set(&self) -> Option<u32> {
         self.sets.first_key_value().map(|(k, _)| *k)
     }
-   
+
     /// Returns a iterator of all the sets.
     pub fn sets(&self) -> impl Iterator<Item = &(u32, DescSet)> {
         self.sets.iter()
     }
-    
+
     pub fn binds(&self) -> impl Iterator<Item = (BindSlot, DescBind)> + '_ {
-        self.sets
-            .iter()
-            .flat_map(|(set, binds)| binds
+        self.sets.iter().flat_map(|(set, binds)| {
+            binds
                 .binds()
-                .map(|(binding, bind)| {
-                    (BindSlot::new(*set, *binding), *bind)
-                })
-            )
+                .map(|(binding, bind)| (BindSlot::new(*set, *binding), *bind))
+        })
     }
 }
 
@@ -870,7 +876,7 @@ impl Inputs {
     pub fn has_any(&self) -> bool {
         self.count() != 0
     }
-   
+
     /// Returns the input at location `loc`.
     ///
     /// Returns `None` if there is no input at `loc`.
@@ -895,7 +901,12 @@ impl<'a> IntoIterator for &'a Inputs {
 
 fn get_shader_info(
     binary: &[u32],
-) -> Result<(SortedMap<BindSlot, DescBind>, Inputs, Option<PushConstRange>)> {
+    stage: ShaderStage,
+) -> Result<(
+    SortedMap<BindSlot, DescBind>,
+    Inputs,
+    Option<PushConstRange>,
+)> {
     let reflection = Reflection::new(binary)?;
 
     let mut inputs = Vec::new();
@@ -911,9 +922,7 @@ fn get_shader_info(
             continue;
         };
 
-        let is_buffer_block = reflection
-            .find_deco(DecoKind::BufferBlock, ty.id)
-            .is_some();
+        let is_buffer_block = reflection.find_deco(DecoKind::BufferBlock, ty.id).is_some();
 
         let get_bind_slot = || -> Result<BindSlot> {
             let (Some(set), Some(binding)) = (
@@ -944,7 +953,8 @@ fn get_shader_info(
                 let offset = if let TypeKind::Struct { member_ids } = ty.kind {
                     let mut count = 0;
 
-                    let min = reflection.member_decos
+                    let min = reflection
+                        .member_decos
                         .iter()
                         .filter_map(|deco| {
                             (deco.struct_ty_id == ty.id && deco.kind == DecoKind::Offset)
@@ -963,23 +973,25 @@ fn get_shader_info(
                         min
                     }
                 } else {
-                    return Err(anyhow!("push constant is not a struct")); 
+                    return Err(anyhow!("push constant is not a struct"));
                 };
 
                 if push_const.is_some() {
                     return Err(anyhow!("more than one push constant in shader"));
                 }
-                
-                push_const = Some(PushConstRange { offset, size }); 
+
+                push_const = Some(PushConstRange { offset, size });
             }
             StorageClass::Input => {
-                let get_input_kind = |bytes: u32, kind: PrimKind| Some(match (bytes, kind) {
-                    (4, PrimKind::Float) => InputKind::Float,
-                    (8, PrimKind::Float) => InputKind::Double,
-                    (_, PrimKind::Uint) => InputKind::Uint,
-                    (_, PrimKind::Int) => InputKind::Int,
-                    _ => return None,
-                });
+                let get_input_kind = |bytes: u32, kind: PrimKind| {
+                    Some(match (bytes, kind) {
+                        (4, PrimKind::Float) => InputKind::Float,
+                        (8, PrimKind::Float) => InputKind::Double,
+                        (_, PrimKind::Uint) => InputKind::Uint,
+                        (_, PrimKind::Int) => InputKind::Int,
+                        _ => return None,
+                    })
+                };
 
                 let (kind, shape) = match ty.kind {
                     TypeKind::Vector { ty_id, card } => {
@@ -999,7 +1011,7 @@ fn get_shader_info(
                             3 => InputShape::Vec3,
                             4 => InputShape::Vec4,
                             _ => {
-                                continue; 
+                                continue;
                             }
                         };
 
@@ -1029,28 +1041,36 @@ fn get_shader_info(
             StorageClass::Uniform => {
                 let (kind, access_flags) = if is_buffer_block {
                     let rw_flags = reflection.member_rw_flags(ty.id);
-                    let access_flags = AccessFlags::from_rw_flags(rw_flags)?;
+                    let access_flags = DescAccess::from_rw_flags(rw_flags)?;
 
                     (DescKind::StorageBuffer, access_flags)
                 } else {
-                    (DescKind::UniformBuffer, AccessFlags::READ)
+                    (DescKind::UniformBuffer, DescAccess::READ)
                 };
 
-                desc_binds.push((get_bind_slot()?, DescBind {
-                    count: DescCount::Single,
-                    access_flags,
-                    kind,
-                }));
+                desc_binds.push((
+                    get_bind_slot()?,
+                    DescBind {
+                        count: DescCount::Single,
+                        access_flags,
+                        kind,
+                        stage,
+                    },
+                ));
             }
             StorageClass::StorageBuffer => {
                 let rw_flags = reflection.member_rw_flags(ty.id);
-                let access_flags = AccessFlags::from_rw_flags(rw_flags)?;
+                let access_flags = DescAccess::from_rw_flags(rw_flags)?;
 
-                desc_binds.push((get_bind_slot()?, DescBind {
-                    kind: DescKind::StorageBuffer,
-                    count: DescCount::Single,
-                    access_flags,
-                }));
+                desc_binds.push((
+                    get_bind_slot()?,
+                    DescBind {
+                        kind: DescKind::StorageBuffer,
+                        count: DescCount::Single,
+                        access_flags,
+                        stage,
+                    },
+                ));
             }
             StorageClass::UniformConstant => {
                 let mut count = DescCount::Single;
@@ -1066,12 +1086,12 @@ fn get_shader_info(
                         }
                         TypeKind::Image { .. } => {
                             let rw_flags = reflection.rw_flags(var.id);
-                            let access_flags = AccessFlags::from_rw_flags(rw_flags)?;
+                            let access_flags = DescAccess::from_rw_flags(rw_flags)?;
 
                             break (DescKind::StorageImage, access_flags);
                         }
                         TypeKind::ImageSampled { .. } => {
-                            break (DescKind::SampledImage, AccessFlags::READ);
+                            break (DescKind::SampledImage, DescAccess::READ);
                         }
                         TypeKind::Pointer { ty_id } => {
                             let Some(point_ty) = reflection.find_type(ty_id) else {
@@ -1084,9 +1104,9 @@ fn get_shader_info(
                             let Some(elem_ty) = reflection.find_type(ty_id) else {
                                 continue 'var_loop;
                             };
-    
+
                             ty = elem_ty;
-                            
+
                             let Some(len) = reflection.find_const(len_id) else {
                                 continue 'var_loop;
                             };
@@ -1113,16 +1133,24 @@ fn get_shader_info(
                     }
                 };
 
-                desc_binds.push((get_bind_slot()?, DescBind {
-                    access_flags,
-                    kind,
-                    count,
-                }));
+                desc_binds.push((
+                    get_bind_slot()?,
+                    DescBind {
+                        access_flags,
+                        stage,
+                        kind,
+                        count,
+                    },
+                ));
             }
         };
     }
 
-    Ok((SortedMap::from_unsorted(desc_binds), Inputs::new(inputs), push_const))
+    Ok((
+        SortedMap::from_unsorted(desc_binds),
+        Inputs::new(inputs),
+        push_const,
+    ))
 }
 
 const SPIRV_MAGIC_VALUE: u32 = 0x07230203;
@@ -1145,7 +1173,7 @@ const OP_TYPE_POINTER: u16 = 32;
 #[cfg(test)]
 mod test {
     use super::*;
-    use shaderc::{Compiler, ShaderKind, CompileOptions, SpirvVersion};
+    use shaderc::{CompileOptions, Compiler, ShaderKind, SpirvVersion};
 
     fn compile(kind: ShaderKind, src: &str) -> Vec<u32> {
         let mut options = CompileOptions::new().unwrap();
@@ -1160,7 +1188,9 @@ mod test {
 
     #[test]
     fn buffer_desc_slot() {
-        let spv = compile(ShaderKind::Compute, r#"
+        let spv = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform Block1 {
@@ -1173,52 +1203,74 @@ mod test {
             };
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let (desc_binds, _, _) = get_shader_info(&spv).unwrap();
+        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::UniformBuffer, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::UniformBuffer,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 1)), Some(&DescBind {
-            kind: DescKind::StorageBuffer, 
-            access_flags: AccessFlags::READ_WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 1)),
+            Some(&DescBind {
+                kind: DescKind::StorageBuffer,
+                access_flags: DescAccess::READ_WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn image_desc_slot() {
-        let spv = compile(ShaderKind::Compute, r#"
+        let spv = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform sampler2D val1;
             layout (set = 0, binding = 1, r32f) writeonly uniform image2D val2;
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let (desc_binds, _, _) = get_shader_info(&spv).unwrap();
+        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::SampledImage, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 1)), Some(&DescBind {
-            kind: DescKind::StorageImage, 
-            access_flags: AccessFlags::WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 1)),
+            Some(&DescBind {
+                kind: DescKind::StorageImage,
+                access_flags: DescAccess::WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn combined_image_buffer_desc_slot() {
-        let spv = compile(ShaderKind::Compute, r#"
+        let spv = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform sampler2D val1;
@@ -1227,66 +1279,92 @@ mod test {
             };
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let (desc_binds, _, _) = get_shader_info(&spv).unwrap();
+        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::SampledImage, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(desc_binds.get(&BindSlot::new(1, 0)), Some(&DescBind {
-            kind: DescKind::UniformBuffer, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(1, 0)),
+            Some(&DescBind {
+                kind: DescKind::UniformBuffer,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn image_array() {
-        let spv = compile(ShaderKind::Compute, r#"
+        let spv = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform sampler2D val1[];
             layout (set = 0, binding = 1) uniform sampler2D val2[2];
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let (desc_binds, _, _) = get_shader_info(&spv).unwrap();
+        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::SampledImage, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Unbound,
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Unbound,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(desc_binds.get(&BindSlot::new(0, 1)), Some(&DescBind {
-            kind: DescKind::SampledImage, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Bound(2),
-        }));
+        assert_eq!(
+            desc_binds.get(&BindSlot::new(0, 1)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Bound(2),
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn raster_different_types() {
-        let frag = compile(ShaderKind::Fragment, r#"
+        let frag = compile(
+            ShaderKind::Fragment,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform sampler2D val1;
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let vert = compile(ShaderKind::Vertex, r#"
+        let vert = compile(
+            ShaderKind::Vertex,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) writeonly uniform image2D val1;
 
             void main() {}
-        "#);
+        "#,
+        );
 
         let prog = RasterReflection::new(&frag, &vert);
 
@@ -1295,21 +1373,27 @@ mod test {
 
     #[test]
     fn raster_different_count() {
-        let frag = compile(ShaderKind::Fragment, r#"
+        let frag = compile(
+            ShaderKind::Fragment,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform sampler2D val1[];
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let vert = compile(ShaderKind::Vertex, r#"
+        let vert = compile(
+            ShaderKind::Vertex,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) uniform sampler2D val1;
 
             void main() {}
-        "#);
+        "#,
+        );
 
         let prog = RasterReflection::new(&frag, &vert);
 
@@ -1317,41 +1401,94 @@ mod test {
     }
 
     #[test]
+    fn raster_combine_overlap() {
+        let frag = compile(
+            ShaderKind::Fragment,
+            r#"
+            #version 450
+
+            layout (set = 0, binding = 0) uniform sampler2D val1;
+
+            void main() {}
+        "#,
+        );
+
+        let vert = compile(
+            ShaderKind::Vertex,
+            r#"
+            #version 450
+
+            layout (set = 0, binding = 0) uniform sampler2D val1;
+
+            void main() {}
+        "#,
+        );
+
+        let prog = RasterReflection::new(&frag, &vert).unwrap();
+
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Raster,
+            })
+        );
+    }
+
+    #[test]
     fn raster_combine() {
-        let frag = compile(ShaderKind::Fragment, r#"
+        let frag = compile(
+            ShaderKind::Fragment,
+            r#"
             #version 450
 
             layout (set = 0, binding = 1) uniform sampler2D val1[];
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let vert = compile(ShaderKind::Vertex, r#"
+        let vert = compile(
+            ShaderKind::Vertex,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) writeonly uniform image2D val1;
 
             void main() {}
-        "#);
+        "#,
+        );
 
         let prog = RasterReflection::new(&frag, &vert).unwrap();
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(0, 1)), Some(&DescBind {
-            kind: DescKind::SampledImage,
-            access_flags: AccessFlags::READ,
-            count: DescCount::Unbound,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(0, 1)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Unbound,
+                stage: ShaderStage::Fragment,
+            })
+        );
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::StorageImage,
-            access_flags: AccessFlags::WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageImage,
+                access_flags: DescAccess::WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Vertex,
+            })
+        );
     }
 
     #[test]
     fn push_const_range() {
-        let code = compile(ShaderKind::Compute, r#"
+        let code = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (push_constant) uniform Block {
@@ -1359,19 +1496,22 @@ mod test {
             };
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&code).unwrap(); 
+        let prog = ComputeReflection::new(&code).unwrap();
 
-        assert_eq!(prog.push_const_range(), Some(PushConstRange {
-            offset: 0,
-            size: 4,
-        }));
+        assert_eq!(
+            prog.push_const_range(),
+            Some(PushConstRange { offset: 0, size: 4 })
+        );
     }
 
     #[test]
     fn push_const_complex_range() {
-        let code = compile(ShaderKind::Compute, r#"
+        let code = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (push_constant) uniform Block {
@@ -1381,19 +1521,25 @@ mod test {
             };
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&code).unwrap(); 
+        let prog = ComputeReflection::new(&code).unwrap();
 
-        assert_eq!(prog.push_const_range(), Some(PushConstRange {
-            offset: 8,
-            size: 68,
-        }));
+        assert_eq!(
+            prog.push_const_range(),
+            Some(PushConstRange {
+                offset: 8,
+                size: 68,
+            })
+        );
     }
 
     #[test]
     fn push_const_vector_types_range() {
-        let code = compile(ShaderKind::Compute, r#"
+        let code = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (push_constant) uniform Block {
@@ -1407,19 +1553,25 @@ mod test {
             };
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&code).unwrap(); 
+        let prog = ComputeReflection::new(&code).unwrap();
 
-        assert_eq!(prog.push_const_range(), Some(PushConstRange {
-            offset: 0,
-            size: 72,
-        }));
+        assert_eq!(
+            prog.push_const_range(),
+            Some(PushConstRange {
+                offset: 0,
+                size: 72,
+            })
+        );
     }
 
     #[test]
     fn deco_read_write_buffer() {
-        let code = compile(ShaderKind::Compute, r#"
+        let code = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0) readonly buffer B1 {
@@ -1433,32 +1585,47 @@ mod test {
             };
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&code).unwrap(); 
+        let prog = ComputeReflection::new(&code).unwrap();
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::StorageBuffer, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageBuffer,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(1, 0)), Some(&DescBind {
-            kind: DescKind::StorageBuffer, 
-            access_flags: AccessFlags::WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(1, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageBuffer,
+                access_flags: DescAccess::WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(2, 0)), Some(&DescBind {
-            kind: DescKind::StorageBuffer, 
-            access_flags: AccessFlags::READ_WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(2, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageBuffer,
+                access_flags: DescAccess::READ_WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn deco_read_write_image() {
-        let code = compile(ShaderKind::Compute, r#"
+        let code = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
 
             layout (set = 0, binding = 0, r32f) readonly uniform image2D i1;
@@ -1466,32 +1633,47 @@ mod test {
             layout (set = 2, binding = 0, r32f) uniform image2D i3;
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&code).unwrap(); 
+        let prog = ComputeReflection::new(&code).unwrap();
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::StorageImage, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(1, 0)), Some(&DescBind {
-            kind: DescKind::StorageImage, 
-            access_flags: AccessFlags::WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(1, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageImage,
+                access_flags: DescAccess::WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(2, 0)), Some(&DescBind {
-            kind: DescKind::StorageImage, 
-            access_flags: AccessFlags::READ_WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(2, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageImage,
+                access_flags: DescAccess::READ_WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn vertex_input() {
-        let spv = compile(ShaderKind::Vertex, r#"
+        let spv = compile(
+            ShaderKind::Vertex,
+            r#"
             #version 450
 
             layout (location = 0) in vec2 i1;
@@ -1516,48 +1698,66 @@ mod test {
             layout (location = 15) in uint i16;
 
             void main() {}
-        "#);
+        "#,
+        );
 
-        let (_, inputs, _) = get_shader_info(&spv).unwrap();
+        let (_, inputs, _) = get_shader_info(&spv, ShaderStage::Vertex).unwrap();
 
-        let kinds = [InputKind::Float, InputKind::Double, InputKind::Int, InputKind::Uint];
+        let kinds = [
+            InputKind::Float,
+            InputKind::Double,
+            InputKind::Int,
+            InputKind::Uint,
+        ];
+
         let shapes = [InputShape::Vec2, InputShape::Vec3, InputShape::Vec4];
 
         for (i, kind) in kinds.into_iter().enumerate() {
             for (j, shape) in shapes.into_iter().enumerate() {
                 let location = (i * 3 + j) as u32;
 
-                assert_eq!(inputs.get(location), Some(Input {
-                    kind,
-                    shape,
-                }));
+                assert_eq!(inputs.get(location), Some(Input { kind, shape }));
             }
         }
 
-        assert_eq!(inputs.get(12), Some(Input {
-            kind: InputKind::Float,
-            shape: InputShape::Scalar,
-        }));
+        assert_eq!(
+            inputs.get(12),
+            Some(Input {
+                kind: InputKind::Float,
+                shape: InputShape::Scalar,
+            })
+        );
 
-        assert_eq!(inputs.get(13), Some(Input {
-            kind: InputKind::Double,
-            shape: InputShape::Scalar,
-        }));
+        assert_eq!(
+            inputs.get(13),
+            Some(Input {
+                kind: InputKind::Double,
+                shape: InputShape::Scalar,
+            })
+        );
 
-        assert_eq!(inputs.get(14), Some(Input {
-            kind: InputKind::Int,
-            shape: InputShape::Scalar,
-        }));
+        assert_eq!(
+            inputs.get(14),
+            Some(Input {
+                kind: InputKind::Int,
+                shape: InputShape::Scalar,
+            })
+        );
 
-        assert_eq!(inputs.get(15), Some(Input {
-            kind: InputKind::Uint,
-            shape: InputShape::Scalar,
-        }));
+        assert_eq!(
+            inputs.get(15),
+            Some(Input {
+                kind: InputKind::Uint,
+                shape: InputShape::Scalar,
+            })
+        );
     }
 
     #[test]
     fn unbound_image_array() {
-        let spv = compile(ShaderKind::Compute, r#"
+        let spv = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
             #pragma shader_stage(compute)
 
@@ -1584,26 +1784,37 @@ mod test {
 
               imageStore(storage_images[0], ivec2(0), vec4(0.0));
             }
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&spv).unwrap(); 
+        let prog = ComputeReflection::new(&spv).unwrap();
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(0, 0)), Some(&DescBind {
-            kind: DescKind::SampledImage, 
-            access_flags: AccessFlags::READ,
-            count: DescCount::Unbound,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(0, 0)),
+            Some(&DescBind {
+                kind: DescKind::SampledImage,
+                access_flags: DescAccess::READ,
+                count: DescCount::Unbound,
+                stage: ShaderStage::Compute,
+            })
+        );
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(1, 0)), Some(&DescBind {
-            kind: DescKind::StorageImage, 
-            access_flags: AccessFlags::WRITE,
-            count: DescCount::Unbound,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(1, 0)),
+            Some(&DescBind {
+                kind: DescKind::StorageImage,
+                access_flags: DescAccess::WRITE,
+                count: DescCount::Unbound,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 
     #[test]
     fn cluster_update() {
-        let spv = compile(ShaderKind::Compute, r#"
+        let spv = compile(
+            ShaderKind::Compute,
+            r#"
             #version 450
             #pragma shader_stage(compute)
 
@@ -1704,14 +1915,19 @@ mod test {
                 vec4(max(min_near, max(max_near, max(min_far, max_far))), 1.0)
               );
             }
-        "#);
+        "#,
+        );
 
-        let prog = ComputeReflection::new(&spv).unwrap(); 
+        let prog = ComputeReflection::new(&spv).unwrap();
 
-        assert_eq!(prog.descs().get_bind(BindSlot::new(1, 1)), Some(&DescBind {
-            kind: DescKind::StorageBuffer, 
-            access_flags: AccessFlags::WRITE,
-            count: DescCount::Single,
-        }));
+        assert_eq!(
+            prog.descs().get_bind(BindSlot::new(1, 1)),
+            Some(&DescBind {
+                kind: DescKind::StorageBuffer,
+                access_flags: DescAccess::WRITE,
+                count: DescCount::Single,
+                stage: ShaderStage::Compute,
+            })
+        );
     }
 }
