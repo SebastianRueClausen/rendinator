@@ -285,6 +285,14 @@ impl<T: ?Sized + Unsize<U>, U: ?Sized> CoerceUnsized<Res<U>> for Res<T> {}
 mod test {
     use super::*;
     use crate::slab::Slabs;
+    use std::mem;
+
+    #[test]
+    fn size() {
+        let ptr_size = mem::size_of::<usize>();
+        assert_eq!(mem::size_of::<Res<()>>(), ptr_size);
+        assert_eq!(mem::size_of::<Option<Res<()>>>(), ptr_size);
+    }
 
     #[test]
     fn heap() {

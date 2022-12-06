@@ -2,26 +2,24 @@ use anyhow::Result;
 use ash::extensions::{ext, khr};
 use ash::vk;
 
-use std::ffi::{self, CStr, CString};
+use std::cell::{Cell, RefCell};
 use std::env;
-use std::cell::{RefCell, Cell};
-use std::str::FromStr;
+use std::ffi::{self, CStr, CString};
+use std::fmt;
 use std::rc::Rc;
+use std::str::FromStr;
 
+use crate::command::*;
 use crate::frame::{FrameIndex, PerFrame, FRAMES_IN_FLIGHT};
 use crate::resource::*;
-use crate::command::*;
 
 use rendi_math::prelude::*;
 use rendi_res::Res;
 
 pub struct Renderer {
     pub device: Rc<Device>,
-
     pub swapchain: Res<Swapchain>,
-
     frame_queue: FrameQueue,
-
     graphics_queue: Res<Queue>,
     transfer_queue: Res<Queue>,
     compute_queue: Res<Queue>,
@@ -39,9 +37,7 @@ impl Renderer {
     pub fn new(window: &winit::window::Window) -> Result<Self> {
         let validate = env::var("RENDINATOR_VALIDATE")
             .as_ref()
-            .map_or(false, |var| {
-                bool::from_str(var).unwrap_or(false)
-            });
+            .map_or(false, |var| bool::from_str(var).unwrap_or(false));
 
         let instance = Rc::new(Instance::new(validate)?);
         let physical = PhysicalDevice::select(&instance)?;
@@ -58,13 +54,14 @@ impl Renderer {
             .get_queue_req(QueueRequestKind::Compute)
             .ok_or_else(|| anyhow!("can't find valid compute queue"))?;
 
-        let device = Rc::new(Device::new(instance, physical, &[
-            &graphics_queue_req,
-            &transfer_queue_req,
-            &compute_queue_req,
-        ])?);
+        let device = Rc::new(Device::new(
+            instance,
+            physical,
+            &[&graphics_queue_req, &transfer_queue_req, &compute_queue_req],
+        )?);
 
-        let static_pool = ResourcePool::with_block_size(device.clone(), 50 * 1024 * 1024, 1024 * 1024);
+        let static_pool =
+            ResourcePool::with_block_size(device.clone(), 50 * 1024 * 1024, 1024 * 1024);
         let pool = ResourcePool::with_block_size(device.clone(), 10 * 1024 * 1024, 1024 * 1024);
 
         let graphics_queue = pool.alloc(Queue::new(device.clone(), &graphics_queue_req)?);
@@ -109,7 +106,9 @@ impl Renderer {
         let frame = self.frame_queue.current_frame();
 
         unsafe {
-            self.device.handle.wait_for_fences(&[frame.ready_to_draw], true, u64::MAX)?;
+            self.device
+                .handle
+                .wait_for_fences(&[frame.ready_to_draw], true, u64::MAX)?;
             frame.command_buffer.reset()?;
         }
 
@@ -121,22 +120,29 @@ impl Renderer {
                 panic!("out of date swapchain");
             };
 
-            unsafe { self.device.handle.reset_fences(&[frame.ready_to_draw])?; }
+            unsafe {
+                self.device.handle.reset_fences(&[frame.ready_to_draw])?;
+            }
 
-            frame.command_buffer.record(SubmitCount::OneTime, |recorder| {
-                let swapchain_image = self.swapchain.image(image_index);
-                render(&recorder, frame.index, swapchain_image.clone());
-            })?;
+            frame
+                .command_buffer
+                .record(SubmitCount::OneTime, |recorder| {
+                    let swapchain_image = self.swapchain.image(image_index);
+                    render(&recorder, frame.index, swapchain_image.clone());
+                })?;
 
             // Submit command buffer to be rendered. Wait for semaphore `frame.presented` first and
             // signals `frame.rendered´ and `frame.ready_to_draw` when all commands have been
             // executed.
-            self.graphics_queue.submit_wait(&frame.command_buffer, SubmitWaitInfo {
-                wait_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
-                fence: frame.ready_to_draw,
-                signal: frame.rendered,
-                wait: frame.presented,
-            })?;
+            self.graphics_queue.submit_wait(
+                &frame.command_buffer,
+                SubmitWaitInfo {
+                    wait_stage: vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                    fence: frame.ready_to_draw,
+                    signal: frame.rendered,
+                    wait: frame.presented,
+                },
+            )?;
 
             // Wait for the frame to be rendered before presenting it to the surface.
             unsafe {
@@ -149,7 +155,9 @@ impl Renderer {
                     .swapchains(&swapchains)
                     .image_indices(&indices);
 
-                let res = self.swapchain.loader
+                let res = self
+                    .swapchain
+                    .loader
                     .queue_present(self.transfer_queue.handle, &present_info)
                     .unwrap_or_else(|err| {
                         if let vk::Result::ERROR_OUT_OF_DATE_KHR = err {
@@ -174,7 +182,7 @@ impl Renderer {
 
     pub fn exec<F, R>(&self, queue: Res<Queue>, func: F) -> Result<R>
     where
-        F: FnOnce(&CommandRecorder) -> R
+        F: FnOnce(&CommandRecorder) -> R,
     {
         let buffer = CommandBuffer::new(self.device.clone(), queue)?;
         let ret = buffer.record(SubmitCount::OneTime, func)?;
@@ -185,7 +193,7 @@ impl Renderer {
     /// Record and submut a command seqeunce to `Self::transfer_queue`.
     pub fn transfer_with<F, R>(&self, func: F) -> Result<R>
     where
-        F: FnOnce(&CommandRecorder) -> R
+        F: FnOnce(&CommandRecorder) -> R,
     {
         self.exec(self.transfer_queue.clone(), func)
     }
@@ -193,7 +201,7 @@ impl Renderer {
     /// Record and submut a command seqeunce to `Self::compute_queue`.
     pub fn compute_with<F, R>(&self, func: F) -> Result<R>
     where
-        F: FnOnce(&CommandRecorder) -> R
+        F: FnOnce(&CommandRecorder) -> R,
     {
         self.exec(self.compute_queue.clone(), func)
     }
@@ -206,7 +214,7 @@ impl Renderer {
     pub fn graphics_queue(&self) -> Res<Queue> {
         self.graphics_queue.clone()
     }
-    
+
     /// Handle window resize. The extent of the swapchain and framebuffers will we match that of
     /// `window`.
     pub fn resize(&mut self, window: &winit::window::Window) -> Result<()> {
@@ -278,25 +286,18 @@ impl Instance {
             let ext_names = [
                 ext::DebugUtils::name().as_ptr(),
                 khr::Surface::name().as_ptr(),
-
                 #[cfg(target_os = "windows")]
                 khr::Win32Surface::name().as_ptr(),
-
                 #[cfg(target_os = "linux")]
                 khr::WaylandSurface::name().as_ptr(),
-
                 #[cfg(target_os = "linux")]
                 khr::XlibSurface::name().as_ptr(),
-
                 #[cfg(target_os = "linux")]
                 khr::XcbSurface::name().as_ptr(),
-
                 #[cfg(target_os = "macos")]
                 ext::MetalSurface::name().as_ptr(),
-
                 #[cfg(target_os = "macos")]
                 vk::KhrPortabilityEnumerationFn::name().as_ptr(),
-
                 #[cfg(target_os = "macos")]
                 vk::KhrGetPhysicalDeviceProperties2Fn::name().as_ptr(),
             ];
@@ -318,15 +319,22 @@ impl Instance {
         };
 
         let messenger = DebugMessenger::new(&entry, &handle, &debug_info)?;
-        
-        Ok(Self { entry, handle, messenger, layers })
+
+        Ok(Self {
+            entry,
+            handle,
+            messenger,
+            layers,
+        })
     }
 }
 
 impl Drop for Instance {
     fn drop(&mut self) {
         unsafe {
-            self.messenger.loader.destroy_debug_utils_messenger(self.messenger.handle, None);
+            self.messenger
+                .loader
+                .destroy_debug_utils_messenger(self.messenger.handle, None);
             self.handle.destroy_instance(None);
         }
     }
@@ -342,7 +350,8 @@ pub struct PhysicalDevice {
 impl PhysicalDevice {
     pub fn select(instance: &Instance) -> Result<Self> {
         let handle = unsafe {
-            instance.handle
+            instance
+                .handle
                 .enumerate_physical_devices()?
                 .into_iter()
                 .max_by_key(|dev| {
@@ -353,7 +362,7 @@ impl PhysicalDevice {
                         .unwrap_or("invalid")
                         .to_string();
 
-                    println!("device candicate: {name}");
+                    println!("device candidate: {name}");
 
                     let mut score = properties.limits.max_image_dimension2_d;
 
@@ -375,18 +384,25 @@ impl PhysicalDevice {
         };
 
         let memory_properties = unsafe {
-            instance.handle.get_physical_device_memory_properties(handle)
+            instance
+                .handle
+                .get_physical_device_memory_properties(handle)
         };
 
-        let properties = unsafe {
-            instance.handle.get_physical_device_properties(handle)
-        };
+        let properties = unsafe { instance.handle.get_physical_device_properties(handle) };
 
         let queue_properties = unsafe {
-            instance.handle.get_physical_device_queue_family_properties(handle)
+            instance
+                .handle
+                .get_physical_device_queue_family_properties(handle)
         };
 
-        Ok(Self { handle, memory_properties, properties, queue_properties })
+        Ok(Self {
+            handle,
+            memory_properties,
+            properties,
+            queue_properties,
+        })
     }
 
     pub fn get_queue_req(&self, kind: QueueRequestKind) -> Option<QueueRequest> {
@@ -396,38 +412,39 @@ impl PhysicalDevice {
                 // problem in reallity.
                 let flags = vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE;
 
-                self.queue_properties
-                    .iter()
-                    .enumerate()
-                    .position(|(i, p)| {
-                        p.queue_flags.contains(flags)
-                            && unsafe {
-                                surface.loader
-                                    .get_physical_device_surface_support(
-                                        self.handle, i as u32, surface.handle,
-                                    )
-                                    .unwrap_or(false)
-                            }
-                    })
+                self.queue_properties.iter().enumerate().position(|(i, p)| {
+                    p.queue_flags.contains(flags)
+                        && unsafe {
+                            surface
+                                .loader
+                                .get_physical_device_surface_support(
+                                    self.handle,
+                                    i as u32,
+                                    surface.handle,
+                                )
+                                .unwrap_or(false)
+                        }
+                })
             }
-            QueueRequestKind::Transfer => {
-                self.queue_properties
-                    .iter()
-                    .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER))
-            }
-            QueueRequestKind::Compute => {
-                self.queue_properties
-                    .iter()
-                    .position(|p| p.queue_flags.contains(vk::QueueFlags::COMPUTE))
-            }
+            QueueRequestKind::Transfer => self
+                .queue_properties
+                .iter()
+                .position(|p| p.queue_flags.contains(vk::QueueFlags::TRANSFER)),
+            QueueRequestKind::Compute => self
+                .queue_properties
+                .iter()
+                .position(|p| p.queue_flags.contains(vk::QueueFlags::COMPUTE)),
         };
 
         index.map(|family_index| {
             let flags = self.queue_properties[family_index].queue_flags;
-            QueueRequest { flags, family_index: family_index as u32 }
+            QueueRequest {
+                flags,
+                family_index: family_index as u32,
+            }
         })
     }
-    
+
     pub fn get_memory_type_index(
         &self,
         type_bits: u32,
@@ -445,7 +462,6 @@ impl PhysicalDevice {
             .map(|i| i as u32)
     }
 }
-
 
 /// The device and data connected to the device used for rendering. This struct data is static
 /// after creation and doesn't depend on external factors such as display size.
@@ -478,9 +494,7 @@ impl Device {
 
         let extensions = [
             khr::Swapchain::name().as_ptr(),
-
             khr::PushDescriptor::name().as_ptr(),
-
             #[cfg(target_os = "macos")]
             vk::KhrPortabilitySubsetFn::name().as_ptr(),
         ];
@@ -512,10 +526,7 @@ impl Device {
             .synchronization2(true)
             .build();
 
-        let layer_names: Vec<_> = instance.layers
-            .iter()
-            .map(|layer| layer.as_ptr())
-            .collect();
+        let layer_names: Vec<_> = instance.layers.iter().map(|layer| layer.as_ptr()).collect();
 
         let device_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(&queue_infos)
@@ -527,10 +538,16 @@ impl Device {
             .push_next(&mut vk13_features);
 
         let handle = unsafe {
-            instance.handle.create_device(physical.handle, &device_info, None)?
+            instance
+                .handle
+                .create_device(physical.handle, &device_info, None)?
         };
 
-        Ok(Self { instance, physical, handle })
+        Ok(Self {
+            instance,
+            physical,
+            handle,
+        })
     }
 
     /// Get the sample count for msaa. For now it just the highest sample count the device
@@ -560,7 +577,9 @@ impl Device {
 
     pub fn wait_until_idle(&self) {
         unsafe {
-            self.handle.device_wait_idle().expect("failed waiting for idle device");
+            self.handle
+                .device_wait_idle()
+                .expect("failed waiting for idle device");
         }
     }
 }
@@ -614,7 +633,6 @@ pub struct Queue {
     flags: vk::QueueFlags,
 
     family_index: u32,
-
     device: Rc<Device>,
 }
 
@@ -631,7 +649,13 @@ impl Queue {
             (pool, handle)
         };
 
-        Ok(Self { handle, flags: req.flags, family_index: req.family_index, device, pool })
+        Ok(Self {
+            handle,
+            flags: req.flags,
+            family_index: req.family_index,
+            device,
+            pool,
+        })
     }
 
     pub fn family_index(&self) -> u32 {
@@ -644,25 +668,26 @@ impl Queue {
 
     pub fn submit_wait_idle(&self, buffer: &CommandBuffer) -> Result<()> {
         assert_eq!(
-            self.family_index,
-            buffer.queue.family_index,
+            self.family_index, buffer.queue.family_index,
             "command buffer is not created from queue",
         );
 
         let buffers = [buffer.handle];
-        let submit_infos = [vk::SubmitInfo::builder()
-            .command_buffers(&buffers)
-            .build()];
+        let submit_infos = [vk::SubmitInfo::builder().command_buffers(&buffers).build()];
 
         unsafe {
-            self.device.handle.queue_submit(
-                self.handle,
-                &submit_infos,
-                vk::Fence::null(),
-            )?;
+            self.device
+                .handle
+                .queue_submit(self.handle, &submit_infos, vk::Fence::null())?;
         }
 
         self.wait_idle()
+    }
+}
+
+impl fmt::Debug for Queue {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Queue").field("flags", &self.flags).finish()
     }
 }
 
@@ -676,8 +701,7 @@ pub struct SubmitWaitInfo {
 impl Queue {
     pub fn submit_wait(&self, buffer: &CommandBuffer, info: SubmitWaitInfo) -> Result<()> {
         assert_eq!(
-            self.family_index,
-            buffer.queue.family_index,
+            self.family_index, buffer.queue.family_index,
             "command buffer is not created from queue",
         );
 
@@ -694,21 +718,20 @@ impl Queue {
             .build()];
 
         unsafe {
-            self.device.handle.queue_submit(
-                self.handle,
-                &submit_info,
-                info.fence,
-            )?;
+            self.device
+                .handle
+                .queue_submit(self.handle, &submit_info, info.fence)?;
         }
 
         Ok(())
     }
-
 }
 
 impl Drop for Queue {
     fn drop(&mut self) {
-        unsafe { self.device.handle.destroy_command_pool(self.pool, None); }
+        unsafe {
+            self.device.handle.destroy_command_pool(self.pool, None);
+        }
     }
 }
 
@@ -735,20 +758,20 @@ impl Frame {
     fn new(device: &Device, index: FrameIndex, command_buffer: CommandBuffer) -> Result<Self> {
         let semaphore_info = vk::SemaphoreCreateInfo::builder();
 
-        let presented = unsafe {
-            device.handle.create_semaphore(&semaphore_info, None)?
-        };
+        let presented = unsafe { device.handle.create_semaphore(&semaphore_info, None)? };
 
-        let rendered = unsafe {
-            device.handle.create_semaphore(&semaphore_info, None)?
-        };
+        let rendered = unsafe { device.handle.create_semaphore(&semaphore_info, None)? };
 
         let fence_info = vk::FenceCreateInfo::builder().flags(vk::FenceCreateFlags::SIGNALED);
-        let ready_to_draw = unsafe {
-            device.handle.create_fence(&fence_info, None)?
-        };
+        let ready_to_draw = unsafe { device.handle.create_fence(&fence_info, None)? };
 
-        Ok(Self { presented, rendered, ready_to_draw, command_buffer, index })
+        Ok(Self {
+            presented,
+            rendered,
+            ready_to_draw,
+            command_buffer,
+            index,
+        })
     }
 }
 
@@ -774,7 +797,12 @@ impl FrameQueue {
 
         let frame_index = Cell::default();
 
-        Ok(Self { frames, frame_index, device, graphics_queue })
+        Ok(Self {
+            frames,
+            frame_index,
+            device,
+            graphics_queue,
+        })
     }
 
     pub fn next_frame(&self) {
@@ -875,7 +903,11 @@ impl Surface {
             }
         };
 
-        Ok(Self { handle: handle?, loader, instance })
+        Ok(Self {
+            handle: handle?,
+            loader,
+            instance,
+        })
     }
 }
 
@@ -920,22 +952,14 @@ impl Swapchain {
         let (surface_formats, present_modes, surface_caps) = unsafe {
             let format = surface
                 .loader
-                .get_physical_device_surface_formats(
-                    device.physical.handle,
-                    surface.handle,
-                )?;
-            let modes = surface
-                .loader
-                .get_physical_device_surface_present_modes(
-                    device.physical.handle,
-                    surface.handle,
-                )?;
+                .get_physical_device_surface_formats(device.physical.handle, surface.handle)?;
+            let modes = surface.loader.get_physical_device_surface_present_modes(
+                device.physical.handle,
+                surface.handle,
+            )?;
             let caps = surface
                 .loader
-                .get_physical_device_surface_capabilities(
-                    device.physical.handle,
-                    surface.handle,
-                )?;
+                .get_physical_device_surface_capabilities(device.physical.handle, surface.handle)?;
             (format, modes, caps)
         };
 
@@ -989,7 +1013,7 @@ impl Swapchain {
             .image_extent(extent)
             .image_array_layers(1);
         let loader = khr::Swapchain::new(&device.instance.handle, &device.handle);
-        
+
         let handle = unsafe { loader.create_swapchain(&swapchain_info, None)? };
         let images = unsafe { loader.get_swapchain_images(handle)? };
 
@@ -998,19 +1022,22 @@ impl Swapchain {
         let images: Result<Vec<_>> = images
             .into_iter()
             .map(|handle| {
-                let image = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
-                    usage: vk::ImageUsageFlags::TRANSFER_DST
-                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    aspect_flags: vk::ImageAspectFlags::COLOR,
-                    kind: ImageKind::Swapchain { handle },
-                    format: surface_format.format,
-                    mip_levels: 1,
-                    extent: vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
-                        depth: 1,
+                let image = pool.create_image(
+                    MemoryLocation::Gpu,
+                    &ImageInfo {
+                        usage: vk::ImageUsageFlags::TRANSFER_DST
+                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                        aspect_flags: vk::ImageAspectFlags::COLOR,
+                        kind: ImageKind::Swapchain { handle },
+                        format: surface_format.format,
+                        mip_levels: 1,
+                        extent: vk::Extent3D {
+                            width: extent.width,
+                            height: extent.height,
+                            depth: 1,
+                        },
                     },
-                })?;
+                )?;
 
                 pool.create_image_view(&ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
@@ -1044,10 +1071,12 @@ impl Swapchain {
         }
 
         let surface_caps = unsafe {
-            self.surface.loader.get_physical_device_surface_capabilities(
-                self.device.physical.handle,
-                self.surface.handle,
-            )?
+            self.surface
+                .loader
+                .get_physical_device_surface_capabilities(
+                    self.device.physical.handle,
+                    self.surface.handle,
+                )?
         };
 
         let queue_families = [self.graphics_queue.family_index];
@@ -1082,19 +1111,22 @@ impl Swapchain {
         let images: Result<Vec<_>> = images
             .into_iter()
             .map(|handle| {
-                let image = pool.create_image(MemoryLocation::Gpu, &ImageInfo {
-                    usage: vk::ImageUsageFlags::TRANSFER_DST
-                        | vk::ImageUsageFlags::COLOR_ATTACHMENT,
-                    aspect_flags: vk::ImageAspectFlags::COLOR,
-                    kind: ImageKind::Swapchain { handle },
-                    format: self.surface_format.format,
-                    mip_levels: 1,
-                    extent: vk::Extent3D {
-                        width: extent.width,
-                        height: extent.height,
-                        depth: 1,
+                let image = pool.create_image(
+                    MemoryLocation::Gpu,
+                    &ImageInfo {
+                        usage: vk::ImageUsageFlags::TRANSFER_DST
+                            | vk::ImageUsageFlags::COLOR_ATTACHMENT,
+                        aspect_flags: vk::ImageAspectFlags::COLOR,
+                        kind: ImageKind::Swapchain { handle },
+                        format: self.surface_format.format,
+                        mip_levels: 1,
+                        extent: vk::Extent3D {
+                            width: extent.width,
+                            height: extent.height,
+                            depth: 1,
+                        },
                     },
-                })?;
+                )?;
 
                 pool.create_image_view(&ImageViewInfo {
                     view_type: vk::ImageViewType::TYPE_2D,
@@ -1125,9 +1157,7 @@ impl Swapchain {
 
         match next_image {
             // The image is up to date.
-            Ok((image_index, false)) => {
-                Ok(NextSwapchainImage::UpToDate { image_index })
-            },
+            Ok((image_index, false)) => Ok(NextSwapchainImage::UpToDate { image_index }),
 
             // The image is suboptimal or unavailable.
             Ok((_, true)) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {

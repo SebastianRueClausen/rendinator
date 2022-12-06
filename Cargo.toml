@@ -27,3 +27,7 @@ rendi_data_structs = { path = "crates/rendi_data_structs/" }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-metal = "0.2.0"
+
+[dev-dependencies]
+shaderc = "0.8.0"
+rand = "0.8.5"

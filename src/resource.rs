@@ -124,6 +124,16 @@ pub struct MemoryBlock {
 }
 
 impl MemoryBlock {
+    #[cfg(test)]
+    pub unsafe fn null(device: Rc<Device>, size: vk::DeviceSize) -> Self {
+        Self {
+            handle: vk::DeviceMemory::null(),
+            mapped: Cell::default(),
+            device,
+            size,
+        }
+    }
+
     fn new(device: Rc<Device>, info: &vk::MemoryAllocateInfo) -> Result<Self> {
         let handle = unsafe { device.handle.allocate_memory(info, None)? };
 
@@ -185,10 +195,20 @@ pub struct BufferInfo {
     pub size: u64,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BufferKind {
     Storage,
     Uniform,
+}
+
+impl fmt::Display for BufferKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            BufferKind::Uniform => "uniform",
+            BufferKind::Storage => "storage",
+        };
+        write!(f, "{name}")
+    }
 }
 
 impl Into<DescKind> for BufferKind {
@@ -196,6 +216,16 @@ impl Into<DescKind> for BufferKind {
         match self {
             BufferKind::Storage => DescKind::StorageBuffer,
             BufferKind::Uniform => DescKind::UniformBuffer,
+        }
+    }
+}
+
+impl From<vk::BufferUsageFlags> for BufferKind {
+    fn from(flags: vk::BufferUsageFlags) -> Self {
+        if flags.contains(vk::BufferUsageFlags::UNIFORM_BUFFER) {
+            BufferKind::Uniform
+        } else {
+            BufferKind::Storage
         }
     }
 }
@@ -212,6 +242,20 @@ pub struct Buffer {
 }
 
 impl ResourcePool {
+    #[cfg(test)]
+    pub unsafe fn create_invalid_buffer(&self, info: &BufferInfo) -> Res<Buffer> {
+        let block = unsafe { Rc::new(MemoryBlock::null(self.device.clone(), info.size)) };
+        let handle = vk::Buffer::from_raw(rand::random());
+
+        self.alloc_buffer(Buffer {
+            kind: info.usage.into(),
+            device: self.device.clone(),
+            range: 0..info.size,
+            handle,
+            block,
+        })
+    }
+
     pub fn create_buffer(&self, loc: MemoryLocation, info: &BufferInfo) -> Result<Res<Buffer>> {
         let buffer = unsafe {
             let info = vk::BufferCreateInfo::builder()
@@ -293,21 +337,27 @@ impl Hash for Buffer {
     }
 }
 
+impl fmt::Debug for Buffer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Buffer")
+            .field("kind", &self.kind())
+            .field("size", &self.size())
+            .finish()
+    }
+}
+
 /// The kind of image.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ImageKind {
     /// Standard 2D texture.
     Texture,
-
     /// 6-layer cubemap.
     CubeMap,
-
     /// Render target. Either color or depth.
     RenderTarget {
         samples: vk::SampleCountFlags,
         queue: Res<Queue>,
     },
-
     Swapchain {
         handle: vk::Image,
     },
@@ -392,6 +442,32 @@ pub struct Image {
 }
 
 impl ResourcePool {
+    #[cfg(test)]
+    pub unsafe fn create_invalid_image(
+        &self,
+        size: vk::DeviceSize,
+        info: &ImageInfo,
+    ) -> Res<Image> {
+        let block = unsafe { Rc::new(MemoryBlock::null(self.device.clone(), size)) };
+        let handle = vk::Image::from_raw(rand::random());
+        let storage = ImageStorage::Block {
+            range: 0..size,
+            block,
+        };
+
+        self.alloc_image(Image {
+            layout: vk::ImageLayout::UNDEFINED.into(),
+            kind: info.kind.clone(),
+            device: self.device.clone(),
+            mip_levels: info.mip_levels,
+            aspect_flags: info.aspect_flags,
+            extent: info.extent,
+            format: info.format,
+            storage,
+            handle,
+        })
+    }
+
     pub fn create_image(&self, loc: MemoryLocation, info: &ImageInfo) -> Result<Res<Image>> {
         let (array_layers, flags) = if let ImageKind::CubeMap = info.kind {
             (6, vk::ImageCreateFlags::CUBE_COMPATIBLE)
@@ -561,6 +637,18 @@ impl Hash for Image {
     }
 }
 
+impl fmt::Debug for Image {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Image")
+            .field("size", &self.size())
+            .field("extent", &self.extent(0))
+            .field("format", &self.format())
+            .field("mip_level_count", &self.mip_level_count())
+            .field("layout", &self.layout())
+            .finish()
+    }
+}
+
 pub struct ImageViewInfo {
     pub image: Res<Image>,
     pub view_type: vk::ImageViewType,
@@ -574,6 +662,15 @@ pub struct ImageView {
 }
 
 impl ResourcePool {
+    #[cfg(test)]
+    pub unsafe fn create_invalid_image_view(&self, info: &ImageViewInfo) -> Res<ImageView> {
+        self.alloc_image_view(ImageView {
+            handle: vk::ImageView::from_raw(rand::random()),
+            image: info.image.clone(),
+            mips: info.mips.clone(),
+        })
+    }
+
     pub fn create_image_view(&self, info: &ImageViewInfo) -> Result<Res<ImageView>> {
         assert!(
             info.image.mip_level_count() >= info.mips.end,
@@ -1234,6 +1331,14 @@ impl DescPool {
 
         Ok(Self { handle, device })
     }
+
+    #[cfg(test)]
+    pub unsafe fn null(device: Rc<Device>) -> Self {
+        Self {
+            handle: vk::DescriptorPool::null(),
+            device,
+        }
+    }
 }
 
 impl Drop for DescPool {
@@ -1299,6 +1404,23 @@ impl DescLayoutSlots {
     }
 }
 
+impl fmt::Debug for DescLayoutSlots {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        #[derive(Debug)]
+        struct Binding {
+            #[allow(dead_code)]
+            binding: u32,
+            ty: vk::DescriptorType,
+        }
+        f.debug_list()
+            .entries(self.bindings.iter().map(|binding| Binding {
+                binding: binding.binding,
+                ty: binding.descriptor_type,
+            }))
+            .finish()
+    }
+}
+
 pub struct DescLayout {
     pub handle: vk::DescriptorSetLayout,
     slots: DescLayoutSlots,
@@ -1335,13 +1457,11 @@ impl DescLayout {
 impl ResourcePool {
     pub fn create_desc_layout(&self, slots: &[DescLayoutSlot]) -> Result<Res<DescLayout>> {
         let shared = unsafe { self.get_shared() };
-
         if let Some(layout) = shared.desc_layouts.get(slots) {
             return Ok(layout);
         }
 
         let layout = self.alloc(DescLayout::new(self.device.clone(), slots)?);
-
         shared.desc_layouts.insert(slots, layout.clone());
 
         Ok(layout)
@@ -1355,6 +1475,14 @@ impl Drop for DescLayout {
                 .handle
                 .destroy_descriptor_set_layout(self.handle, None);
         }
+    }
+}
+
+impl fmt::Debug for DescLayout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DescLayout")
+            .field("layout_slots", &self.slots)
+            .finish()
     }
 }
 
@@ -1795,9 +1923,6 @@ impl ResourcePool {
         }
     }
 
-    /// Allocate item from CPU memory pool.
-    #[inline]
-    #[must_use]
     pub fn alloc<T>(&self, val: T) -> Res<T> {
         unsafe { self.get_shared().bump.alloc::<T>(val) }
     }

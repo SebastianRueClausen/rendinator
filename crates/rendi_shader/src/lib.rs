@@ -5,7 +5,6 @@ pub mod desc;
 
 use anyhow::{anyhow, Result};
 use ash::vk;
-
 use std::slice;
 
 pub use crate::desc::{BindSlot, DescAccess, DescBind, DescCount, DescKind};
@@ -15,15 +14,25 @@ use rendi_data_structs::SortedMap;
 pub enum ShaderStage {
     /// Compute shader.
     Compute,
-
     /// Fragment shader.
     Fragment,
-
     /// Vertex shader.
     Vertex,
-
     /// Both vertex and fragment shader.
     Raster,
+}
+
+impl Into<vk::PipelineStageFlags2> for ShaderStage {
+    fn into(self) -> vk::PipelineStageFlags2 {
+        use vk::PipelineStageFlags2 as Stage;
+
+        match self {
+            ShaderStage::Compute => Stage::COMPUTE_SHADER,
+            ShaderStage::Fragment => Stage::FRAGMENT_SHADER,
+            ShaderStage::Vertex => Stage::VERTEX_SHADER,
+            ShaderStage::Raster => Stage::FRAGMENT_SHADER | Stage::VERTEX_SHADER,
+        }
+    }
 }
 
 /// The base kind of an shader input.
@@ -776,16 +785,22 @@ impl DescSet {
         self.binds.get(&binding)
     }
 
-    pub fn max_bind(&self) -> Option<u32> {
+    pub fn max_bind_num(&self) -> Option<u32> {
         self.binds.last_key_value().map(|(k, _)| *k)
     }
 
-    pub fn min_bind(&self) -> Option<u32> {
+    pub fn min_bind_num(&self) -> Option<u32> {
         self.binds.first_key_value().map(|(k, _)| *k)
     }
 
     pub fn binds(&self) -> impl Iterator<Item = &(u32, DescBind)> {
         self.binds.iter()
+    }
+
+    /// Return the bind number of the unbound bind if there is any.
+    pub fn unbound_bind(&self) -> Option<u32> {
+        let (num, bind) = self.binds.last_key_value()?;
+        matches!(bind.count(), DescCount::Unbound).then_some(*num)
     }
 }
 
@@ -1175,7 +1190,7 @@ mod test {
     use super::*;
     use shaderc::{CompileOptions, Compiler, ShaderKind, SpirvVersion};
 
-    fn compile(kind: ShaderKind, src: &str) -> Vec<u32> {
+    pub fn compile(kind: ShaderKind, src: &str) -> Vec<u32> {
         let mut options = CompileOptions::new().unwrap();
         options.set_target_spirv(SpirvVersion::V1_6);
         Compiler::new()

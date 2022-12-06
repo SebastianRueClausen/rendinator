@@ -1,19 +1,27 @@
+#![allow(dead_code)]
+
+mod cmd;
+
 use ahash::HashMap;
 use ash::vk;
 use smallvec::SmallVec;
 use thiserror::Error;
 
+use std::cell::Cell;
+use std::fmt;
 use std::rc::Rc;
 
 use crate::resource::{
-    Buffer, ComputePipeline, ComputeProg, DescLayout, DescPool, Image, ImageLayout, ImageView,
-    PipelineLayout, Prog, RasterPipeline, RasterProg, ResourcePool, Sampler,
+    Buffer, ComputePipeline, ComputeProg, DescLayout, DescPool, Image, ImageInfo, ImageKind,
+    ImageLayout, ImageView, ImageViewInfo, PipelineLayout, Prog, RasterPipeline, RasterProg,
+    ResourcePool, Sampler,
 };
+use cmd::Cmd;
 use rendi_data_structs::SortedMap;
 use rendi_res::{Bump, Res};
-use rendi_shader::{BindSlot, DescAccess, DescBind, DescCount, DescKind, ShaderStage};
+use rendi_shader::{BindSlot, DescAccess, DescCount, DescKind};
 
-#[derive(Error, Debug)]
+#[derive(Error, Debug, Clone, PartialEq)]
 pub enum PassBuildError {
     /// A descriptor bind slot in the shader wasn't bound.
     #[error("missing resource at {0}")]
@@ -54,56 +62,52 @@ pub enum PassBuildError {
     #[error("both storage and uniform buffers bound to {slot}")]
     MultiBufferKind { slot: BindSlot },
 
-    #[error("failed creating pass: {0}")]
-    VulkanError(#[from] anyhow::Error),
+    #[error("vulkan error")]
+    VulkanError,
 }
 
-enum BoundRes {
-    ImageView {
-        sampler: Option<Res<Sampler>>,
-        image_view: Res<ImageView>,
-    },
-    Buffer {
-        buffer: Res<Buffer>,
-    },
-    ImageViews {
-        sampler: Option<Res<Sampler>>,
-        image_views: Vec<Res<ImageView>>,
-    },
-    Buffers {
-        buffers: Vec<Res<Buffer>>,
-    },
+type BoundStorage<T> = SmallVec<[T; 1]>;
+
+enum BoundResource {
+    ImageView(Option<Res<Sampler>>, BoundStorage<Res<ImageView>>),
+    Buffer(BoundStorage<Res<Buffer>>),
 }
 
-impl BoundRes {
-    fn variable_length(&self) -> Option<usize> {
-        match self {
-            BoundRes::ImageViews { image_views, .. } => image_views.len().into(),
-            BoundRes::Buffers { buffers, .. } => buffers.len().into(),
-            _ => None,
-        }
+impl BoundResource {
+    /// The number of bound resources.
+    fn count(&self) -> u32 {
+        let count = match self {
+            BoundResource::ImageView(_, views) => views.len(),
+            BoundResource::Buffer(buffers) => buffers.len(),
+        };
+
+        count as u32
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Stage {
-    None,
-    Shader { stage: ShaderStage },
+struct Bound {
+    count: DescCount,
+    kind: Option<DescKind>,
+    resource: BoundResource,
 }
 
-impl From<ShaderStage> for Stage {
-    fn from(stage: ShaderStage) -> Self {
-        Stage::Shader { stage }
+impl Bound {
+    fn desc_count(&self) -> DescCount {
+        self.count
+    }
+
+    fn desc_kind(&self) -> Option<DescKind> {
+        self.kind
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct ImageAccess {
     input_layout: ImageLayout,
     output_layout: ImageLayout,
 
-    access: DescAccess,
-    stage: Stage,
+    access: vk::AccessFlags2,
+    stage: vk::PipelineStageFlags2,
 }
 
 impl ImageAccess {
@@ -113,48 +117,32 @@ impl ImageAccess {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Debug, Clone, Copy)]
 struct BufferAccess {
-    access: DescAccess,
-    stage: Stage,
+    access: vk::AccessFlags2,
+    stage: vk::PipelineStageFlags2,
 }
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct Accesses {
     images: HashMap<Res<Image>, ImageAccess>,
     buffers: HashMap<Res<Buffer>, BufferAccess>,
 }
 
 fn is_access_dependecy(src: DescAccess, dst: DescAccess) -> bool {
-    match (src, dst) {
-        (DescAccess::WRITE, DescAccess::READ)
-        | (DescAccess::WRITE, DescAccess::WRITE)
-        | (DescAccess::READ, DescAccess::WRITE) => true,
-        _ => false,
+    if src.writes() && dst.reads() {
+        return true;
     }
-}
 
-pub struct BufferBarrier {
-    pub buffer: Res<Buffer>,
+    if src.reads() && dst.writes() {
+        return true;
+    }
 
-    pub src_access: DescAccess,
-    pub dst_access: DescAccess,
+    if src.writes() && dst.writes() {
+        return true;
+    }
 
-    pub src_stage: Stage,
-    pub dst_stage: Stage,
-}
-
-pub struct ImageBarrier {
-    pub image: Res<Image>,
-
-    pub src_access: DescAccess,
-    pub dst_access: DescAccess,
-
-    pub src_layout: ImageLayout,
-    pub dst_layout: ImageLayout,
-
-    pub src_stage: Stage,
-    pub dst_stage: Stage,
+    false
 }
 
 impl Accesses {
@@ -200,27 +188,33 @@ impl Accesses {
         self.images.insert(image, access)
     }
 
-    fn join(&mut self, other: &Self) -> (Vec<BufferBarrier>, Vec<ImageBarrier>) {
+    fn join(&mut self, other: &Self) -> (Vec<cmd::BufferBarrier>, Vec<cmd::ImageBarrier>) {
         let buffer_barriers = other
             .buffers
             .iter()
             .filter_map(|(buffer, dst)| {
                 let Some(src) = self.buffers.get_mut(buffer) else {
                     self.insert_buffer_access(buffer.clone(), dst.clone());
-
                     return None;
                 };
 
-                let barrier = is_access_dependecy(src.access, dst.access).then(|| BufferBarrier {
-                    buffer: buffer.clone(),
-                    src_access: src.access,
-                    dst_access: dst.access,
-                    src_stage: src.stage,
-                    dst_stage: dst.stage,
-                });
+                let barrier =
+                    is_access_dependecy(src.access.into(), dst.access.into()).then(|| {
+                        cmd::BufferBarrier {
+                            buffer: buffer.clone(),
+                            src_access: src.access,
+                            dst_access: dst.access,
+                            src_stage: src.stage,
+                            dst_stage: dst.stage,
+                        }
+                    });
 
-                src.access |= dst.access;
                 src.stage = dst.stage;
+                src.access = if barrier.is_none() {
+                    src.access | dst.access
+                } else {
+                    dst.access
+                };
 
                 barrier
             })
@@ -232,13 +226,12 @@ impl Accesses {
             .filter_map(|(image, dst)| {
                 let Some(src) = self.images.get_mut(image) else {
                     self.insert_image_access(image.clone(), dst.clone());
-
                     return None;
                 };
 
-                let is_dependency = is_access_dependecy(src.access, dst.access);
+                let is_dependency = is_access_dependecy(src.access.into(), dst.access.into());
                 let barrier = (src.output_layout != dst.input_layout || is_dependency).then(|| {
-                    ImageBarrier {
+                    cmd::ImageBarrier {
                         image: image.clone(),
                         src_layout: src.output_layout,
                         dst_layout: src.input_layout,
@@ -249,8 +242,13 @@ impl Accesses {
                     }
                 });
 
-                src.access |= dst.access;
                 src.stage = dst.stage;
+                src.access = if barrier.is_none() {
+                    src.access | dst.access
+                } else {
+                    dst.access
+                };
+
                 src.output_layout = dst.output_layout;
 
                 barrier
@@ -261,442 +259,487 @@ impl Accesses {
     }
 }
 
-struct PassDescs<T> {
-    prog: Res<T>,
-    layout: Res<PipelineLayout>,
-    bound: SortedMap<BindSlot, BoundRes>,
-    accesses: Accesses,
+#[derive(Default)]
+pub struct DescBindings {
+    bound: SortedMap<BindSlot, Bound>,
     error: Option<PassBuildError>,
 }
 
-impl<T: Prog> PassDescs<T> {
-    fn new(layout: Res<PipelineLayout>, prog: Res<T>) -> Self {
-        Self {
-            accesses: Accesses::default(),
-            bound: SortedMap::new(),
-            error: None,
-            layout,
-            prog,
-        }
-    }
-
-    fn update_buffer_access(&mut self, buffer: Res<Buffer>, bind: DescBind) {
-        let flags = self
-            .accesses
-            .get_buffer_access(&buffer)
-            .map_or(bind.access(), |current| current.access | bind.access());
-
-        let access = BufferAccess {
-            stage: bind.stage().into(),
-            access: bind.access(),
-        };
-
-        self.accesses.insert_buffer_access(buffer, access);
-    }
-
-    fn update_image_access(&mut self, image: Res<Image>, bind: DescBind, layout: ImageLayout) {
-        let (access, layout) = if let Some(access) = self.accesses.get_image_access(&image) {
-            debug_assert!(
-                access.has_static_layout(),
-                "image must have static layout in compute or raster pass",
-            );
-
-            if access.input_layout != layout {
-                self.error = Some(PassBuildError::MultiImageLayout {
-                    first: access.input_layout,
-                    second: layout,
-                });
-            }
-
-            (access.access | bind.access(), layout)
-        } else {
-            (bind.access(), layout)
-        };
-
-        let access = ImageAccess {
-            stage: bind.stage().into(),
-            input_layout: layout,
-            output_layout: layout,
-            access,
-        };
-
-        self.accesses.insert_image_access(image, access);
+impl DescBindings {
+    pub fn new() -> Self {
+        Self::default()
     }
 
     #[inline]
-    fn expect_desc_bind(&mut self, slot: BindSlot) -> Option<DescBind> {
-        let binding = self.prog.descs().get_bind(slot).copied();
-
-        if binding.is_none() {
-            self.error = Some(PassBuildError::NoShaderSlot(slot));
-        }
-
-        binding
-    }
-
-    #[inline]
-    fn check_binding_kind(&mut self, slot: BindSlot, is: DescKind, expected: DescKind) {
-        if expected != is {
-            self.error = Some(PassBuildError::WrongBindKind { expected, slot, is });
-        }
-    }
-
-    #[inline]
-    fn check_binding_count(
-        &mut self,
-        slot: BindSlot,
-        is: DescCount,
-        expected: DescCount,
-        count: u32,
-    ) {
-        if is != expected && is != DescCount::Bound(count) {
-            self.error = Some(PassBuildError::WrongBindCount { expected, slot, is });
-        }
-    }
-
-    #[inline]
-    fn bind_resource(&mut self, bind_slot: BindSlot, resource: BoundRes) {
-        if self.bound.insert(bind_slot, resource).is_some() {
+    fn bind_resource(&mut self, bind_slot: BindSlot, bound: Bound) {
+        if self.bound.insert(bind_slot, bound).is_some() {
             self.error = Some(PassBuildError::DuplicateBinding { slot: bind_slot });
         }
     }
 
+    #[inline]
+    #[must_use]
     fn bind_sampled_image_view(
-        &mut self,
-        slot: BindSlot,
+        mut self,
+        slot: impl Into<BindSlot>,
         sampler: Res<Sampler>,
         image_view: Res<ImageView>,
-    ) {
-        let Some(binding) = self.expect_desc_bind(slot) else {
-            return;
-        };
-
-        let image = image_view.image().clone();
-
-        self.check_binding_kind(slot, DescKind::SampledImage, binding.kind());
-        self.check_binding_count(slot, DescCount::Single, binding.count(), 1);
-        self.update_image_access(image, binding, ImageLayout::ShaderRead);
-
+    ) -> Self {
         self.bind_resource(
-            slot,
-            BoundRes::ImageView {
-                sampler: Some(sampler),
-                image_view,
+            slot.into(),
+            Bound {
+                count: DescCount::Single,
+                kind: Some(DescKind::SampledImage),
+                resource: BoundResource::ImageView(
+                    Some(sampler),
+                    BoundStorage::from_buf([image_view]),
+                ),
             },
         );
+        self
     }
 
-    fn bind_image_view(&mut self, slot: BindSlot, image_view: Res<ImageView>) {
-        let Some(binding) = self.expect_desc_bind(slot) else {
-            return;
-        };
-
-        let image = image_view.image().clone();
-
-        self.check_binding_kind(slot, DescKind::StorageImage, binding.kind());
-        self.check_binding_count(slot, DescCount::Single, binding.count(), 1);
-        self.update_image_access(image, binding, ImageLayout::General);
-
+    #[inline]
+    #[must_use]
+    fn bind_image_view(mut self, slot: impl Into<BindSlot>, image_view: Res<ImageView>) -> Self {
         self.bind_resource(
-            slot,
-            BoundRes::ImageView {
-                sampler: None,
-                image_view,
+            slot.into(),
+            Bound {
+                count: DescCount::Single,
+                kind: Some(DescKind::StorageImage),
+                resource: BoundResource::ImageView(None, BoundStorage::from_buf([image_view])),
             },
         );
+        self
     }
 
-    fn bind_buffer(&mut self, slot: BindSlot, buffer: Res<Buffer>) {
-        let Some(binding) = self.expect_desc_bind(slot) else {
-            return;
-        };
-
-        self.check_binding_kind(slot, buffer.kind().into(), binding.kind());
-        self.check_binding_count(slot, DescCount::Single, binding.count(), 1);
-        self.update_buffer_access(buffer.clone(), binding);
-
-        self.bind_resource(slot, BoundRes::Buffer { buffer });
+    #[inline]
+    #[must_use]
+    fn bind_buffer(mut self, slot: impl Into<BindSlot>, buffer: Res<Buffer>) -> Self {
+        self.bind_resource(
+            slot.into(),
+            Bound {
+                count: DescCount::Single,
+                kind: Some(buffer.kind().into()),
+                resource: BoundResource::Buffer(BoundStorage::from_buf([buffer])),
+            },
+        );
+        self
     }
 
-    fn bind_sampled_images(
-        &mut self,
+    #[inline]
+    #[must_use]
+    fn bind_sampled_image_views(
+        mut self,
         slot: BindSlot,
         sampler: Res<Sampler>,
         image_views: &[Res<ImageView>],
-    ) {
-        let count = image_views.len() as u32;
-
-        let Some(binding) = self.expect_desc_bind(slot) else {
-            return;
-        };
-
-        self.check_binding_kind(slot, DescKind::SampledImage, binding.kind());
-        self.check_binding_count(slot, DescCount::Unbound, binding.count(), count);
-
-        for view in image_views {
-            self.update_image_access(view.image().clone(), binding, ImageLayout::ShaderRead);
-        }
-
+    ) -> Self {
         self.bind_resource(
-            slot,
-            BoundRes::ImageViews {
-                sampler: sampler.into(),
-                image_views: image_views.to_vec(),
+            slot.into(),
+            Bound {
+                kind: Some(DescKind::SampledImage),
+                count: DescCount::Bound(image_views.len() as u32),
+                resource: BoundResource::ImageView(Some(sampler), BoundStorage::from(image_views)),
             },
         );
+        self
     }
 
-    fn bind_image_views(&mut self, slot: BindSlot, image_views: &[Res<ImageView>]) {
-        let count = image_views.len() as u32;
-
-        let Some(binding) = self.expect_desc_bind(slot) else {
-            return;
-        };
-
-        self.check_binding_kind(slot, DescKind::SampledImage, binding.kind());
-        self.check_binding_count(slot, DescCount::Unbound, binding.count(), count);
-
-        for view in image_views {
-            self.update_image_access(view.image().clone(), binding, ImageLayout::General);
-        }
-
+    #[inline]
+    #[must_use]
+    fn bind_image_views(
+        mut self,
+        slot: impl Into<BindSlot>,
+        image_views: &[Res<ImageView>],
+    ) -> Self {
         self.bind_resource(
-            slot,
-            BoundRes::ImageViews {
-                image_views: image_views.to_vec(),
-                sampler: None,
+            slot.into(),
+            Bound {
+                kind: Some(DescKind::StorageImage),
+                resource: BoundResource::ImageView(None, BoundStorage::from(image_views)),
+                count: DescCount::Bound(image_views.len() as u32),
             },
         );
+        self
     }
 
-    fn bind_buffers(&mut self, slot: BindSlot, buffers: &[Res<Buffer>]) {
-        let count = buffers.len() as u32;
-
-        let Some(binding) = self.expect_desc_bind(slot) else {
-            return;
-        };
+    #[inline]
+    #[must_use]
+    fn bind_buffers(mut self, slot: impl Into<BindSlot>, buffers: &[Res<Buffer>]) -> Self {
+        let slot = slot.into();
 
         // Check that all buffers are the same kind.
         if !buffers.windows(2).all(|w| w[0].kind() == w[1].kind()) {
             self.error = Some(PassBuildError::MultiBufferKind { slot });
         }
 
-        self.check_binding_count(slot, DescCount::Bound(count), binding.count(), 0);
-
-        for buffer in buffers {
-            self.check_binding_kind(slot, buffer.kind().into(), binding.kind());
-            self.update_buffer_access(buffer.clone(), binding);
-        }
-
         self.bind_resource(
             slot,
-            BoundRes::Buffers {
-                buffers: buffers.to_vec(),
+            Bound {
+                kind: buffers.first().map(|buffer| buffer.kind().into()),
+                resource: BoundResource::Buffer(BoundStorage::from(buffers)),
+                count: DescCount::Bound(buffers.len() as u32),
             },
         );
+        self
+    }
+}
+
+fn check_bind_count(
+    expected: DescCount,
+    is: DescCount,
+    slot: BindSlot,
+) -> Result<(), PassBuildError> {
+    if is == expected || (is.is_bound() && expected.is_unbound()) {
+        return Ok(());
     }
 
-    fn build(self, pool: &ResourcePool) -> Result<(DescSets, Accesses), PassBuildError> {
-        if let Some(error) = self.error {
-            return Err(error);
+    Err(PassBuildError::WrongBindCount { slot, is, expected })
+}
+
+fn check_bind_kind(expected: DescKind, is: DescKind, slot: BindSlot) -> Result<(), PassBuildError> {
+    if expected != is {
+        return Err(PassBuildError::WrongBindKind { expected, slot, is });
+    }
+
+    Ok(())
+}
+
+fn shader_access_flags(access: DescAccess) -> vk::AccessFlags2 {
+    let mut flags = vk::AccessFlags2::empty();
+    if access.reads() {
+        flags |= vk::AccessFlags2::SHADER_READ
+    }
+    if access.writes() {
+        flags |= vk::AccessFlags2::SHADER_WRITE
+    }
+    flags
+}
+
+fn desc_accesses<T: Prog>(
+    bindings: &DescBindings,
+    prog: Res<T>,
+) -> Result<Accesses, PassBuildError> {
+    if let Some(error) = bindings.error.clone() {
+        return Err(error);
+    }
+
+    let mut accesses = Accesses::default();
+    for (bind_slot, bound) in &bindings.bound {
+        let Some(bind) = prog.descs().get_bind(*bind_slot) else {
+            return Err(PassBuildError::NoShaderSlot(*bind_slot))
+        };
+
+        if let Some(bound_kind) = bound.desc_kind() {
+            check_bind_kind(bind.kind(), bound_kind, *bind_slot)?;
         }
 
-        let descs = self.prog.descs();
-        let max_set = descs.max_set().map_or(0, |s| s + 1);
+        check_bind_count(bind.count(), bound.desc_count(), *bind_slot)?;
 
-        let desc_sets: Vec<Option<DescSet>> = (0..max_set)
-            .map(|set_id| {
-                let Some(set) = descs.get_set(set_id) else {
-                    return Ok(None);
-                };
+        match &bound.resource {
+            BoundResource::Buffer(buffers) => {
+                let bind_access = shader_access_flags(bind.access());
 
-                let max_bind = set.max_bind().map_or(0, |b| b + 1);
+                for buffer in buffers {
+                    let access = accesses
+                        .get_buffer_access(&buffer)
+                        .map_or(bind_access, |buffer_access| {
+                            buffer_access.access | bind_access
+                        });
 
-                let resources: Vec<_> = (0..max_bind)
-                    .filter_map(|binding| {
-                        if set.get_bind(binding).is_none() {
-                            return None;
+                    accesses.insert_buffer_access(
+                        buffer.clone(),
+                        BufferAccess {
+                            stage: bind.stage().into(),
+                            access,
+                        },
+                    );
+                }
+            }
+            BoundResource::ImageView(sampler, views) => {
+                let bind_access = shader_access_flags(bind.access());
+                let image_layout = sampler
+                    .is_some()
+                    .then_some(ImageLayout::ShaderRead)
+                    .unwrap_or(ImageLayout::General);
+
+                for view in views {
+                    let image = view.image();
+                    let access = if let Some(access) = accesses.get_image_access(&image) {
+                        debug_assert!(
+                            access.has_static_layout(),
+                            "image must have static layout in compute or raster pass",
+                        );
+
+                        if access.input_layout != image_layout {
+                            return Err(PassBuildError::MultiImageLayout {
+                                first: access.input_layout,
+                                second: image_layout,
+                            });
                         }
 
-                        let bind_slot = BindSlot::new(set_id, binding);
+                        access.access | bind_access
+                    } else {
+                        bind_access
+                    };
 
-                        let Some(resource) = self.bound.get(&bind_slot) else {
-                            return Some(Err(
-                                PassBuildError::MissingBinding(bind_slot)
-                            ));
-                        };
+                    accesses.insert_image_access(
+                        image.clone(),
+                        ImageAccess {
+                            stage: bind.stage().into(),
+                            input_layout: image_layout,
+                            output_layout: image_layout,
+                            access,
+                        },
+                    );
+                }
+            }
+        }
+    }
 
-                        Some(Ok((binding, resource)))
-                    })
-                    .collect::<Result<_, _>>()?;
+    Ok(accesses)
+}
 
-                let variable_len = if let Some(res) = resources.last() {
-                    res.1.variable_length().unwrap_or(0) as u32
-                } else {
-                    0
-                };
+fn build_desc_sets<T: Prog>(
+    pool: &ResourcePool,
+    bindings: &DescBindings,
+    layout: &PipelineLayout,
+    prog: Res<T>,
+) -> Result<DescSets, PassBuildError> {
+    let max_set = prog.descs().max_set().map_or(0, |s| s + 1);
+    let desc_sets = (0..max_set)
+        .map(|set_id| {
+            let Some(set) = prog.descs().get_set(set_id) else {
+                return Ok(None);
+            };
 
-                let layout = self
-                    .layout
-                    .get_desc_layout(set_id)
-                    .cloned()
-                    .unwrap_or_else(|| panic!("pipeline doesn't have desc set {set_id}"));
+            // Create a sorted list of the binding number and bound resource of the set.
+            // Check at the same time that every bind slots in the shader has been bound.
+            let bounds: Vec<(u32, &Bound)> = set
+                .binds()
+                .map(|(binding, _)| {
+                    let bind_slot = BindSlot::new(set_id, *binding);
+                    let Some(resource) = bindings.bound.get(&bind_slot) else {
+                        return Err(PassBuildError::MissingBinding(bind_slot));
+                    };
 
-                let (handle, desc_pool) = pool.desc_alloc(variable_len, &layout)?;
+                    Ok((*binding, resource))
+                })
+                .collect::<Result<_, _>>()?;
 
-                let desc_set = DescSet {
-                    pool: desc_pool,
-                    layout,
-                    handle,
-                };
+            // Could collect into a `SortedMap`, but that sorts `bounds` map, which should already
+            // be sorted.
+            let bounds = SortedMap::from_sorted(bounds);
 
-                let desc_write_infos: SmallVec<[DescWriteInfo; 12]> = resources
-                    .into_iter()
-                    .filter_map(|(binding, resource)| {
-                        let access = set
-                            .get_bind(binding)
-                            .expect("should have shader binding")
-                            .access();
+            // Get the number of the unbound array elements.
+            let var_len = set.unbound_bind().map_or(0, |num| {
+                // It is checked above that every slot in the set has been bound, so this should
+                // never fail.
+                bounds
+                    .get(&num)
+                    .map(|bound| bound.resource.count())
+                    .expect("should have binding")
+            });
 
-                        fn image_view_desc_type(has_sampler: bool) -> vk::DescriptorType {
-                            if has_sampler {
-                                vk::DescriptorType::COMBINED_IMAGE_SAMPLER
-                            } else {
-                                vk::DescriptorType::STORAGE_IMAGE
-                            }
-                        }
+            let layout = layout.get_desc_layout(set_id).cloned().unwrap_or_else(|| {
+                panic!("pipeline doesn't have desc set {set_id}, which it should")
+            });
 
-                        fn image_layout(access: DescAccess) -> vk::ImageLayout {
-                            if !access.contains(DescAccess::WRITE) {
+            #[cfg(test)]
+            let (handle, desc_pool) = unsafe {
+                (
+                    vk::DescriptorSet::null(),
+                    Rc::new(DescPool::null(pool.device.clone())),
+                )
+            };
+
+            #[cfg(not(test))]
+            let Ok((handle, desc_pool)) = pool.desc_alloc(var_len, &layout) else {
+                return Err(PassBuildError::VulkanError);
+            };
+
+            let desc_set = DescSet {
+                pool: desc_pool,
+                layout,
+                handle,
+            };
+
+            let desc_write_infos: SmallVec<[DescWriteInfo; 12]> = bounds
+                .into_iter()
+                .filter_map(|(binding, bound)| {
+                    let access = set
+                        .get_bind(binding)
+                        .expect("should have shader binding")
+                        .access();
+
+                    let write = match &bound.resource {
+                        BoundResource::ImageView(sampler, views) => {
+                            let ty: vk::DescriptorType = bound
+                                .desc_kind()
+                                .unwrap_or_else(|| {
+                                    // Shouldn't get here.
+
+                                    if sampler.is_some() {
+                                        DescKind::SampledImage
+                                    } else {
+                                        DescKind::StorageImage
+                                    }
+                                })
+                                .into();
+
+                            let image_layout = if !access.contains(DescAccess::WRITE) {
                                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
                             } else {
                                 vk::ImageLayout::GENERAL
+                            };
+
+                            let sampler = sampler
+                                .as_ref()
+                                .map(|sampler| sampler.handle)
+                                .unwrap_or(vk::Sampler::null());
+
+                            let image_writes = views
+                                .iter()
+                                .map(|image_view| vk::DescriptorImageInfo {
+                                    image_view: image_view.handle,
+                                    image_layout,
+                                    sampler,
+                                })
+                                .collect();
+
+                            DescWriteInfo {
+                                binding,
+                                image_writes,
+                                buffer_writes: DescWrites::from([
+                                    vk::DescriptorBufferInfo::default(),
+                                ]),
+                                ty,
                             }
                         }
+                        BoundResource::Buffer(buffers) => {
+                            let desc_kind: DescKind =
+                                buffers.first().map(|buffer| buffer.kind())?.into();
 
-                        let write = match resource {
-                            BoundRes::ImageView {
-                                sampler,
-                                image_view,
-                            } => {
-                                let ty = image_view_desc_type(sampler.is_some());
-                                let image_layout = image_layout(access);
+                            let buffer_writes = buffers
+                                .iter()
+                                .map(|buffer| vk::DescriptorBufferInfo {
+                                    buffer: buffer.handle,
+                                    range: buffer.size(),
+                                    offset: 0,
+                                })
+                                .collect();
 
-                                let sampler = sampler
-                                    .as_ref()
-                                    .map(|sampler| sampler.handle)
-                                    .unwrap_or(vk::Sampler::null());
-
-                                DescWriteInfo {
-                                    binding,
-                                    image_writes: DescWrites::from([vk::DescriptorImageInfo {
-                                        image_view: image_view.handle,
-                                        image_layout,
-                                        sampler,
-                                    }]),
-                                    buffer_writes: DescWrites::from([
-                                        vk::DescriptorBufferInfo::default(),
-                                    ]),
-                                    ty,
-                                }
+                            DescWriteInfo {
+                                buffer_writes,
+                                binding,
+                                ty: desc_kind.into(),
+                                image_writes: DescWrites::from(
+                                    [vk::DescriptorImageInfo::default()],
+                                ),
                             }
-                            BoundRes::Buffer { buffer } => {
-                                let desc_kind: DescKind = buffer.kind().into();
+                        }
+                    };
 
-                                DescWriteInfo {
-                                    ty: desc_kind.into(),
-                                    image_writes: DescWrites::from([
-                                        vk::DescriptorImageInfo::default(),
-                                    ]),
-                                    buffer_writes: DescWrites::from([vk::DescriptorBufferInfo {
-                                        buffer: buffer.handle,
-                                        range: buffer.size(),
-                                        offset: 0,
-                                    }]),
-                                    binding,
-                                }
-                            }
-                            BoundRes::Buffers { buffers } => {
-                                let desc_kind: DescKind =
-                                    buffers.first().map(|buffer| buffer.kind())?.into();
+                    Some(write)
+                })
+                .collect();
 
-                                let buffer_writes = buffers
-                                    .iter()
-                                    .map(|buffer| vk::DescriptorBufferInfo {
-                                        buffer: buffer.handle,
-                                        range: buffer.size(),
-                                        offset: 0,
-                                    })
-                                    .collect();
+            let writes: SmallVec<[_; 12]> = desc_write_infos
+                .iter()
+                .enumerate()
+                .map(|(binding, info)| {
+                    vk::WriteDescriptorSet::builder()
+                        .dst_binding(binding as u32)
+                        .descriptor_type(info.ty)
+                        .buffer_info(&info.buffer_writes)
+                        .image_info(&info.image_writes)
+                        .dst_set(desc_set.handle)
+                        .build()
+                })
+                .collect();
 
-                                DescWriteInfo {
-                                    buffer_writes,
-                                    binding,
-                                    ty: desc_kind.into(),
-                                    image_writes: DescWrites::from([
-                                        vk::DescriptorImageInfo::default(),
-                                    ]),
-                                }
-                            }
-                            BoundRes::ImageViews {
-                                image_views,
-                                sampler,
-                            } => {
-                                let ty = image_view_desc_type(sampler.is_some());
-                                let image_layout = image_layout(access);
+            #[cfg(not(test))]
+            unsafe {
+                pool.device.handle.update_descriptor_sets(&writes, &[]);
+            }
 
-                                let sampler = sampler
-                                    .as_ref()
-                                    .map(|sampler| sampler.handle)
-                                    .unwrap_or(vk::Sampler::null());
+            Ok(Some(desc_set))
+        })
+        .collect::<Result<_, PassBuildError>>()?;
 
-                                let image_writes = image_views
-                                    .iter()
-                                    .map(|image_view| vk::DescriptorImageInfo {
-                                        image_view: image_view.handle,
-                                        image_layout,
-                                        sampler,
-                                    })
-                                    .collect();
+    Ok(desc_sets)
+}
 
-                                DescWriteInfo {
-                                    binding,
-                                    image_writes,
-                                    buffer_writes: DescWrites::from([
-                                        vk::DescriptorBufferInfo::default(),
-                                    ]),
-                                    ty,
-                                }
-                            }
-                        };
+/// The group count of a compute dispatch.
+#[derive(Clone, PartialEq, Eq)]
+pub struct GroupCount {
+    x: Cell<u32>,
+    y: Cell<u32>,
+    z: Cell<u32>,
+}
 
-                        Some(write)
-                    })
-                    .collect();
+impl GroupCount {
+    #[inline]
+    pub fn new(x: u32, y: u32, z: u32) -> Self {
+        Self {
+            x: x.into(),
+            y: y.into(),
+            z: z.into(),
+        }
+    }
 
-                let writes: SmallVec<[_; 12]> = desc_write_infos
-                    .iter()
-                    .enumerate()
-                    .map(|(binding, info)| {
-                        vk::WriteDescriptorSet::builder()
-                            .dst_binding(binding as u32)
-                            .descriptor_type(info.ty)
-                            .buffer_info(&info.buffer_writes)
-                            .image_info(&info.image_writes)
-                            .dst_set(desc_set.handle)
-                            .build()
-                    })
-                    .collect();
+    #[inline]
+    pub fn x(&self) -> u32 {
+        self.x.get()
+    }
 
-                unsafe {
-                    pool.device.handle.update_descriptor_sets(&writes, &[]);
-                }
+    #[inline]
+    pub fn y(&self) -> u32 {
+        self.y.get()
+    }
 
-                Ok(Some(desc_set))
-            })
-            .collect::<Result<_, PassBuildError>>()?;
+    #[inline]
+    pub fn z(&self) -> u32 {
+        self.z.get()
+    }
 
-        Ok((desc_sets, self.accesses))
+    /// Change group count.
+    #[inline]
+    pub fn change(&self, x: u32, y: u32, z: u32) {
+        self.x.set(x);
+        self.y.set(y);
+        self.z.set(z);
+    }
+
+    /// Get the total group count.
+    /// Just `self.x() * self.y() * self.z()`
+    #[inline]
+    pub fn total_group_count(&self) -> u32 {
+        self.x() * self.y() * self.z()
+    }
+}
+
+impl From<(u32, u32, u32)> for GroupCount {
+    fn from((x, y, z): (u32, u32, u32)) -> Self {
+        Self::new(x, y, z)
+    }
+}
+
+impl fmt::Debug for GroupCount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("GroupCount")
+            .field(&self.x())
+            .field(&self.y())
+            .field(&self.z())
+            .finish()
+    }
+}
+
+impl Default for GroupCount {
+    /// Returns group count with dimensions `(1, 1, 1)`.
+    fn default() -> Self {
+        Self::new(1, 1, 1)
     }
 }
 
@@ -704,118 +747,82 @@ pub struct ComputePassBuilder<'a> {
     pool: &'a ResourcePool,
     pipeline: Res<ComputePipeline>,
     prog: Res<ComputeProg>,
-    pass_descs: PassDescs<ComputeProg>,
+    /// [`Cmd`]'s that binds and handles sync for descriptor sets bound but not yet used.
+    descs_bind: Vec<Cmd>,
+    cmds: Vec<Cmd>,
+    accesses: Accesses,
+    error: Option<PassBuildError>,
 }
 
 pub struct RasterPassBuilder<'a> {
     pool: &'a ResourcePool,
     pipeline: Res<RasterPipeline>,
     prog: Res<RasterProg>,
-    pass_descs: PassDescs<RasterProg>,
-}
-
-macro_rules! impl_desc_bind {
-    () => {
-        #[must_use]
-        #[inline(always)]
-        pub fn bind_sampled_image_view(
-            mut self,
-            slot: impl Into<BindSlot>,
-            sampler: Res<Sampler>,
-            image_view: Res<ImageView>,
-        ) -> Self {
-            self.pass_descs
-                .bind_sampled_image_view(slot.into(), sampler, image_view);
-
-            self
-        }
-
-        #[must_use]
-        #[inline(always)]
-        pub fn bind_image_view(
-            mut self,
-            slot: impl Into<BindSlot>,
-            image_view: Res<ImageView>,
-        ) -> Self {
-            self.pass_descs.bind_image_view(slot.into(), image_view);
-
-            self
-        }
-
-        #[must_use]
-        #[inline(always)]
-        pub fn bind_buffer(mut self, slot: impl Into<BindSlot>, buffer: Res<Buffer>) -> Self {
-            self.pass_descs.bind_buffer(slot.into(), buffer);
-
-            self
-        }
-
-        #[must_use]
-        #[inline(always)]
-        pub fn bind_sampled_images(
-            mut self,
-            slot: impl Into<BindSlot>,
-            sampler: Res<Sampler>,
-            image_views: &[Res<ImageView>],
-        ) -> Self {
-            self.pass_descs
-                .bind_sampled_images(slot.into(), sampler, image_views);
-
-            self
-        }
-
-        #[must_use]
-        #[inline(always)]
-        pub fn bind_image_views(
-            mut self,
-            slot: impl Into<BindSlot>,
-            image_views: &[Res<ImageView>],
-        ) -> Self {
-            self.pass_descs.bind_image_views(slot.into(), image_views);
-
-            self
-        }
-
-        #[must_use]
-        #[inline(always)]
-        pub fn bind_buffers(mut self, slot: impl Into<BindSlot>, buffers: &[Res<Buffer>]) -> Self {
-            self.pass_descs.bind_buffers(slot.into(), buffers);
-
-            self
-        }
-    };
-}
-
-impl<'a> ComputePassBuilder<'a> {
-    impl_desc_bind!();
-}
-
-impl<'a> RasterPassBuilder<'a> {
-    impl_desc_bind!();
 }
 
 impl<'a> ComputePassBuilder<'a> {
     #[must_use]
     pub fn new(pool: &'a ResourcePool, pipeline: Res<ComputePipeline>) -> Self {
         Self {
-            pass_descs: PassDescs::new(pipeline.layout(), pipeline.prog()),
             prog: pipeline.prog(),
+            accesses: Accesses::default(),
+            descs_bind: Vec::new(),
+            cmds: Vec::new(),
+            error: None,
             pipeline,
             pool,
         }
     }
 
     #[must_use]
-    pub fn build(self) -> Result<ComputePass, PassBuildError> {
-        let (desc_sets, resource_access) = self.pass_descs.build(self.pool)?;
+    pub fn bind_descs(mut self, bindings: &DescBindings) -> Self {
+        let layout = self.pipeline.layout();
+        let prog = self.pipeline.prog();
 
-        Ok(ComputePass {
-            accesses: resource_access,
-            desc_sets,
-        })
+        let accesses = match desc_accesses(bindings, prog.clone()) {
+            Ok(accesses) => accesses,
+            Err(error) => {
+                self.error = error.into();
+                return self;
+            }
+        };
+
+        let error = build_desc_sets(self.pool, bindings, &layout, prog.clone())
+            .map(|descs| {
+                let (buffer_barriers, image_barriers) = self.accesses.join(&accesses);
+                self.descs_bind.clear();
+                self.descs_bind.extend(
+                    buffer_barriers
+                        .into_iter()
+                        .map(|barrier| Cmd::BufferBarrier(barrier)),
+                );
+                self.descs_bind.extend(
+                    image_barriers
+                        .into_iter()
+                        .map(|barrier| Cmd::ImageBarrier(barrier)),
+                );
+                self.descs_bind.push(Cmd::BindDescSets(descs));
+            })
+            .err();
+
+        self.error = self.error.or(error);
+        self
+    }
+
+    #[must_use]
+    pub fn dispatch(mut self, group_count: Res<GroupCount>) -> Self {
+        self.cmds.append(&mut self.descs_bind);
+        self.cmds.push(Cmd::Dispatch(group_count));
+        self
+    }
+
+    #[must_use]
+    pub fn build(self) -> Result<ComputePass, PassBuildError> {
+        todo!()
     }
 }
 
+/*
 impl<'a> RasterPassBuilder<'a> {
     #[must_use]
     pub fn new(pool: &'a ResourcePool, pipeline: Res<RasterPipeline>) -> Self {
@@ -837,6 +844,7 @@ impl<'a> RasterPassBuilder<'a> {
         })
     }
 }
+*/
 
 type DescWrites<T> = SmallVec<[T; 1]>;
 
@@ -853,6 +861,14 @@ struct DescSet {
     pool: Rc<DescPool>,
 }
 
+impl fmt::Debug for DescSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DescSet")
+            .field("layout", &self.layout)
+            .finish()
+    }
+}
+
 type DescSets = Vec<Option<DescSet>>;
 
 pub trait Pass {
@@ -862,6 +878,7 @@ pub trait Pass {
 pub struct ComputePass {
     accesses: Accesses,
     desc_sets: DescSets,
+    group_count: Res<GroupCount>,
 }
 
 impl Pass for ComputePass {
@@ -882,8 +899,8 @@ impl Pass for RasterPass {
 }
 
 pub struct BarrierPass {
-    buffers: Vec<BufferBarrier>,
-    images: Vec<ImageBarrier>,
+    buffers: Vec<cmd::BufferBarrier>,
+    images: Vec<cmd::ImageBarrier>,
 }
 
 impl Pass for BarrierPass {
@@ -945,5 +962,178 @@ pub struct BlockPass {
 impl Pass for BlockPass {
     fn accesses(&self) -> Option<&Accesses> {
         Some(&self.accesses)
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    use crate::core::{Device, Instance, PhysicalDevice};
+    use crate::resource::BufferInfo;
+    use crate::test;
+    use std::rc::Rc;
+
+    fn create_resource_pool() -> ResourcePool {
+        let instance = Rc::new(Instance::new(true).unwrap());
+        let physical = PhysicalDevice::select(&instance).unwrap();
+        let device = Rc::new(Device::new(instance, physical, &[]).unwrap());
+
+        ResourcePool::new(device)
+    }
+
+    fn create_compute_pipeline(pool: &ResourcePool, code: &str) -> Res<ComputePipeline> {
+        let code = test::compile_comp_glsl(code).unwrap();
+        let shader_module = pool
+            .create_shader_module("main", bytemuck::cast_slice(&code))
+            .unwrap();
+        let prog = pool.create_compute_prog(shader_module).unwrap();
+
+        pool.create_compute_pipeline(prog, &[]).unwrap()
+    }
+
+    fn buffer_barriers(cmds: &[Cmd]) -> Vec<cmd::BufferBarrier> {
+        cmds.iter()
+            .filter_map(|cmd| {
+                if let Cmd::BufferBarrier(barrier) = cmd {
+                    Some(barrier.clone())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn wrong_buffer_kind() {
+        let pool = create_resource_pool();
+        let pipeline = create_compute_pipeline(
+            &pool,
+            r#"
+                #version 450
+                layout (set = 0, binding = 0) uniform Block1 { int val1; };
+                void main() {}
+            "#,
+        );
+        let buffer = unsafe {
+            pool.create_invalid_buffer(&BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                size: 1,
+            })
+        };
+        let group_count = pool.alloc(GroupCount::default());
+        let pass = ComputePassBuilder::new(&pool, pipeline)
+            .bind_descs(&DescBindings::new().bind_buffer((0, 0), buffer.clone()))
+            .dispatch(group_count.clone());
+        assert_eq!(
+            pass.error,
+            Some(PassBuildError::WrongBindKind {
+                slot: (0, 0).into(),
+                expected: DescKind::UniformBuffer,
+                is: DescKind::StorageBuffer,
+            })
+        );
+    }
+
+    #[test]
+    fn desc_array() {
+        let pool = create_resource_pool();
+        let pipeline = create_compute_pipeline(
+            &pool,
+            r#"
+                #version 450
+                #extension GL_EXT_nonuniform_qualifier: require
+                layout (set = 0, binding = 0) writeonly uniform image2D a[];
+                layout (set = 0, binding = 1) writeonly uniform image2D b[4];
+                void main() {}
+            "#,
+        );
+        let images: Vec<_> = (0..10)
+            .map(|i| unsafe {
+                let image = pool.create_invalid_image(
+                    i as vk::DeviceSize,
+                    &ImageInfo {
+                        kind: ImageKind::Texture,
+                        usage: vk::ImageUsageFlags::SAMPLED,
+                        format: vk::Format::R8G8_UNORM,
+                        aspect_flags: vk::ImageAspectFlags::COLOR,
+                        mip_levels: 1,
+                        extent: vk::Extent3D {
+                            width: 10,
+                            height: 10,
+                            depth: 1,
+                        },
+                    },
+                );
+                pool.create_invalid_image_view(&ImageViewInfo {
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    mips: 0..1,
+                    image,
+                })
+            })
+            .collect();
+        let group_count = pool.alloc(GroupCount::default());
+        let pass = ComputePassBuilder::new(&pool, pipeline)
+            .bind_descs(
+                &DescBindings::new()
+                    .bind_image_views((0, 0), &images)
+                    .bind_image_views((0, 1), &images[0..4]),
+            )
+            .dispatch(group_count.clone());
+        assert_eq!(pass.error, None);
+    }
+
+    /// Test sync within a compute pass where a buffer is first read and then written and vice
+    /// versa.
+    #[test]
+    fn compute_pass_buffer_sync() {
+        let pool = create_resource_pool();
+        let pipeline = create_compute_pipeline(
+            &pool,
+            r#"
+                #version 450
+                layout (set = 0, binding = 0) writeonly buffer Block1 { int val1; };
+                layout (set = 0, binding = 1) readonly buffer Block2 { int val2; };
+                void main() { val1 = val2; }
+            "#,
+        );
+        let b1 = unsafe {
+            pool.create_invalid_buffer(&BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                size: 1,
+            })
+        };
+        let b2 = unsafe {
+            pool.create_invalid_buffer(&BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                size: 2,
+            })
+        };
+        let group_count = pool.alloc(GroupCount::default());
+        let pass = ComputePassBuilder::new(&pool, pipeline)
+            .bind_descs(
+                &DescBindings::new()
+                    .bind_buffer((0, 0), b1.clone())
+                    .bind_buffer((0, 1), b2.clone()),
+            )
+            .dispatch(group_count.clone())
+            .bind_descs(
+                &DescBindings::new()
+                    .bind_buffer((0, 0), b2.clone())
+                    .bind_buffer((0, 1), b1.clone()),
+            );
+        assert_eq!(buffer_barriers(&pass.cmds).len(), 0);
+        let pass = pass.dispatch(group_count);
+        let barriers = buffer_barriers(&pass.cmds);
+        assert_eq!(barriers.len(), 2);
+        assert!(barriers.iter().any(|barrier| {
+            barrier.buffer == b1
+                && barrier.src_access == vk::AccessFlags2::SHADER_WRITE
+                && barrier.dst_access == vk::AccessFlags2::SHADER_READ
+        }));
+        assert!(barriers.iter().any(|barrier| {
+            barrier.buffer == b2
+                && barrier.src_access == vk::AccessFlags2::SHADER_READ
+                && barrier.dst_access == vk::AccessFlags2::SHADER_WRITE
+        }));
     }
 }

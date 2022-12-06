@@ -20,6 +20,9 @@ mod scene;
 mod skybox;
 mod text;
 
+#[cfg(test)]
+mod test;
+
 use anyhow::Result;
 use ash::vk;
 use winit::event::VirtualKeyCode;

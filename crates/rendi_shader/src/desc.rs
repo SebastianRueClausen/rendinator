@@ -73,6 +73,43 @@ impl DescAccess {
     }
 }
 
+impl From<vk::AccessFlags2> for DescAccess {
+    fn from(flags: vk::AccessFlags2) -> Self {
+        const WRITE_ACCESS: u64 = vk::AccessFlags2::TRANSFER_WRITE.as_raw()
+            | vk::AccessFlags2::SHADER_WRITE.as_raw()
+            | vk::AccessFlags2::HOST_WRITE.as_raw()
+            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE.as_raw()
+            | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE.as_raw()
+            | vk::AccessFlags2::MEMORY_WRITE.as_raw()
+            | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR.as_raw();
+
+        const READ_ACCESS: u64 = vk::AccessFlags2::TRANSFER_READ.as_raw()
+            | vk::AccessFlags2::SHADER_READ.as_raw()
+            | vk::AccessFlags2::HOST_READ.as_raw()
+            | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ.as_raw()
+            | vk::AccessFlags2::COLOR_ATTACHMENT_READ.as_raw()
+            | vk::AccessFlags2::MEMORY_READ.as_raw()
+            | vk::AccessFlags2::ACCELERATION_STRUCTURE_READ_KHR.as_raw()
+            | vk::AccessFlags2::INDIRECT_COMMAND_READ.as_raw()
+            | vk::AccessFlags2::INDEX_READ.as_raw()
+            | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ.as_raw()
+            | vk::AccessFlags2::UNIFORM_READ.as_raw()
+            | vk::AccessFlags2::SHADER_SAMPLED_READ.as_raw();
+
+        let mut access = DescAccess::empty();
+
+        if flags.intersects(vk::AccessFlags2::from_raw(WRITE_ACCESS)) {
+            access |= DescAccess::WRITE;
+        }
+
+        if flags.intersects(vk::AccessFlags2::from_raw(READ_ACCESS)) {
+            access |= DescAccess::READ;
+        }
+
+        access
+    }
+}
+
 impl DescAccess {
     pub(crate) fn from_rw_flags(flags: RwFlags) -> Result<Self> {
         let access_flags = match (flags.non_readable, flags.non_writeable) {
@@ -126,12 +163,24 @@ impl fmt::Display for DescKind {
 pub enum DescCount {
     /// A single descriptor.
     Single,
-
     /// A bound array of descriptors.
     Bound(u32),
-
     /// An unbound array of descriptors.
     Unbound,
+}
+
+impl DescCount {
+    pub fn is_single(&self) -> bool {
+        matches!(self, DescCount::Single)
+    }
+
+    pub fn is_bound(&self) -> bool {
+        matches!(self, DescCount::Bound(_))
+    }
+
+    pub fn is_unbound(&self) -> bool {
+        matches!(self, DescCount::Unbound)
+    }
 }
 
 impl fmt::Display for DescCount {
