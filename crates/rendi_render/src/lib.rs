@@ -1,6 +1,7 @@
 #![warn(clippy::all)]
 #![allow(clippy::zero_prefixed_literal)]
 
+pub mod device;
 pub mod reflect;
 
 use ash::vk;

@@ -1,10 +1,32 @@
-use anyhow::{anyhow, Result};
-
 use crate::{
     Access, BindSlot, BufferKind, DescBinding, DescCount, DescKind, PrimKind, PrimShape, PrimType,
     PushConstRange, ShaderBindings, ShaderInputs, ShaderStage,
 };
 use rendi_data_structs::SortedMap;
+
+#[derive(Debug, Clone, thiserror::Error)]
+pub enum ReflectError {
+    #[error("failed parsing SPIR-V: {0}")]
+    ParseError(String),
+
+    #[error(
+        "different descriptor kind in vertex and fragment shaders at {slot}: {vert} vs {frag}"
+    )]
+    DifferentDescKind {
+        slot: BindSlot,
+        vert: DescKind,
+        frag: DescKind,
+    },
+
+    #[error(
+        "different descriptor count in vertex and fragment shaders at {slot}: {vert} vs {frag}"
+    )]
+    DifferentDescCount {
+        slot: BindSlot,
+        vert: DescCount,
+        frag: DescCount,
+    },
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct RwFlags {
@@ -13,14 +35,18 @@ pub(crate) struct RwFlags {
 }
 
 impl TryInto<Access> for RwFlags {
-    type Error = anyhow::Error;
+    type Error = ReflectError;
 
     fn try_into(self) -> Result<Access, Self::Error> {
         let access_flags = match (self.non_readable, self.non_writeable) {
             (true, false) => Access::WRITE,
             (false, true) => Access::READ,
             (false, false) => Access::READ_WRITE,
-            (true, true) => return Err(anyhow!("descriptor can't be both readonly and writeonly")),
+            (true, true) => {
+                return Err(ReflectError::ParseError(
+                    "descriptor can't be both readonly and writeonly".to_string(),
+                ))
+            }
         };
 
         Ok(access_flags)
@@ -226,7 +252,8 @@ pub struct ComputeReflection {
 
 impl ComputeReflection {
     /// Generate a reflection from `code`, which should be valid SPIR-V code of a compute shader.
-    pub fn new(code: &[u32]) -> Result<Self> {
+    #[must_use]
+    pub fn new(code: &[u32]) -> Result<Self, ReflectError> {
         let (bindings, _, push_const) = get_shader_info(code, ShaderStage::Compute)?;
 
         Ok(Self {
@@ -236,11 +263,13 @@ impl ComputeReflection {
     }
 
     /// Returns descriptor bindings of the shader.
+    #[must_use]
     pub fn bindings(&self) -> &ShaderBindings {
         &self.bindings
     }
 
     /// Get push constant range of the the compute shader.
+    #[must_use]
     pub fn push_const_range(&self) -> Option<PushConstRange> {
         self.push_const
     }
@@ -258,7 +287,8 @@ impl RasterReflection {
     /// Generate reflection of a vertex and fragment shader.
     /// Both `frag_code` and `vert_code` should be valid SPIR-V code of their respective shader
     /// stage.
-    pub fn new(frag_code: &[u32], vert_code: &[u32]) -> Result<Self> {
+    #[must_use]
+    pub fn new(frag_code: &[u32], vert_code: &[u32]) -> Result<Self, ReflectError> {
         let (frag_binds, _, frag_push_const) = get_shader_info(frag_code, ShaderStage::Fragment)?;
         let (vert_binds, vert_inputs, vert_push_const) =
             get_shader_info(vert_code, ShaderStage::Vertex)?;
@@ -276,19 +306,19 @@ impl RasterReflection {
             vert_bind.stage = ShaderStage::Raster;
 
             if vert_bind.kind() != frag_bind.kind() {
-                return Err(anyhow!(
-                    "descriptor type at {slot} doesn't match in vertex and fragment shader, {} vs {}",
-                    vert_bind.kind(),
-                    frag_bind.kind(),
-                ));
+                return Err(ReflectError::DifferentDescKind {
+                    vert: vert_bind.kind(),
+                    frag: frag_bind.kind(),
+                    slot: slot.clone(),
+                });
             }
 
             if vert_bind.count() != frag_bind.count() {
-                return Err(anyhow!(
-                    "descriptor count at {slot} doesn't match in vertex and fragment shader, {} vs {}",
-                    vert_bind.count(),
-                    frag_bind.count(),
-                ));
+                return Err(ReflectError::DifferentDescCount {
+                    vert: vert_bind.count(),
+                    frag: frag_bind.count(),
+                    slot: slot.clone(),
+                });
             }
         }
 
@@ -303,6 +333,7 @@ impl RasterReflection {
     }
 
     /// Returns descriptor bindings of the shader.
+    #[must_use]
     pub fn bindings(&self) -> &ShaderBindings {
         &self.bindings
     }
@@ -310,6 +341,7 @@ impl RasterReflection {
     /// Returns the push constant range of the fragment shader.
     ///
     /// Returns `None` if there are none.
+    #[must_use]
     pub fn frag_push_const_range(&self) -> Option<PushConstRange> {
         self.frag_push_const
     }
@@ -317,11 +349,13 @@ impl RasterReflection {
     /// Get the push constant range of the vertex shader.
     ///
     /// Returns `None` if there are none.
+    #[must_use]
     pub fn vert_push_const_range(&self) -> Option<PushConstRange> {
         self.vert_push_const
     }
 
     /// Get the vertex inputs.
+    #[must_use]
     pub fn vert_inputs(&self) -> &ShaderInputs {
         &self.vert_inputs
     }
@@ -345,11 +379,13 @@ impl<'a> Ins<'a> {
     /// word containing the opcode). If `index` is outside the range of arguments, an error will be
     /// returned.
     #[inline]
-    fn expect_arg(self, index: usize) -> Result<u32> {
-        self.args
-            .get(index)
-            .cloned()
-            .ok_or_else(|| anyhow!("unexpected end of instruction"))
+    fn expect_arg(self, index: usize) -> Result<u32, ReflectError> {
+        self.args.get(index).cloned().ok_or_else(|| {
+            ReflectError::ParseError(format!(
+                "instruction too short, expected at least {} arguments",
+                index + 1
+            ))
+        })
     }
 
     /// Get the arguments of the instruction. This includes the first word.
@@ -365,9 +401,15 @@ struct InsIter<'a> {
 }
 
 impl<'a> InsIter<'a> {
-    fn new(binary: &'a [u32]) -> Result<Self> {
-        if binary.first().cloned() != Some(SPIRV_MAGIC_VALUE) {
-            return Err(anyhow!("invalid magic value"));
+    fn new(binary: &'a [u32]) -> Result<Self, ReflectError> {
+        let Some(magic) = binary.first().cloned() else {
+            return Err(ReflectError::ParseError("empty binary input".to_string()));
+        };
+
+        if magic != SPIRV_MAGIC_VALUE {
+            return Err(ReflectError::ParseError(format!(
+                "invalid magic value, expected {SPIRV_MAGIC_VALUE} but got {magic}"
+            )));
         }
 
         Ok(Self {
@@ -407,7 +449,7 @@ struct Reflection<'a> {
 }
 
 impl<'a> Reflection<'a> {
-    fn new(binary: &'a [u32]) -> Result<Self> {
+    fn new(binary: &'a [u32]) -> Result<Self, ReflectError> {
         let inss = InsIter::new(binary)?;
         let mut reflection = Reflection::default();
 
@@ -673,11 +715,14 @@ impl<'a> Reflection<'a> {
 fn get_shader_info(
     binary: &[u32],
     stage: ShaderStage,
-) -> Result<(
-    SortedMap<BindSlot, DescBinding>,
-    ShaderInputs,
-    Option<PushConstRange>,
-)> {
+) -> Result<
+    (
+        SortedMap<BindSlot, DescBinding>,
+        ShaderInputs,
+        Option<PushConstRange>,
+    ),
+    ReflectError,
+> {
     let reflection = Reflection::new(binary)?;
 
     let mut inputs = Vec::new();
@@ -695,19 +740,23 @@ fn get_shader_info(
 
         let is_buffer_block = reflection.find_deco(DecoKind::BufferBlock, ty.id).is_some();
 
-        let get_bind_slot = || -> Result<BindSlot> {
+        let get_bind_slot = || -> Result<BindSlot, ReflectError> {
             let (Some(set), Some(binding)) = (
                 reflection.find_deco(DecoKind::DescSet, var.id),
                 reflection.find_deco(DecoKind::Binding, var.id),
             ) else {
-                return Err(anyhow!("descriptor set doesn't specify set and binding"));
+                return Err(ReflectError::ParseError(
+                    "descriptor set doesn't specify set and binding".into()
+                ));
             };
 
             let (Some(set), Some(binding)) = (
                 set.args.first().cloned(),
                 binding.args.first().cloned(),
             ) else {
-                return Err(anyhow!("invalid descriptor set set and binding")); 
+                return Err(ReflectError::ParseError(
+                    "invalid descriptor set set and binding".into()
+                ));
             };
 
             Ok((set, binding).into())
@@ -716,7 +765,9 @@ fn get_shader_info(
         match var.storage {
             StorageClass::PushConstant => {
                 let Some(size) = reflection.find_type_size(ty) else {
-                    continue;
+                    return Err(ReflectError::ParseError(
+                        "failed to get size of push constant".into()
+                    ))
                 };
 
                 // Make sure the push constant is a struct. Then calculate the start offset of the
@@ -744,23 +795,31 @@ fn get_shader_info(
                         min
                     }
                 } else {
-                    return Err(anyhow!("push constant is not a struct"));
+                    return Err(ReflectError::ParseError(
+                        "push constant is not a struct".into(),
+                    ));
                 };
 
                 if push_const.is_some() {
-                    return Err(anyhow!("more than one push constant in shader"));
+                    return Err(ReflectError::ParseError(
+                        "more than one push constant in shader".into(),
+                    ));
                 }
 
                 push_const = Some(PushConstRange { offset, size });
             }
             StorageClass::Input => {
                 let get_input_kind = |bytes: u32, kind: PrimKind| {
-                    Some(match (bytes, kind) {
+                    Ok(match (bytes, kind) {
                         (4, PrimKind::Float) => PrimKind::Float,
                         (8, PrimKind::Float) => PrimKind::Double,
                         (4, PrimKind::Int) => PrimKind::Int,
                         (4, PrimKind::Uint) => PrimKind::Uint,
-                        _ => return None,
+                        _ => {
+                            return Err(ReflectError::ParseError(
+                                "shader input has invalid type".into(),
+                            ))
+                        }
                     })
                 };
 
@@ -770,13 +829,12 @@ fn get_shader_info(
                             .find_type(ty_id)
                             .map(|ty| ty.kind)
                         else {
-                            continue;
+                            return Err(ReflectError::ParseError(
+                                "failed to find a type for shader input".into()
+                            ));
                         };
 
-                        let Some(kind) = get_input_kind(bytes, kind) else {
-                            continue;
-                        };
-
+                        let kind = get_input_kind(bytes, kind)?;
                         let shape = match card {
                             2 => PrimShape::Vec2,
                             3 => PrimShape::Vec3,
@@ -789,14 +847,14 @@ fn get_shader_info(
                         (kind, shape)
                     }
                     TypeKind::Prim { bytes, kind } => {
-                        let Some(kind) = get_input_kind(bytes, kind) else {
-                            continue;
-                        };
+                        let kind = get_input_kind(bytes, kind)?;
 
                         (kind, PrimShape::Scalar)
                     }
-                    _ => {
-                        continue;
+                    kind => {
+                        return Err(ReflectError::ParseError(format!(
+                            "shader input has invalid type: {kind:?}"
+                        )));
                     }
                 };
 
