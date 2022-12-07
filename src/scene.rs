@@ -1,15 +1,15 @@
 use anyhow::Result;
 use ash::vk;
 
-use std::mem;
 use std::array;
+use std::mem;
 
-use crate::light::{self, PointLight, DirLight, Lights};
-use crate::frame::{FrameIndex, PerFrame};
-use crate::core::*;
-use crate::resource::*;
-use crate::command::*;
 use crate::camera::*;
+use crate::command::*;
+use crate::core::*;
+use crate::frame::{FrameIndex, PerFrame};
+use crate::light::{self, DirLight, Lights, PointLight};
+use crate::resource::*;
 
 use rendi_math::prelude::*;
 use rendi_res::Res;
@@ -83,7 +83,7 @@ struct Lod {
 #[derive(Clone, Copy, bytemuck::Zeroable, bytemuck::Pod)]
 struct DrawCount {
     /// The amount of draw commands.
-    pub command_count: u32, 
+    pub command_count: u32,
 
     /// The amount of primitives.
     pub primitive_count: u32,
@@ -117,7 +117,7 @@ struct CullInfo {
 #[derive(Clone, Copy, bytemuck::NoUninit)]
 struct DepthReduceInfo {
     /// The size of the target pyramid level level.
-    image_size: UVec2, 
+    image_size: UVec2,
 
     /// The index of the target pyramid level.
     target: u32,
@@ -127,7 +127,7 @@ struct DepthReduceInfo {
 #[derive(Clone, Copy, bytemuck::NoUninit)]
 struct DepthResolveInfo {
     /// The size of the both of depth image and depth staging image.
-    image_size: UVec2, 
+    image_size: UVec2,
 
     /// The number of samples in the depth image.
     samples: u32,
@@ -136,7 +136,7 @@ struct DepthResolveInfo {
 struct DepthPyramid {
     /// Depth staging image.
     ///
-    /// This is used to resolve the multisampled depth image into. 
+    /// This is used to resolve the multisampled depth image into.
     stagings: PerFrame<Res<ImageView>>,
 
     /// The depth pyramid image. It has the dimensions of `depth_image` rounded down to the
@@ -168,7 +168,7 @@ struct DepthPyramid {
 
     /// Height of the top level of the pyramid.
     height: u32,
-   
+
     /// The number of mip levels in the pyramid, not including the staging image.
     mip_levels: u32,
 }
@@ -191,25 +191,35 @@ impl DepthPyramid {
         let mip_levels = (height.max(height) as f32).log2().floor() as u32;
 
         let pyramids = PerFrame::try_from_fn(|_| {
-            renderer.pool.create_image(memory_location, &ImageInfo {
-                extent: vk::Extent3D { width, height, depth: 1 },
-                aspect_flags: vk::ImageAspectFlags::COLOR,
-                format: vk::Format::R32_SFLOAT,
-                kind: ImageKind::Texture,
-                mip_levels,
-                usage,
-            })
+            renderer.pool.create_image(
+                memory_location,
+                &ImageInfo {
+                    extent: vk::Extent3D {
+                        width,
+                        height,
+                        depth: 1,
+                    },
+                    aspect_flags: vk::ImageAspectFlags::COLOR,
+                    format: vk::Format::R32_SFLOAT,
+                    kind: ImageKind::Texture,
+                    mip_levels,
+                    usage,
+                },
+            )
         })?;
 
         let stagings = PerFrame::try_from_fn(|_| {
-            let image = renderer.pool.create_image(memory_location, &ImageInfo {
-                format: vk::Format::R32_SFLOAT,
-                aspect_flags: vk::ImageAspectFlags::COLOR,
-                kind: ImageKind::Texture,
-                extent: depth_extent,
-                mip_levels: 1,
-                usage,
-            })?;
+            let image = renderer.pool.create_image(
+                memory_location,
+                &ImageInfo {
+                    format: vk::Format::R32_SFLOAT,
+                    aspect_flags: vk::ImageAspectFlags::COLOR,
+                    kind: ImageKind::Texture,
+                    extent: depth_extent,
+                    mip_levels: 1,
+                    usage,
+                },
+            )?;
 
             renderer.pool.create_image_view(&ImageViewInfo {
                 view_type: vk::ImageViewType::TYPE_2D,
@@ -249,13 +259,11 @@ impl DepthPyramid {
             let pyramid = pyramids[frame_index].clone();
 
             for level in pyramid.mip_levels() {
-                mips.push(
-                    renderer.pool.create_image_view(&ImageViewInfo {
-                        view_type: vk::ImageViewType::TYPE_2D,
-                        mips: level..level + 1,
-                        image: pyramid.clone(),
-                    })?
-                );
+                mips.push(renderer.pool.create_image_view(&ImageViewInfo {
+                    view_type: vk::ImageViewType::TYPE_2D,
+                    mips: level..level + 1,
+                    image: pyramid.clone(),
+                })?);
             }
 
             Ok(mips)
@@ -263,64 +271,71 @@ impl DepthPyramid {
 
         let sampler = pool.create_sampler()?;
 
-        let layout = pool.create_desc_layout(&[
-            DescLayoutSlot {
-                binding: 0,
-                ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                count: rendi_shader::DescCount::Unbound,
-            },
-        ])?;
+        let layout = pool.create_desc_layout(&[DescLayoutSlot {
+            binding: 0,
+            ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+            count: rendi_render::DescCount::UnboundArray,
+        }])?;
 
         let sampled = PerFrame::try_from_fn(|frame_index| {
-            pool.create_desc_set(layout.clone(), &[
-                DescBinding::ImageArray(
-                    sampler.clone(), vk::ImageLayout::GENERAL, &mips[frame_index],
-                ),
-            ])
+            pool.create_desc_set(
+                layout.clone(),
+                &[DescBinding::ImageArray(
+                    sampler.clone(),
+                    vk::ImageLayout::GENERAL,
+                    &mips[frame_index],
+                )],
+            )
         })?;
 
-        let layout = pool.create_desc_layout(&[
-            DescLayoutSlot {
-                binding: 0,
-                ty: vk::DescriptorType::STORAGE_IMAGE,
-                count: rendi_shader::DescCount::Unbound,
-            },
-        ])?;
+        let layout = pool.create_desc_layout(&[DescLayoutSlot {
+            binding: 0,
+            ty: vk::DescriptorType::STORAGE_IMAGE,
+            count: rendi_render::DescCount::UnboundArray,
+        }])?;
 
         let storage = PerFrame::try_from_fn(|frame_index| {
-            pool.create_desc_set(layout.clone(), &[
-                DescBinding::ImageArray(
+            pool.create_desc_set(
+                layout.clone(),
+                &[DescBinding::ImageArray(
                     sampler.clone(),
                     vk::ImageLayout::GENERAL,
                     &mips[frame_index][1..],
-                ),
-            ])
+                )],
+            )
         })?;
 
         let layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 1,
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
         ])?;
 
         let image_layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
 
         let resolve_descs = PerFrame::try_from_fn(|frame_index| {
-            pool.create_desc_set(layout.clone(), &[
-                DescBinding::Image(sampler.clone(), image_layout,
-                    depth_images[frame_index].clone(),
-                ),
-                DescBinding::Image(sampler.clone(), vk::ImageLayout::GENERAL,
-                    stagings[frame_index].clone(),
-                ),
-            ])
+            pool.create_desc_set(
+                layout.clone(),
+                &[
+                    DescBinding::Image(
+                        sampler.clone(),
+                        image_layout,
+                        depth_images[frame_index].clone(),
+                    ),
+                    DescBinding::Image(
+                        sampler.clone(),
+                        vk::ImageLayout::GENERAL,
+                        stagings[frame_index].clone(),
+                    ),
+                ],
+            )
         })?;
 
         let resolve = {
@@ -328,10 +343,13 @@ impl DepthPyramid {
             let shader = pool.create_shader_module("main", code)?;
             let prog = pool.create_compute_prog(shader)?;
 
-            pool.create_compute_pipeline(prog, &[PushConstRange {
-                size: mem::size_of::<DepthResolveInfo>() as vk::DeviceSize,
-                stage: vk::ShaderStageFlags::COMPUTE,
-            }])?
+            pool.create_compute_pipeline(
+                prog,
+                &[PushConstRange {
+                    size: mem::size_of::<DepthResolveInfo>() as vk::DeviceSize,
+                    stage: vk::ShaderStageFlags::COMPUTE,
+                }],
+            )?
         };
 
         let reduce = {
@@ -339,10 +357,13 @@ impl DepthPyramid {
             let shader = pool.create_shader_module("main", code)?;
             let prog = pool.create_compute_prog(shader)?;
 
-            pool.create_compute_pipeline(prog, &[PushConstRange {
-                size: mem::size_of::<DepthReduceInfo>() as vk::DeviceSize,
-                stage: vk::ShaderStageFlags::COMPUTE,
-            }])?
+            pool.create_compute_pipeline(
+                prog,
+                &[PushConstRange {
+                    size: mem::size_of::<DepthReduceInfo>() as vk::DeviceSize,
+                    stage: vk::ShaderStageFlags::COMPUTE,
+                }],
+            )?
         };
 
         Ok(Self {
@@ -372,16 +393,23 @@ impl CameraDescs {
         let pool = &renderer.static_pool;
 
         let view_buffers = PerFrame::try_from_fn(|_| {
-            pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-                usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
-            })
+            pool.create_buffer(
+                MemoryLocation::Gpu,
+                &BufferInfo {
+                    usage: vk::BufferUsageFlags::UNIFORM_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    size: mem::size_of::<ViewUniform>() as vk::DeviceSize,
+                },
+            )
         })?;
 
-        let proj_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-            size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
-        })?;
+        let proj_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: mem::size_of::<ProjUniform>() as vk::DeviceSize,
+            },
+        )?;
 
         renderer.transfer_with(|recorder| {
             recorder.update_buffer(proj_buffer.clone(), &ProjUniform::new(&camera));
@@ -389,13 +417,20 @@ impl CameraDescs {
 
         let layout = Self::layout(renderer)?;
         let descs = PerFrame::try_from_fn(|index| {
-            pool.create_desc_set(layout.clone(), &[
-                DescBinding::Buffer(proj_buffer.clone()),
-                DescBinding::Buffer(view_buffers[index].clone()),
-            ])
+            pool.create_desc_set(
+                layout.clone(),
+                &[
+                    DescBinding::Buffer(proj_buffer.clone()),
+                    DescBinding::Buffer(view_buffers[index].clone()),
+                ],
+            )
         })?;
 
-        Ok(Self { descs, view_buffers, proj_buffer })
+        Ok(Self {
+            descs,
+            view_buffers,
+            proj_buffer,
+        })
     }
 
     pub fn handle_resize(&self, renderer: &Renderer, camera: &Camera) -> Result<()> {
@@ -409,12 +444,12 @@ impl CameraDescs {
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 1,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
         ])
     }
@@ -437,48 +472,72 @@ impl DrawDesc {
     pub fn new(renderer: &Renderer, scene: &Scene) -> Result<Self> {
         let pool = &renderer.static_pool;
 
-        let count_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST
-                | vk::BufferUsageFlags::INDIRECT_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_SRC,
-            size: mem::size_of::<DrawCount>() as vk::DeviceSize,
-        })?;
+        let count_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_SRC,
+                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+            },
+        )?;
 
-        let cmd_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST
-                | vk::BufferUsageFlags::INDIRECT_BUFFER,
-            size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
-        })?;
+        let cmd_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
+                size: (scene.primitives.len() * mem::size_of::<DrawCommand>()) as vk::DeviceSize,
+            },
+        )?;
 
         let count_host_buffers = array::try_from_fn(|_| {
-            pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
-                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
-                size: mem::size_of::<DrawCount>() as vk::DeviceSize,
-            })
+            pool.create_buffer(
+                MemoryLocation::Cpu,
+                &BufferInfo {
+                    usage: vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                    size: mem::size_of::<DrawCount>() as vk::DeviceSize,
+                },
+            )
         })?;
 
-        let flag_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER,
-            size: (scene.primitives.len() * mem::size_of::<u32>()) as vk::DeviceSize,
-        })?;
+        let flag_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER,
+                size: (scene.primitives.len() * mem::size_of::<u32>()) as vk::DeviceSize,
+            },
+        )?;
 
         renderer.transfer_with(|recorder| {
-            recorder.update_buffer(count_buffer.clone(), &DrawCount {
-                primitive_count: scene.primitive_count(),
-                command_count: 0,
-            });
+            recorder.update_buffer(
+                count_buffer.clone(),
+                &DrawCount {
+                    primitive_count: scene.primitive_count(),
+                    command_count: 0,
+                },
+            );
         })?;
 
         let layout = Self::layout(renderer)?;
-        let desc = pool.create_desc_set(layout, &[
-            DescBinding::Buffer(cmd_buffer.clone()),
-            DescBinding::Buffer(count_buffer.clone()),
-            DescBinding::Buffer(flag_buffer.clone()),
-        ])?;
+        let desc = pool.create_desc_set(
+            layout,
+            &[
+                DescBinding::Buffer(cmd_buffer.clone()),
+                DescBinding::Buffer(count_buffer.clone()),
+                DescBinding::Buffer(flag_buffer.clone()),
+            ],
+        )?;
 
-        Ok(Self { desc, cmd_buffer, count_buffer, count_host_buffers })
+        Ok(Self {
+            desc,
+            cmd_buffer,
+            count_buffer,
+            count_host_buffers,
+        })
     }
 
     pub fn layout(renderer: &Renderer) -> Result<Res<DescLayout>> {
@@ -486,17 +545,17 @@ impl DrawDesc {
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 2,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
         ])
     }
@@ -504,7 +563,7 @@ impl DrawDesc {
     /// Get number of primitives last drawn using this descriptor.
     pub fn primitives_drawn(&self) -> Result<u32> {
         let mut count = 0;
-        
+
         for buffer in &self.count_host_buffers {
             let mapped = buffer.get_mapped()?;
             let draw_count: &DrawCount = bytemuck::from_bytes(mapped.as_slice());
@@ -514,7 +573,6 @@ impl DrawDesc {
 
         Ok(count)
     }
-
 }
 
 /// Forward pass for rendering the geometry of a scene.
@@ -527,7 +585,7 @@ pub struct ForwardPass {
     pub depth_images: PerFrame<Res<ImageView>>,
     pub color_images: PerFrame<Res<ImageView>>,
 
-    pub render: Res<RasterPipeline>, 
+    pub render: Res<RasterPipeline>,
     cull: Res<ComputePipeline>,
 
     depth_pyramid: DepthPyramid,
@@ -545,15 +603,18 @@ impl ForwardPass {
         let depth_images = create_depth_images(renderer, extent, samples)?;
         let color_images = create_forward_color_images(renderer, extent, samples)?;
 
-        let draw_descs = PerFrame::try_from_fn(|_| {
-            DrawDesc::new(renderer, scene)
-        })?;
+        let draw_descs = PerFrame::try_from_fn(|_| DrawDesc::new(renderer, scene))?;
 
         let depth_pyramid = DepthPyramid::new(renderer, &depth_images)?;
         let camera_descs = CameraDescs::new(renderer, &camera)?;
 
-        let lights =
-            Lights::new(&renderer, &camera_descs, &camera, scene.dir_light, &scene.point_lights)?;
+        let lights = Lights::new(
+            &renderer,
+            &camera_descs,
+            &camera,
+            scene.dir_light,
+            &scene.point_lights,
+        )?;
 
         let render_target_info = RenderTargetInfo {
             color_format: Some(color_images.any().image().format()),
@@ -590,10 +651,13 @@ impl ForwardPass {
             let shader = pool.create_shader_module("main", code)?;
             let prog = pool.create_compute_prog(shader)?;
 
-            pool.create_compute_pipeline(prog, &[PushConstRange {
-                size: mem::size_of::<CullInfo>() as vk::DeviceSize,
-                stage: vk::ShaderStageFlags::COMPUTE,
-            }])?
+            pool.create_compute_pipeline(
+                prog,
+                &[PushConstRange {
+                    size: mem::size_of::<CullInfo>() as vk::DeviceSize,
+                    stage: vk::ShaderStageFlags::COMPUTE,
+                }],
+            )?
         };
 
         Ok(Self {
@@ -671,10 +735,13 @@ pub fn cull(
 ) {
     let draw_desc = &pass.draw_descs[index];
 
-    recorder.update_buffer(draw_desc.count_buffer.clone(), &DrawCount {
-        primitive_count: scene.primitive_count(),
-        command_count: 0,
-    });
+    recorder.update_buffer(
+        draw_desc.count_buffer.clone(),
+        &DrawCount {
+            primitive_count: scene.primitive_count(),
+            command_count: 0,
+        },
+    );
 
     recorder.buffer_barrier(&BufferBarrierInfo {
         buffer: draw_desc.count_buffer.clone(),
@@ -722,14 +789,18 @@ pub fn cull(
         padding: [0x0; 2],
     };
 
-    recorder.push_consts(pass.cull.layout(), &[PushConst {
-        stage: vk::ShaderStageFlags::COMPUTE,
-        bytes: bytemuck::bytes_of(&cull_info),
-    }]);
+    recorder.push_consts(
+        pass.cull.layout(),
+        &[PushConst {
+            stage: vk::ShaderStageFlags::COMPUTE,
+            bytes: bytemuck::bytes_of(&cull_info),
+        }],
+    );
 
-    recorder.dispatch(pass.cull.clone(), [
-        scene.primitive_count().div_ceil(64), 1, 1,
-    ]);
+    recorder.dispatch(
+        pass.cull.clone(),
+        [scene.primitive_count().div_ceil(64), 1, 1],
+    );
 
     recorder.buffer_barrier(&BufferBarrierInfo {
         buffer: draw_desc.cmd_buffer.clone(),
@@ -795,7 +866,7 @@ fn render(
                 pass.lights.descs[index].clone(),
             ],
         });
-        
+
         recorder.draw_indexed_indirect_count(&IndexedIndirectDrawInfo {
             draw_command_size: mem::size_of::<DrawCommand>() as vk::DeviceSize,
             draw_buffer: draw_desc.cmd_buffer.clone(),
@@ -841,8 +912,7 @@ fn update_depth_pyramid(
         descs: &[pyramid.resolve_descs[frame_index].clone()],
     });
 
-    let vk::Extent3D { width, height, .. } =
-        pyramid.stagings[frame_index].image().extent(0);
+    let vk::Extent3D { width, height, .. } = pyramid.stagings[frame_index].image().extent(0);
 
     let info = DepthResolveInfo {
         image_size: UVec2::new(width, height),
@@ -850,12 +920,18 @@ fn update_depth_pyramid(
         samples: depth_image.image().sample_count().as_raw(),
     };
 
-    recorder.push_consts(pyramid.resolve.layout(), &[PushConst {
-        stage: vk::ShaderStageFlags::COMPUTE,
-        bytes: bytemuck::bytes_of(&info),
-    }]);
-   
-    recorder.dispatch(pyramid.resolve.clone(), [width.div_ceil(16), height.div_ceil(16), 1]);
+    recorder.push_consts(
+        pyramid.resolve.layout(),
+        &[PushConst {
+            stage: vk::ShaderStageFlags::COMPUTE,
+            bytes: bytemuck::bytes_of(&info),
+        }],
+    );
+
+    recorder.dispatch(
+        pyramid.resolve.clone(),
+        [width.div_ceil(16), height.div_ceil(16), 1],
+    );
 
     recorder.image_barrier(&ImageBarrierInfo {
         flags: vk::DependencyFlags::BY_REGION,
@@ -903,10 +979,13 @@ fn update_depth_pyramid(
 
         let layout = pyramid.reduce.layout();
 
-        recorder.push_consts(layout, &[PushConst {
-            stage: vk::ShaderStageFlags::COMPUTE,
-            bytes: bytemuck::bytes_of(&info),
-        }]);
+        recorder.push_consts(
+            layout,
+            &[PushConst {
+                stage: vk::ShaderStageFlags::COMPUTE,
+                bytes: bytemuck::bytes_of(&info),
+            }],
+        );
 
         recorder.dispatch(pyramid.reduce.clone(), [width / 32, height / 32, 1]);
 
@@ -947,7 +1026,12 @@ pub fn draw(
     cull(pass, scene, camera, RenderPhase::Phase1, index, recorder);
     render(renderer, pass, scene, RenderPhase::Phase1, index, recorder);
 
-    update_depth_pyramid(&pass.depth_pyramid, index, &pass.depth_images[index], recorder);
+    update_depth_pyramid(
+        &pass.depth_pyramid,
+        index,
+        &pass.depth_images[index],
+        recorder,
+    );
 
     cull(pass, scene, camera, RenderPhase::Phase2, index, recorder);
     render(renderer, pass, scene, RenderPhase::Phase2, index, recorder);
@@ -963,17 +1047,20 @@ fn create_depth_images(
             | vk::ImageUsageFlags::TRANSFER_SRC
             | vk::ImageUsageFlags::SAMPLED;
 
-        let image = renderer.pool.create_image(MemoryLocation::Gpu, &ImageInfo {
-            aspect_flags: vk::ImageAspectFlags::DEPTH,
-            format: DEPTH_IMAGE_FORMAT,
-            kind: ImageKind::RenderTarget {
-                queue: renderer.graphics_queue(),
-                samples,
+        let image = renderer.pool.create_image(
+            MemoryLocation::Gpu,
+            &ImageInfo {
+                aspect_flags: vk::ImageAspectFlags::DEPTH,
+                format: DEPTH_IMAGE_FORMAT,
+                kind: ImageKind::RenderTarget {
+                    queue: renderer.graphics_queue(),
+                    samples,
+                },
+                mip_levels: 1,
+                extent,
+                usage,
             },
-            mip_levels: 1,
-            extent,
-            usage,
-        })?;
+        )?;
 
         renderer.pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
@@ -989,20 +1076,22 @@ fn create_forward_color_images(
     samples: vk::SampleCountFlags,
 ) -> Result<PerFrame<Res<ImageView>>> {
     PerFrame::try_from_fn(|_| {
-        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT
-            | vk::ImageUsageFlags::TRANSFER_SRC;
+        let usage = vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC;
 
-        let image = renderer.pool.create_image(MemoryLocation::Gpu, &ImageInfo {
-            aspect_flags: vk::ImageAspectFlags::COLOR,
-            format: renderer.swapchain.format(),
-            kind: ImageKind::RenderTarget {
-                queue: renderer.graphics_queue(),
-                samples,
+        let image = renderer.pool.create_image(
+            MemoryLocation::Gpu,
+            &ImageInfo {
+                aspect_flags: vk::ImageAspectFlags::COLOR,
+                format: renderer.swapchain.format(),
+                kind: ImageKind::RenderTarget {
+                    queue: renderer.graphics_queue(),
+                    samples,
+                },
+                mip_levels: 1,
+                extent,
+                usage,
             },
-            mip_levels: 1,
-            extent,
-            usage,
-        })?;
+        )?;
 
         renderer.pool.create_image_view(&ImageViewInfo {
             view_type: vk::ImageViewType::TYPE_2D,
@@ -1039,7 +1128,8 @@ impl Scene {
     ) -> Result<Self> {
         let pool = &renderer.static_pool;
 
-        let instance_data: Vec<_> = scene.instances
+        let instance_data: Vec<_> = scene
+            .instances
             .iter()
             .map(|instance| InstanceData {
                 transform: instance.transform,
@@ -1048,11 +1138,13 @@ impl Scene {
 
         trace!("loading {} instances", scene.instances.len());
 
-        let primitives: Vec<Primitive> = scene.instances
+        let primitives: Vec<Primitive> = scene
+            .instances
             .iter()
             .enumerate()
             .flat_map(|(i, instance)| {
-                scene.meshes[instance.mesh].primitives
+                scene.meshes[instance.mesh]
+                    .primitives
                     .iter()
                     .map(move |prim| {
                         let mut lods: [Lod; MAX_LOD_COUNT] = Default::default();
@@ -1067,12 +1159,15 @@ impl Scene {
                             };
                         }
 
-                        let rendi_asset::Material { albedo_map, specular_map, normal_map, .. } =
-                            scene.materials[prim.material];
+                        let rendi_asset::Material {
+                            albedo_map,
+                            specular_map,
+                            normal_map,
+                            ..
+                        } = scene.materials[prim.material];
 
-                        let (albedo_map, specular_map, normal_map) = (
-                            albedo_map as u32, specular_map as u32, normal_map as u32,
-                        );
+                        let (albedo_map, specular_map, normal_map) =
+                            (albedo_map as u32, specular_map as u32, normal_map as u32);
 
                         Primitive {
                             center: prim.bounding_sphere.center.extend(1.0),
@@ -1098,57 +1193,77 @@ impl Scene {
         let staging_pool = ResourcePool::new(renderer.device.clone());
 
         let primitive_data = bytemuck::cast_slice(primitives.as_slice());
-        let primitive_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: primitive_data.len() as vk::DeviceSize,
-        })?;
+        let primitive_staging = staging_pool.create_buffer(
+            MemoryLocation::Cpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: primitive_data.len() as vk::DeviceSize,
+            },
+        )?;
 
         let instance_data = bytemuck::cast_slice(instance_data.as_slice());
-        let instance_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: instance_data.len() as vk::DeviceSize,
-        })?;
+        let instance_staging = staging_pool.create_buffer(
+            MemoryLocation::Cpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: instance_data.len() as vk::DeviceSize,
+            },
+        )?;
 
         let vertex_data = bytemuck::cast_slice(scene.vertices.as_slice());
-        let vertex_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: vertex_data.len() as vk::DeviceSize,
-        })?;
+        let vertex_staging = staging_pool.create_buffer(
+            MemoryLocation::Cpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: vertex_data.len() as vk::DeviceSize,
+            },
+        )?;
 
         let index_data = bytemuck::cast_slice(scene.indices.as_slice());
-        let index_staging = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::TRANSFER_SRC,
-            size: index_data.len() as vk::DeviceSize,
-        })?;
+        let index_staging = staging_pool.create_buffer(
+            MemoryLocation::Cpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                size: index_data.len() as vk::DeviceSize,
+            },
+        )?;
 
         primitive_staging.get_mapped()?.fill(primitive_data);
         instance_staging.get_mapped()?.fill(instance_data);
         vertex_staging.get_mapped()?.fill(vertex_data);
         index_staging.get_mapped()?.fill(index_data);
 
-        let instance_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            size: instance_data.len() as vk::DeviceSize,
-        })?;
+        let instance_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: instance_data.len() as vk::DeviceSize,
+            },
+        )?;
 
-        let primitive_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            size: primitive_data.len() as vk::DeviceSize,
-        })?;
+        let primitive_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: primitive_data.len() as vk::DeviceSize,
+            },
+        )?;
 
-        let vertex_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::STORAGE_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            size: vertex_data.len() as vk::DeviceSize,
-        })?;
+        let vertex_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: vertex_data.len() as vk::DeviceSize,
+            },
+        )?;
 
-        let index_buffer = pool.create_buffer(MemoryLocation::Gpu, &BufferInfo {
-            usage: vk::BufferUsageFlags::INDEX_BUFFER
-                | vk::BufferUsageFlags::TRANSFER_DST,
-            size: index_data.len() as vk::DeviceSize,
-        })?;
+        let index_buffer = pool.create_buffer(
+            MemoryLocation::Gpu,
+            &BufferInfo {
+                usage: vk::BufferUsageFlags::INDEX_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                size: index_data.len() as vk::DeviceSize,
+            },
+        )?;
 
         renderer.transfer_with(|recorder| {
             let buffers = [
@@ -1163,16 +1278,21 @@ impl Scene {
             }
         })?;
 
-        let staging: Result<Vec<Vec<_>>> = scene.textures
+        let staging: Result<Vec<Vec<_>>> = scene
+            .textures
             .iter()
             .map(|texture| {
-                texture.mips
+                texture
+                    .mips
                     .iter()
                     .map(|data| {
-                        let buffer = staging_pool.create_buffer(MemoryLocation::Cpu, &BufferInfo {
-                            usage: vk::BufferUsageFlags::TRANSFER_SRC,
-                            size: data.len() as vk::DeviceSize,
-                        })?;
+                        let buffer = staging_pool.create_buffer(
+                            MemoryLocation::Cpu,
+                            &BufferInfo {
+                                usage: vk::BufferUsageFlags::TRANSFER_SRC,
+                                size: data.len() as vk::DeviceSize,
+                            },
+                        )?;
 
                         buffer.get_mapped()?.fill(data);
 
@@ -1184,22 +1304,25 @@ impl Scene {
 
         let staging = staging?;
 
-        let images: Result<Vec<_>> = scene.textures
+        let images: Result<Vec<_>> = scene
+            .textures
             .iter()
             .map(|texture| {
-                pool.create_image(MemoryLocation::Gpu, &ImageInfo {
-                    mip_levels: texture.mip_levels(),
-                    format: texture.format.into(),
-                    kind: ImageKind::Texture,
-                    aspect_flags: vk::ImageAspectFlags::COLOR,
-                    usage: vk::ImageUsageFlags::TRANSFER_DST
-                        | vk::ImageUsageFlags::SAMPLED,
-                    extent: vk::Extent3D {
-                        width: texture.width,
-                        height: texture.height,
-                        depth: 1,
+                pool.create_image(
+                    MemoryLocation::Gpu,
+                    &ImageInfo {
+                        mip_levels: texture.mip_levels(),
+                        format: texture.format.into(),
+                        kind: ImageKind::Texture,
+                        aspect_flags: vk::ImageAspectFlags::COLOR,
+                        usage: vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+                        extent: vk::Extent3D {
+                            width: texture.width,
+                            height: texture.height,
+                            depth: 1,
+                        },
                     },
-                })
+                )
             })
             .collect();
 
@@ -1249,46 +1372,57 @@ impl Scene {
                 })
             })
             .collect();
-    
+
         let textures = textures?;
 
         let desc_layout = pool.create_desc_layout(&[
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 2,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 3,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                count: rendi_shader::DescCount::Unbound,
+                count: rendi_render::DescCount::UnboundArray,
             },
         ])?;
 
         let sampler = pool.create_sampler()?;
 
-        let desc = pool.create_desc_set(desc_layout, &[
-            DescBinding::Buffer(instance_buffer.clone()),
-            DescBinding::Buffer(primitive_buffer.clone()),
-            DescBinding::Buffer(vertex_buffer.clone()),
-            DescBinding::ImageArray(
-                sampler.clone(), vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL, &textures,
-            ),
-        ])?;
+        let desc = pool.create_desc_set(
+            desc_layout,
+            &[
+                DescBinding::Buffer(instance_buffer.clone()),
+                DescBinding::Buffer(primitive_buffer.clone()),
+                DescBinding::Buffer(vertex_buffer.clone()),
+                DescBinding::ImageArray(
+                    sampler.clone(),
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    &textures,
+                ),
+            ],
+        )?;
 
         let point_lights = Vec::from(lights);
 
-        Ok(Self { desc, primitives, index_buffer, point_lights, dir_light })
+        Ok(Self {
+            desc,
+            primitives,
+            index_buffer,
+            point_lights,
+            dir_light,
+        })
     }
 
     pub fn primitive_count(&self) -> u32 {

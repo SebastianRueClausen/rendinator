@@ -1,5 +1,5 @@
 [package]
-name = "rendi_shader"
+name = "rendi_render"
 version = "0.1.0"
 edition = "2021"
 

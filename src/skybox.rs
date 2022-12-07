@@ -114,12 +114,12 @@ impl Generator {
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::STORAGE_IMAGE,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 1,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
         ])?;
 
@@ -225,7 +225,7 @@ impl Skybox {
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
         ])?;
 

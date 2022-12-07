@@ -117,7 +117,7 @@ impl TextPass {
         let layout = pool.create_desc_layout(&[DescLayoutSlot {
             binding: 0,
             ty: vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-            count: rendi_shader::DescCount::Single,
+            count: rendi_render::DescCount::Single,
         }])?;
 
         let desc = pool.create_desc_set(layout.clone(), &[

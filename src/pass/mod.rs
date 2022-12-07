@@ -7,7 +7,6 @@ use ash::vk;
 use smallvec::SmallVec;
 use thiserror::Error;
 
-use std::cell::Cell;
 use std::fmt;
 use std::rc::Rc;
 
@@ -18,8 +17,8 @@ use crate::resource::{
 };
 use cmd::Cmd;
 use rendi_data_structs::SortedMap;
+use rendi_render::{Access, BindSlot, BufferKind, DescCount, DescKind, GroupCount};
 use rendi_res::{Bump, Res};
-use rendi_shader::{BindSlot, DescAccess, DescCount, DescKind};
 
 #[derive(Error, Debug, Clone, PartialEq)]
 pub enum PassBuildError {
@@ -129,7 +128,7 @@ pub struct Accesses {
     buffers: HashMap<Res<Buffer>, BufferAccess>,
 }
 
-fn is_access_dependecy(src: DescAccess, dst: DescAccess) -> bool {
+fn is_access_dependecy(src: Access, dst: Access) -> bool {
     if src.writes() && dst.reads() {
         return true;
     }
@@ -339,7 +338,7 @@ impl DescBindings {
             slot.into(),
             Bound {
                 kind: Some(DescKind::SampledImage),
-                count: DescCount::Bound(image_views.len() as u32),
+                count: DescCount::BoundArray(image_views.len() as u32),
                 resource: BoundResource::ImageView(Some(sampler), BoundStorage::from(image_views)),
             },
         );
@@ -358,7 +357,7 @@ impl DescBindings {
             Bound {
                 kind: Some(DescKind::StorageImage),
                 resource: BoundResource::ImageView(None, BoundStorage::from(image_views)),
-                count: DescCount::Bound(image_views.len() as u32),
+                count: DescCount::BoundArray(image_views.len() as u32),
             },
         );
         self
@@ -379,7 +378,7 @@ impl DescBindings {
             Bound {
                 kind: buffers.first().map(|buffer| buffer.kind().into()),
                 resource: BoundResource::Buffer(BoundStorage::from(buffers)),
-                count: DescCount::Bound(buffers.len() as u32),
+                count: DescCount::BoundArray(buffers.len() as u32),
             },
         );
         self
@@ -391,7 +390,7 @@ fn check_bind_count(
     is: DescCount,
     slot: BindSlot,
 ) -> Result<(), PassBuildError> {
-    if is == expected || (is.is_bound() && expected.is_unbound()) {
+    if is == expected || (is.is_bound_array() && expected.is_unbound_array()) {
         return Ok(());
     }
 
@@ -406,7 +405,7 @@ fn check_bind_kind(expected: DescKind, is: DescKind, slot: BindSlot) -> Result<(
     Ok(())
 }
 
-fn shader_access_flags(access: DescAccess) -> vk::AccessFlags2 {
+fn shader_access_flags(access: Access) -> vk::AccessFlags2 {
     let mut flags = vk::AccessFlags2::empty();
     if access.reads() {
         flags |= vk::AccessFlags2::SHADER_READ
@@ -427,7 +426,7 @@ fn desc_accesses<T: Prog>(
 
     let mut accesses = Accesses::default();
     for (bind_slot, bound) in &bindings.bound {
-        let Some(bind) = prog.descs().get_bind(*bind_slot) else {
+        let Some(bind) = prog.bindings().binding(*bind_slot) else {
             return Err(PassBuildError::NoShaderSlot(*bind_slot))
         };
 
@@ -507,19 +506,19 @@ fn build_desc_sets<T: Prog>(
     layout: &PipelineLayout,
     prog: Res<T>,
 ) -> Result<DescSets, PassBuildError> {
-    let max_set = prog.descs().max_set().map_or(0, |s| s + 1);
+    let max_set = prog.bindings().max_bound_set().map_or(0, |s| s + 1);
     let desc_sets = (0..max_set)
-        .map(|set_id| {
-            let Some(set) = prog.descs().get_set(set_id) else {
+        .map(|set_location| {
+            let Some(set) = prog.bindings().set(set_location) else {
                 return Ok(None);
             };
 
             // Create a sorted list of the binding number and bound resource of the set.
             // Check at the same time that every bind slots in the shader has been bound.
             let bounds: Vec<(u32, &Bound)> = set
-                .binds()
+                .bindings()
                 .map(|(binding, _)| {
-                    let bind_slot = BindSlot::new(set_id, *binding);
+                    let bind_slot = BindSlot::new(set_location, *binding);
                     let Some(resource) = bindings.bound.get(&bind_slot) else {
                         return Err(PassBuildError::MissingBinding(bind_slot));
                     };
@@ -542,9 +541,12 @@ fn build_desc_sets<T: Prog>(
                     .expect("should have binding")
             });
 
-            let layout = layout.get_desc_layout(set_id).cloned().unwrap_or_else(|| {
-                panic!("pipeline doesn't have desc set {set_id}, which it should")
-            });
+            let layout = layout
+                .get_desc_layout(set_location)
+                .cloned()
+                .unwrap_or_else(|| {
+                    panic!("pipeline doesn't have desc set {set_location}, which it should")
+                });
 
             #[cfg(test)]
             let (handle, desc_pool) = unsafe {
@@ -569,7 +571,7 @@ fn build_desc_sets<T: Prog>(
                 .into_iter()
                 .filter_map(|(binding, bound)| {
                     let access = set
-                        .get_bind(binding)
+                        .binding(binding)
                         .expect("should have shader binding")
                         .access();
 
@@ -588,7 +590,7 @@ fn build_desc_sets<T: Prog>(
                                 })
                                 .into();
 
-                            let image_layout = if !access.contains(DescAccess::WRITE) {
+                            let image_layout = if !access.contains(Access::WRITE) {
                                 vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL
                             } else {
                                 vk::ImageLayout::GENERAL
@@ -669,78 +671,6 @@ fn build_desc_sets<T: Prog>(
         .collect::<Result<_, PassBuildError>>()?;
 
     Ok(desc_sets)
-}
-
-/// The group count of a compute dispatch.
-#[derive(Clone, PartialEq, Eq)]
-pub struct GroupCount {
-    x: Cell<u32>,
-    y: Cell<u32>,
-    z: Cell<u32>,
-}
-
-impl GroupCount {
-    #[inline]
-    pub fn new(x: u32, y: u32, z: u32) -> Self {
-        Self {
-            x: x.into(),
-            y: y.into(),
-            z: z.into(),
-        }
-    }
-
-    #[inline]
-    pub fn x(&self) -> u32 {
-        self.x.get()
-    }
-
-    #[inline]
-    pub fn y(&self) -> u32 {
-        self.y.get()
-    }
-
-    #[inline]
-    pub fn z(&self) -> u32 {
-        self.z.get()
-    }
-
-    /// Change group count.
-    #[inline]
-    pub fn change(&self, x: u32, y: u32, z: u32) {
-        self.x.set(x);
-        self.y.set(y);
-        self.z.set(z);
-    }
-
-    /// Get the total group count.
-    /// Just `self.x() * self.y() * self.z()`
-    #[inline]
-    pub fn total_group_count(&self) -> u32 {
-        self.x() * self.y() * self.z()
-    }
-}
-
-impl From<(u32, u32, u32)> for GroupCount {
-    fn from((x, y, z): (u32, u32, u32)) -> Self {
-        Self::new(x, y, z)
-    }
-}
-
-impl fmt::Debug for GroupCount {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("GroupCount")
-            .field(&self.x())
-            .field(&self.y())
-            .field(&self.z())
-            .finish()
-    }
-}
-
-impl Default for GroupCount {
-    /// Returns group count with dimensions `(1, 1, 1)`.
-    fn default() -> Self {
-        Self::new(1, 1, 1)
-    }
 }
 
 pub struct ComputePassBuilder<'a> {
@@ -1028,8 +958,8 @@ mod test {
             pass.error,
             Some(PassBuildError::WrongBindKind {
                 slot: (0, 0).into(),
-                expected: DescKind::UniformBuffer,
-                is: DescKind::StorageBuffer,
+                expected: DescKind::Buffer(BufferKind::Uniform),
+                is: DescKind::Buffer(BufferKind::Storage),
             })
         );
     }

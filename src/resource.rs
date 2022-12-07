@@ -13,8 +13,8 @@ use std::{fmt, mem, ops, slice};
 
 use crate::core::*;
 use rendi_data_structs::SortedMap;
+use rendi_render::{reflect, BufferKind};
 use rendi_res::{Bump, DummyRes, Res, Slabs};
-use rendi_shader::{ComputeReflection, DescKind, RasterReflection};
 
 type MemoryRange = ops::Range<vk::DeviceSize>;
 
@@ -193,41 +193,6 @@ impl Eq for MemoryBlock {}
 pub struct BufferInfo {
     pub usage: vk::BufferUsageFlags,
     pub size: u64,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum BufferKind {
-    Storage,
-    Uniform,
-}
-
-impl fmt::Display for BufferKind {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let name = match self {
-            BufferKind::Uniform => "uniform",
-            BufferKind::Storage => "storage",
-        };
-        write!(f, "{name}")
-    }
-}
-
-impl Into<DescKind> for BufferKind {
-    fn into(self) -> DescKind {
-        match self {
-            BufferKind::Storage => DescKind::StorageBuffer,
-            BufferKind::Uniform => DescKind::UniformBuffer,
-        }
-    }
-}
-
-impl From<vk::BufferUsageFlags> for BufferKind {
-    fn from(flags: vk::BufferUsageFlags) -> Self {
-        if flags.contains(vk::BufferUsageFlags::UNIFORM_BUFFER) {
-            BufferKind::Uniform
-        } else {
-            BufferKind::Storage
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -777,17 +742,17 @@ impl Drop for Sampler {
 }
 
 pub trait Prog {
-    fn descs(&self) -> &rendi_shader::Descs;
+    fn bindings(&self) -> &rendi_render::ShaderBindings;
 }
 
 pub struct ComputeProg {
     module: Res<ShaderModule>,
-    reflection: ComputeReflection,
+    reflection: reflect::ComputeReflection,
 }
 
 impl ResourcePool {
     pub fn create_compute_prog(&self, module: Res<ShaderModule>) -> Result<Res<ComputeProg>> {
-        let reflection = ComputeReflection::new(module.source())?;
+        let reflection = reflect::ComputeReflection::new(module.source())?;
 
         Ok(self.alloc(ComputeProg { reflection, module }))
     }
@@ -798,14 +763,14 @@ impl ComputeProg {
         self.module.clone()
     }
 
-    pub fn reflection(&self) -> &ComputeReflection {
+    pub fn reflection(&self) -> &reflect::ComputeReflection {
         &self.reflection
     }
 }
 
 impl Prog for ComputeProg {
-    fn descs(&self) -> &rendi_shader::Descs {
-        self.reflection.descs()
+    fn bindings(&self) -> &rendi_render::ShaderBindings {
+        self.reflection.bindings()
     }
 }
 
@@ -813,7 +778,7 @@ pub struct RasterProg {
     pub vert_module: Res<ShaderModule>,
     pub frag_module: Res<ShaderModule>,
 
-    pub reflection: RasterReflection,
+    pub reflection: reflect::RasterReflection,
 }
 
 impl ResourcePool {
@@ -822,7 +787,8 @@ impl ResourcePool {
         vert_module: Res<ShaderModule>,
         frag_module: Res<ShaderModule>,
     ) -> Result<Res<RasterProg>> {
-        let reflection = RasterReflection::new(frag_module.source(), vert_module.source())?;
+        let reflection =
+            reflect::RasterReflection::new(frag_module.source(), vert_module.source())?;
 
         Ok(self.alloc(RasterProg {
             reflection,
@@ -841,14 +807,14 @@ impl RasterProg {
         self.frag_module.clone()
     }
 
-    pub fn reflection(&self) -> &RasterReflection {
+    pub fn reflection(&self) -> &reflect::RasterReflection {
         &self.reflection
     }
 }
 
 impl Prog for RasterProg {
-    fn descs(&self) -> &rendi_shader::Descs {
-        self.reflection.descs()
+    fn bindings(&self) -> &rendi_render::ShaderBindings {
+        self.reflection.bindings()
     }
 }
 
@@ -1005,22 +971,16 @@ impl Drop for PipelineLayout {
 
 fn pipeline_layout_from_desc_binds(
     pool: &ResourcePool,
-    binds: &rendi_shader::Descs,
+    binds: &rendi_render::ShaderBindings,
     push_const_ranges: &[PushConstRange],
 ) -> Result<Res<PipelineLayout>> {
     let mut desc_layout_slots: Vec<(u32, Vec<DescLayoutSlot>)> = Vec::new();
 
-    for (slot, binding) in binds.binds() {
+    for (slot, binding) in binds.bindings() {
         let get_layout_slot = || {
-            let ty = match binding.kind() {
-                DescKind::UniformBuffer => vk::DescriptorType::UNIFORM_BUFFER,
-                DescKind::StorageBuffer => vk::DescriptorType::STORAGE_BUFFER,
-                DescKind::SampledImage => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
-                DescKind::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
-            };
-
+            let ty: vk::DescriptorType = binding.kind().into();
             DescLayoutSlot {
-                binding: slot.binding(),
+                binding: slot.location(),
                 count: binding.count(),
                 ty,
             }
@@ -1070,8 +1030,8 @@ impl ResourcePool {
         let module = prog.module();
         let stage = module.stage_create_info(vk::ShaderStageFlags::COMPUTE);
 
-        let binds = prog.reflection().descs();
-        let layout = pipeline_layout_from_desc_binds(self, binds, push_const_ranges)?;
+        let bindings = prog.reflection().bindings();
+        let layout = pipeline_layout_from_desc_binds(self, bindings, push_const_ranges)?;
 
         let create_infos = [vk::ComputePipelineCreateInfo::builder()
             .layout(layout.handle)
@@ -1153,7 +1113,7 @@ impl ResourcePool {
     pub fn create_raster_pipeline(&self, info: RasterPipelineInfo) -> Result<Res<RasterPipeline>> {
         let device = self.device.clone();
 
-        let binds = info.prog.reflection().descs();
+        let binds = info.prog.reflection().bindings();
         let layout = pipeline_layout_from_desc_binds(self, binds, info.push_consts)?;
 
         let vert_stage = *info
@@ -1355,7 +1315,7 @@ impl Drop for DescPool {
 pub struct DescLayoutSlot {
     pub binding: u32,
     pub ty: vk::DescriptorType,
-    pub count: rendi_shader::DescCount,
+    pub count: rendi_render::DescCount,
 }
 
 struct DescLayoutSlots {
@@ -1370,7 +1330,7 @@ impl DescLayoutSlots {
             .map(|binding| {
                 let mut flags = vk::DescriptorBindingFlags::empty();
 
-                if binding.count == rendi_shader::DescCount::Unbound {
+                if binding.count == rendi_render::DescCount::UnboundArray {
                     flags |= vk::DescriptorBindingFlags::VARIABLE_DESCRIPTOR_COUNT;
                 }
 
@@ -1386,11 +1346,11 @@ impl DescLayoutSlots {
                     .binding(binding.binding)
                     .descriptor_type(binding.ty)
                     .descriptor_count(match binding.count {
-                        rendi_shader::DescCount::Single => 1,
+                        rendi_render::DescCount::Single => 1,
                         // NOTE: This is an upper bound. Not sure of the performance if this is set
                         // to something like 5000.
-                        rendi_shader::DescCount::Unbound => 100,
-                        rendi_shader::DescCount::Bound(count) => count,
+                        rendi_render::DescCount::UnboundArray => 100,
+                        rendi_render::DescCount::BoundArray(count) => count,
                     })
                     .stage_flags(vk::ShaderStageFlags::ALL)
                     .build()

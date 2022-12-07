@@ -262,27 +262,27 @@ impl Lights {
             DescLayoutSlot {
                 binding: 0,
                 ty: vk::DescriptorType::UNIFORM_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 1,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 2,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 3,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
             DescLayoutSlot {
                 binding: 4,
                 ty: vk::DescriptorType::STORAGE_BUFFER,
-                count: rendi_shader::DescCount::Single,
+                count: rendi_render::DescCount::Single,
             },
         ])?;
 
