@@ -830,7 +830,6 @@ impl Drop for FrameQueue {
     }
 }
 
-/// TODO: Make this handle more display servers besides Wayland.
 pub struct Surface {
     handle: vk::SurfaceKHR,
     loader: khr::Surface,

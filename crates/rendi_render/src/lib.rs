@@ -1,8 +1,13 @@
 #![warn(clippy::all)]
 #![allow(clippy::zero_prefixed_literal)]
 
+#[macro_use]
+extern crate log;
+
 pub mod device;
+pub mod instance;
 pub mod reflect;
+pub mod surface;
 
 use ash::vk;
 use std::cell::Cell;
@@ -10,7 +15,47 @@ use std::cmp::Ordering;
 use std::fmt;
 use std::slice;
 
+pub use crate::device::{
+    Device, PhysicalDevice, Queue, QueueFamilyIndex, QueueRequest, QueueRequestKind,
+};
+pub use crate::instance::{Instance, ValidationLayers};
+pub use crate::surface::Surface;
 use rendi_data_structs::SortedMap;
+
+#[derive(Debug, thiserror::Error)]
+pub enum RenderError {
+    #[error("out of gpu memory")]
+    OomGpu,
+
+    #[error("missing layer: {0}")]
+    MissingLayer(String),
+
+    #[error("missing extension {0}")]
+    MissingExt(String),
+
+    #[error("no physical device found")]
+    NoPhysicalDeviceFound,
+
+    #[error("unsupported platform")]
+    UnsupportedPlatform,
+
+    #[error("vulkan error: {0}")]
+    VulkanFailure(vk::Result),
+
+    #[error("failed to load vulkan functions: {0}")]
+    LoadFailure(#[from] ash::LoadingError),
+}
+
+impl From<vk::Result> for RenderError {
+    fn from(result: vk::Result) -> Self {
+        match result {
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => RenderError::OomGpu,
+            // No real reason to handle oom here.
+            vk::Result::ERROR_OUT_OF_HOST_MEMORY => panic!("allocation failed"),
+            result => RenderError::VulkanFailure(result),
+        }
+    }
+}
 
 /// The slot where a [`DescBinding`] is defined.
 /// This is both the set and location within the set.
@@ -138,9 +183,9 @@ pub enum DescKind {
     SampledImage,
 }
 
-impl Into<vk::DescriptorType> for DescKind {
-    fn into(self) -> vk::DescriptorType {
-        match self {
+impl From<DescKind> for vk::DescriptorType {
+    fn from(kind: DescKind) -> vk::DescriptorType {
+        match kind {
             DescKind::Buffer(BufferKind::Storage) => vk::DescriptorType::STORAGE_BUFFER,
             DescKind::Buffer(BufferKind::Uniform) => vk::DescriptorType::UNIFORM_BUFFER,
             DescKind::StorageImage => vk::DescriptorType::STORAGE_IMAGE,
@@ -182,15 +227,15 @@ impl fmt::Display for BufferKind {
     }
 }
 
-impl Into<DescKind> for BufferKind {
-    fn into(self) -> DescKind {
-        DescKind::Buffer(self)
+impl From<BufferKind> for DescKind {
+    fn from(kind: BufferKind) -> DescKind {
+        DescKind::Buffer(kind)
     }
 }
 
-impl Into<vk::DescriptorType> for BufferKind {
-    fn into(self) -> vk::DescriptorType {
-        match self {
+impl From<BufferKind> for vk::DescriptorType {
+    fn from(kind: BufferKind) -> vk::DescriptorType {
+        match kind {
             BufferKind::Uniform => vk::DescriptorType::UNIFORM_BUFFER,
             BufferKind::Storage => vk::DescriptorType::STORAGE_BUFFER,
         }
@@ -207,9 +252,9 @@ impl From<vk::BufferUsageFlags> for BufferKind {
     }
 }
 
-impl Into<vk::BufferUsageFlags> for BufferKind {
-    fn into(self) -> vk::BufferUsageFlags {
-        match self {
+impl From<BufferKind> for vk::BufferUsageFlags {
+    fn from(kind: BufferKind) -> vk::BufferUsageFlags {
+        match kind {
             BufferKind::Uniform => vk::BufferUsageFlags::UNIFORM_BUFFER,
             BufferKind::Storage => vk::BufferUsageFlags::STORAGE_BUFFER,
         }
@@ -333,11 +378,10 @@ pub enum ShaderStage {
     Raster,
 }
 
-impl Into<vk::PipelineStageFlags2> for ShaderStage {
-    fn into(self) -> vk::PipelineStageFlags2 {
+impl From<ShaderStage> for vk::PipelineStageFlags2 {
+    fn from(stage: ShaderStage) -> vk::PipelineStageFlags2 {
         use vk::PipelineStageFlags2 as Stage;
-
-        match self {
+        match stage {
             ShaderStage::Compute => Stage::COMPUTE_SHADER,
             ShaderStage::Fragment => Stage::FRAGMENT_SHADER,
             ShaderStage::Vertex => Stage::VERTEX_SHADER,
@@ -421,11 +465,11 @@ impl PrimType {
     }
 }
 
-impl Into<vk::Format> for PrimType {
-    fn into(self) -> vk::Format {
+impl From<PrimType> for vk::Format {
+    fn from(prim: PrimType) -> vk::Format {
         use {PrimKind::*, PrimShape::*};
 
-        match (self.kind(), self.shape()) {
+        match (prim.kind(), prim.shape()) {
             (Int, Scalar) => vk::Format::R32_SINT,
             (Int, Vec2) => vk::Format::R32G32_SINT,
             (Int, Vec3) => vk::Format::R32G32B32_SINT,
@@ -493,7 +537,6 @@ impl DescSetBindings {
     }
 
     /// Returns iterator of all the bindings in the set.
-    #[must_use]
     pub fn bindings(&self) -> impl Iterator<Item = &(DescLocation, DescBinding)> {
         self.binds.iter()
     }
@@ -537,7 +580,7 @@ impl ShaderBindings {
 
                 let binds = binds
                     .iter()
-                    .map(|(bind_slot, bind)| (bind_slot.location(), bind.clone()))
+                    .map(|(bind_slot, bind)| (bind_slot.location(), *bind))
                     .collect();
 
                 (
@@ -569,8 +612,7 @@ impl ShaderBindings {
     pub fn binding(&self, slot: BindSlot) -> Option<&DescBinding> {
         self.sets
             .get(&slot.set())
-            .map(|set| set.binds.get(&slot.location()))
-            .flatten()
+            .and_then(|set| set.binds.get(&slot.location()))
     }
 
     /// Get the maximum descriptor set location.
@@ -590,13 +632,11 @@ impl ShaderBindings {
     }
 
     /// Returns an iterator of all the descriptor sets.
-    #[must_use]
     pub fn sets(&self) -> impl Iterator<Item = &(DescSetLocation, DescSetBindings)> {
         self.sets.iter()
     }
 
     /// Returns an iterator of all the bindings.
-    #[must_use]
     pub fn bindings(&self) -> impl Iterator<Item = (BindSlot, DescBinding)> + '_ {
         self.sets.iter().flat_map(|(set, binds)| {
             binds
@@ -704,7 +744,6 @@ impl GroupCount {
     }
 
     /// Change group count.
-    #[must_use]
     pub fn change(&self, x: u32, y: u32, z: u32) {
         self.x.set(x);
         self.y.set(y);

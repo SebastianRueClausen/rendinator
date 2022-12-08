@@ -252,13 +252,12 @@ pub struct ComputeReflection {
 
 impl ComputeReflection {
     /// Generate a reflection from `code`, which should be valid SPIR-V code of a compute shader.
-    #[must_use]
     pub fn new(code: &[u32]) -> Result<Self, ReflectError> {
-        let (bindings, _, push_const) = get_shader_info(code, ShaderStage::Compute)?;
+        let info = get_shader_info(code, ShaderStage::Compute)?;
 
         Ok(Self {
-            bindings: ShaderBindings::new(bindings),
-            push_const,
+            bindings: ShaderBindings::new(info.bindings),
+            push_const: info.push_const,
         })
     }
 
@@ -287,17 +286,15 @@ impl RasterReflection {
     /// Generate reflection of a vertex and fragment shader.
     /// Both `frag_code` and `vert_code` should be valid SPIR-V code of their respective shader
     /// stage.
-    #[must_use]
     pub fn new(frag_code: &[u32], vert_code: &[u32]) -> Result<Self, ReflectError> {
-        let (frag_binds, _, frag_push_const) = get_shader_info(frag_code, ShaderStage::Fragment)?;
-        let (vert_binds, vert_inputs, vert_push_const) =
-            get_shader_info(vert_code, ShaderStage::Vertex)?;
+        let frag_info = get_shader_info(frag_code, ShaderStage::Fragment)?;
+        let vert_info = get_shader_info(vert_code, ShaderStage::Vertex)?;
 
-        let mut bindings = vert_binds.clone();
+        let mut bindings = vert_info.bindings.clone();
 
         // Go through each binding in the fragment shader and add it to the vertex bindings if not
         // present already. If it's present, then make sure they match.
-        for (slot, frag_bind) in &frag_binds {
+        for (slot, frag_bind) in &frag_info.bindings {
             let Some(vert_bind) = bindings.get_mut(slot) else {
                 bindings.insert(*slot, *frag_bind);
                 continue;
@@ -309,7 +306,7 @@ impl RasterReflection {
                 return Err(ReflectError::DifferentDescKind {
                     vert: vert_bind.kind(),
                     frag: frag_bind.kind(),
-                    slot: slot.clone(),
+                    slot: *slot,
                 });
             }
 
@@ -317,7 +314,7 @@ impl RasterReflection {
                 return Err(ReflectError::DifferentDescCount {
                     vert: vert_bind.count(),
                     frag: frag_bind.count(),
-                    slot: slot.clone(),
+                    slot: *slot,
                 });
             }
         }
@@ -325,9 +322,9 @@ impl RasterReflection {
         let bindings = ShaderBindings::new(bindings);
 
         Ok(Self {
-            frag_push_const,
-            vert_push_const,
-            vert_inputs,
+            frag_push_const: frag_info.push_const,
+            vert_push_const: vert_info.push_const,
+            vert_inputs: vert_info.inputs,
             bindings,
         })
     }
@@ -712,17 +709,14 @@ impl<'a> Reflection<'a> {
             .copied()
     }
 }
-fn get_shader_info(
-    binary: &[u32],
-    stage: ShaderStage,
-) -> Result<
-    (
-        SortedMap<BindSlot, DescBinding>,
-        ShaderInputs,
-        Option<PushConstRange>,
-    ),
-    ReflectError,
-> {
+
+struct ShaderInfo {
+    bindings: SortedMap<BindSlot, DescBinding>,
+    inputs: ShaderInputs,
+    push_const: Option<PushConstRange>,
+}
+
+fn get_shader_info(binary: &[u32], stage: ShaderStage) -> Result<ShaderInfo, ReflectError> {
     let reflection = Reflection::new(binary)?;
 
     let mut inputs = Vec::new();
@@ -975,11 +969,11 @@ fn get_shader_info(
         };
     }
 
-    Ok((
-        SortedMap::from_unsorted(desc_binds),
-        ShaderInputs::new(inputs),
+    Ok(ShaderInfo {
+        bindings: SortedMap::from_unsorted(desc_binds),
+        inputs: ShaderInputs::new(inputs),
         push_const,
-    ))
+    })
 }
 
 const SPIRV_MAGIC_VALUE: u32 = 0x07230203;
@@ -1035,10 +1029,10 @@ mod test {
         "#,
         );
 
-        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
+        let info = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 0)),
+            info.bindings.get(&BindSlot::new(0, 0)),
             Some(&DescBinding {
                 kind: DescKind::Buffer(BufferKind::Uniform),
                 access_flags: Access::READ,
@@ -1048,7 +1042,7 @@ mod test {
         );
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 1)),
+            info.bindings.get(&BindSlot::new(0, 1)),
             Some(&DescBinding {
                 kind: DescKind::Buffer(BufferKind::Storage),
                 access_flags: Access::READ_WRITE,
@@ -1072,10 +1066,10 @@ mod test {
         "#,
         );
 
-        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
+        let info = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 0)),
+            info.bindings.get(&BindSlot::new(0, 0)),
             Some(&DescBinding {
                 kind: DescKind::SampledImage,
                 access_flags: Access::READ,
@@ -1085,7 +1079,7 @@ mod test {
         );
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 1)),
+            info.bindings.get(&BindSlot::new(0, 1)),
             Some(&DescBinding {
                 kind: DescKind::StorageImage,
                 access_flags: Access::WRITE,
@@ -1111,10 +1105,10 @@ mod test {
         "#,
         );
 
-        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
+        let info = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 0)),
+            info.bindings.get(&BindSlot::new(0, 0)),
             Some(&DescBinding {
                 kind: DescKind::SampledImage,
                 access_flags: Access::READ,
@@ -1124,7 +1118,7 @@ mod test {
         );
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(1, 0)),
+            info.bindings.get(&BindSlot::new(1, 0)),
             Some(&DescBinding {
                 kind: DescKind::Buffer(BufferKind::Uniform),
                 access_flags: Access::READ,
@@ -1148,10 +1142,10 @@ mod test {
         "#,
         );
 
-        let (desc_binds, _, _) = get_shader_info(&spv, ShaderStage::Compute).unwrap();
+        let info = get_shader_info(&spv, ShaderStage::Compute).unwrap();
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 0)),
+            info.bindings.get(&BindSlot::new(0, 0)),
             Some(&DescBinding {
                 kind: DescKind::SampledImage,
                 access_flags: Access::READ,
@@ -1161,7 +1155,7 @@ mod test {
         );
 
         assert_eq!(
-            desc_binds.get(&BindSlot::new(0, 1)),
+            info.bindings.get(&BindSlot::new(0, 1)),
             Some(&DescBinding {
                 kind: DescKind::SampledImage,
                 access_flags: Access::READ,
@@ -1530,7 +1524,7 @@ mod test {
         "#,
         );
 
-        let (_, inputs, _) = get_shader_info(&spv, ShaderStage::Vertex).unwrap();
+        let info = get_shader_info(&spv, ShaderStage::Vertex).unwrap();
 
         let kinds = [
             PrimKind::Float,
@@ -1545,12 +1539,12 @@ mod test {
             for (j, shape) in shapes.into_iter().enumerate() {
                 let location = (i * 3 + j) as u32;
 
-                assert_eq!(inputs.get(location), Some(PrimType { kind, shape }));
+                assert_eq!(info.inputs.get(location), Some(PrimType { kind, shape }));
             }
         }
 
         assert_eq!(
-            inputs.get(12),
+            info.inputs.get(12),
             Some(PrimType {
                 kind: PrimKind::Float,
                 shape: PrimShape::Scalar,
@@ -1558,7 +1552,7 @@ mod test {
         );
 
         assert_eq!(
-            inputs.get(13),
+            info.inputs.get(13),
             Some(PrimType {
                 kind: PrimKind::Double,
                 shape: PrimShape::Scalar,
@@ -1566,7 +1560,7 @@ mod test {
         );
 
         assert_eq!(
-            inputs.get(14),
+            info.inputs.get(14),
             Some(PrimType {
                 kind: PrimKind::Int,
                 shape: PrimShape::Scalar,
@@ -1574,7 +1568,7 @@ mod test {
         );
 
         assert_eq!(
-            inputs.get(15),
+            info.inputs.get(15),
             Some(PrimType {
                 kind: PrimKind::Uint,
                 shape: PrimShape::Scalar,
