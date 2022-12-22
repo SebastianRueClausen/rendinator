@@ -214,13 +214,11 @@ mod test_bump {
 
     #[test]
     fn stress() {
-        let mut bump = Bump::new(1024);  
+        let mut bump = Bump::new(1024);
         let mut save = Vec::new();
 
         for i in 0..32 {
-            let numbers: Vec<_> = (0..256)
-                .map(|n| bump.alloc(n))
-                .collect();
+            let numbers: Vec<_> = (0..256).map(|n| bump.alloc(n)).collect();
 
             if i % 2 == 0 {
                 save.push(numbers);
@@ -230,7 +228,7 @@ mod test_bump {
 
     #[test]
     fn big_alloc() {
-        let mut bump = Bump::new(32);  
+        let mut bump = Bump::new(32);
         let _ = bump.alloc([0x0; 1024]);
     }
 }

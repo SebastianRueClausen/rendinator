@@ -1,6 +1,6 @@
 use ash::{extensions::khr, vk};
 
-use crate::{Instance, RenderError};
+use crate::{Instance, PhysicalDevice, RenderError};
 use rendi_res::Res;
 
 /// Interface for
@@ -90,4 +90,40 @@ impl Drop for Surface {
     fn drop(&mut self) {
         unsafe { self.loader.destroy_surface(self.handle, None) }
     }
+}
+
+pub(crate) fn surface_formats(
+    physical: &PhysicalDevice,
+    surface: &Surface,
+) -> Result<Vec<vk::SurfaceFormatKHR>, RenderError> {
+    let formats = unsafe {
+        surface
+            .loader
+            .get_physical_device_surface_formats(physical.handle, surface.handle)?
+    };
+    Ok(formats)
+}
+
+pub(crate) fn present_modes(
+    physical: &PhysicalDevice,
+    surface: &Surface,
+) -> Result<Vec<vk::PresentModeKHR>, RenderError> {
+    let modes = unsafe {
+        surface
+            .loader
+            .get_physical_device_surface_present_modes(physical.handle, surface.handle)?
+    };
+    Ok(modes)
+}
+
+pub(crate) fn surface_capabilities(
+    physical: &PhysicalDevice,
+    surface: &Surface,
+) -> Result<vk::SurfaceCapabilitiesKHR, RenderError> {
+    let capabilities = unsafe {
+        surface
+            .loader
+            .get_physical_device_surface_capabilities(physical.handle, surface.handle)?
+    };
+    Ok(capabilities)
 }

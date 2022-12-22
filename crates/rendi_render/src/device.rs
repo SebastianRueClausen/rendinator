@@ -1,10 +1,10 @@
+use crate::{mem, surface, Instance, RenderError, Surface};
 use ash::{extensions::khr, vk};
+use rendi_res::Res;
+use std::cmp::Ordering;
 use std::ffi::CStr;
 use std::fmt;
 use std::hash::{Hash, Hasher};
-
-use crate::{Instance, RenderError, Surface};
-use rendi_res::Res;
 
 /// A representation of a graphics card.
 pub struct PhysicalDevice {
@@ -54,7 +54,10 @@ impl PhysicalDevice {
     ///
     /// This will favour discrete GPUs and use various heuristics to choose the most capable
     /// physical device.
-    pub fn select_best(instance: &Instance) -> Result<Self, RenderError> {
+    pub fn select_best(
+        instance: &Instance,
+        surface: Option<&Surface>,
+    ) -> Result<Self, RenderError> {
         let handle = unsafe {
             instance
                 .handle()
@@ -130,15 +133,15 @@ impl PhysicalDevice {
         })
     }
 
-    pub(crate) fn get_memory_type_index(
+    pub fn get_memory_type(
         &self,
         type_bits: u32,
-        flags: vk::MemoryPropertyFlags,
-    ) -> Option<u32> {
-        let props = &self.memory_properties;
-        let count = props.memory_type_count as usize;
+        location: mem::MemoryLocation,
+    ) -> Result<mem::MemoryType, RenderError> {
+        let flags: vk::MemoryPropertyFlags = location.into();
+        let count = self.memory_properties.memory_type_count as usize;
 
-        props.memory_types[0..count]
+        self.memory_properties.memory_types[0..count]
             .iter()
             .enumerate()
             .position(|(i, memory_type)| {
@@ -147,7 +150,11 @@ impl PhysicalDevice {
 
                 bit & masked
             })
-            .map(|i| i as u32)
+            .map(|i| mem::MemoryType::new(i as u32, location))
+            .ok_or(RenderError::InvalidMemoryType {
+                location,
+                type_bits,
+            })
     }
 
     /// Get the name of the physical device.
@@ -282,6 +289,10 @@ impl Device {
     pub fn handle(&self) -> &ash::Device {
         &self.handle
     }
+
+    pub fn instance(&self) -> &Res<Instance> {
+        &self.instance
+    }
 }
 
 impl Drop for Device {
@@ -341,8 +352,8 @@ pub struct Queue {
 
     #[allow(unused)]
     flags: vk::QueueFlags,
-
     family_index: QueueFamilyIndex,
+
     device: Res<Device>,
 }
 
@@ -383,5 +394,25 @@ impl Queue {
 impl fmt::Debug for Queue {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Queue").field("flags", &self.flags).finish()
+    }
+}
+
+impl PartialEq for Queue {
+    fn eq(&self, other: &Self) -> bool {
+        self.handle == other.handle
+    }
+}
+
+impl Eq for Queue {}
+
+impl PartialOrd for Queue {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.handle.partial_cmp(&other.handle)
+    }
+}
+
+impl Ord for Queue {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.handle.cmp(&other.handle)
     }
 }

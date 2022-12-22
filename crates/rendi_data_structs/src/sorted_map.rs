@@ -1,6 +1,6 @@
-use std::ops::{Index, IndexMut};
 use std::borrow::Borrow;
-use std::{vec, slice, mem};
+use std::ops::{Index, IndexMut};
+use std::{mem, slice, vec};
 
 /// Map of sorted key-value pairs.
 ///
@@ -23,7 +23,9 @@ impl<K, V> SortedMap<K, V> {
     /// Returns a new empty sorted map.
     #[must_use]
     pub fn new() -> Self {
-        Self { elements: Vec::new() }
+        Self {
+            elements: Vec::new(),
+        }
     }
 }
 
@@ -99,9 +101,7 @@ impl<K: Ord, V> SortedMap<K, V> {
     pub fn insert(&mut self, key: K, mut value: V) -> Option<V> {
         match self.lookup_index_for(&key) {
             Ok(index) => {
-                let slot = unsafe {
-                    self.elements.get_unchecked_mut(index)
-                };
+                let slot = unsafe { self.elements.get_unchecked_mut(index) };
 
                 mem::swap(&mut slot.1, &mut value);
 
@@ -155,9 +155,7 @@ impl<K: Ord, V> SortedMap<K, V> {
     {
         let index = self.lookup_index_for(key).ok()?;
 
-        unsafe {
-            Some(&self.elements.get_unchecked(index).1)
-        }
+        unsafe { Some(&self.elements.get_unchecked(index).1) }
     }
 
     /// Get a mutable reference to the element with `key`.
@@ -172,9 +170,7 @@ impl<K: Ord, V> SortedMap<K, V> {
     {
         let index = self.lookup_index_for(key).ok()?;
 
-        unsafe {
-            Some(&mut self.elements.get_unchecked_mut(index).1)
-        }
+        unsafe { Some(&mut self.elements.get_unchecked_mut(index).1) }
     }
 
     #[inline(always)]
@@ -183,7 +179,8 @@ impl<K: Ord, V> SortedMap<K, V> {
         K: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.elements.binary_search_by(|&(ref x, _)| x.borrow().cmp(key))
+        self.elements
+            .binary_search_by(|&(ref x, _)| x.borrow().cmp(key))
     }
 
     /// Returns `true` if the map contains an element with `key`.
@@ -267,7 +264,7 @@ where
                 if (self.pred)(k1, k2) {
                     len += 1
                 } else {
-                    break
+                    break;
                 }
             }
 
@@ -306,7 +303,7 @@ impl<K, V> SortedMap<K, V> {
     pub fn iter(&self) -> slice::Iter<(K, V)> {
         self.elements.iter()
     }
-   
+
     /// Get the map as a sorted slice of key-value pairs.
     #[inline]
     #[must_use]
@@ -363,7 +360,7 @@ where
 }
 
 impl<K: Ord, V> FromIterator<(K, V)> for SortedMap<K, V> {
-    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self { 
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> Self {
         let elements: Vec<_> = iter.into_iter().collect();
 
         Self::from_unsorted(elements)

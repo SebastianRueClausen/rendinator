@@ -4,10 +4,14 @@
 #[macro_use]
 extern crate log;
 
+pub mod buffer;
 pub mod device;
+pub mod image;
 pub mod instance;
+pub mod mem;
 pub mod reflect;
 pub mod surface;
+pub mod swapchain;
 
 use ash::vk;
 use std::cell::Cell;
@@ -18,30 +22,40 @@ use std::slice;
 pub use crate::device::{
     Device, PhysicalDevice, Queue, QueueFamilyIndex, QueueRequest, QueueRequestKind,
 };
-pub use crate::instance::{Instance, ValidationLayers};
-pub use crate::surface::Surface;
+pub use instance::{Instance, ValidationLayers};
+pub use mem::{MemoryBlock, MemoryLocation, MemorySlice, MemoryType};
 use rendi_data_structs::SortedMap;
+pub use surface::Surface;
 
 #[derive(Debug, thiserror::Error)]
 pub enum RenderError {
     #[error("out of gpu memory")]
-    OomGpu,
-
+    Oom,
+    #[error("trying to map buffer that's already mapped")]
+    BufferRemap,
     #[error("missing layer: {0}")]
     MissingLayer(String),
-
     #[error("missing extension {0}")]
     MissingExt(String),
-
     #[error("no physical device found")]
     NoPhysicalDeviceFound,
-
     #[error("unsupported platform")]
     UnsupportedPlatform,
-
+    #[error("invalid memory type. bits: {type_bits:0}, location: {location}")]
+    InvalidMemoryType {
+        type_bits: u32,
+        location: MemoryLocation,
+    },
+    #[error("invalid image view kind {kind}, for {dimensions} with {layers} layers")]
+    InvalidImageViewKind {
+        dimensions: ImageDimensions,
+        kind: ImageViewKind,
+        layers: u32,
+    },
+    #[error("physical device doens't support surfaces")]
+    SurfaceUnsupported,
     #[error("vulkan error: {0}")]
     VulkanFailure(vk::Result),
-
     #[error("failed to load vulkan functions: {0}")]
     LoadFailure(#[from] ash::LoadingError),
 }
@@ -49,7 +63,7 @@ pub enum RenderError {
 impl From<vk::Result> for RenderError {
     fn from(result: vk::Result) -> Self {
         match result {
-            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => RenderError::OomGpu,
+            vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => RenderError::Oom,
             // No real reason to handle oom here.
             vk::Result::ERROR_OUT_OF_HOST_MEMORY => panic!("allocation failed"),
             result => RenderError::VulkanFailure(result),
@@ -66,19 +80,16 @@ pub struct BindSlot {
 }
 
 impl BindSlot {
-    #[must_use]
     pub fn new(set: DescSetLocation, location: DescLocation) -> Self {
         Self { set, location }
     }
 
     /// The location of the set with the binding.
-    #[must_use]
     pub fn set(&self) -> DescSetLocation {
         self.set
     }
 
     /// The location within the set of the binding.
-    #[must_use]
     pub fn location(&self) -> DescLocation {
         self.location
     }
@@ -122,13 +133,11 @@ bitflags::bitflags! {
 
 impl Access {
     /// Returns `true` if the resource is read.
-    #[must_use]
     pub fn reads(self) -> bool {
         self.contains(Access::READ)
     }
 
     /// Returns `true` if the resource is written to.
-    #[must_use]
     pub fn writes(self) -> bool {
         self.contains(Access::WRITE)
     }
@@ -143,7 +152,6 @@ impl From<vk::AccessFlags2> for Access {
             | vk::AccessFlags2::COLOR_ATTACHMENT_WRITE.as_raw()
             | vk::AccessFlags2::MEMORY_WRITE.as_raw()
             | vk::AccessFlags2::ACCELERATION_STRUCTURE_WRITE_KHR.as_raw();
-
         const READ_ACCESS: u64 = vk::AccessFlags2::TRANSFER_READ.as_raw()
             | vk::AccessFlags2::SHADER_READ.as_raw()
             | vk::AccessFlags2::HOST_READ.as_raw()
@@ -156,17 +164,13 @@ impl From<vk::AccessFlags2> for Access {
             | vk::AccessFlags2::VERTEX_ATTRIBUTE_READ.as_raw()
             | vk::AccessFlags2::UNIFORM_READ.as_raw()
             | vk::AccessFlags2::SHADER_SAMPLED_READ.as_raw();
-
         let mut access = Access::empty();
-
         if flags.intersects(vk::AccessFlags2::from_raw(WRITE_ACCESS)) {
             access |= Access::WRITE;
         }
-
         if flags.intersects(vk::AccessFlags2::from_raw(READ_ACCESS)) {
             access |= Access::READ;
         }
-
         access
     }
 }
@@ -261,6 +265,377 @@ impl From<BufferKind> for vk::BufferUsageFlags {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ImageLayout {
+    #[default]
+    Undefined = vk::ImageLayout::UNDEFINED.as_raw() as isize,
+    General = vk::ImageLayout::GENERAL.as_raw() as isize,
+    Attachment = vk::ImageLayout::ATTACHMENT_OPTIMAL.as_raw() as isize,
+    ShaderRead = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL.as_raw() as isize,
+    TransferRead = vk::ImageLayout::TRANSFER_SRC_OPTIMAL.as_raw() as isize,
+    TransferWrite = vk::ImageLayout::TRANSFER_DST_OPTIMAL.as_raw() as isize,
+}
+
+impl From<ImageLayout> for vk::ImageLayout {
+    fn from(layout: ImageLayout) -> Self {
+        Self::from_raw(layout as i32)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum ImageDimensions {
+    D1 = vk::ImageType::TYPE_1D.as_raw() as isize,
+    #[default]
+    D2 = vk::ImageType::TYPE_2D.as_raw() as isize,
+    D3 = vk::ImageType::TYPE_3D.as_raw() as isize,
+}
+
+impl fmt::Display for ImageDimensions {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            ImageDimensions::D1 => "1 dimensions",
+            ImageDimensions::D2 => "2 dimensions",
+            ImageDimensions::D3 => "3 dimensions",
+        };
+        write!(f, "{name}")
+    }
+}
+
+impl From<ImageDimensions> for vk::ImageType {
+    fn from(dim: ImageDimensions) -> Self {
+        vk::ImageType::from_raw(dim as i32)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum SampleCount {
+    #[default]
+    S1 = vk::SampleCountFlags::TYPE_1.as_raw() as isize,
+    S2 = vk::SampleCountFlags::TYPE_2.as_raw() as isize,
+    S4 = vk::SampleCountFlags::TYPE_4.as_raw() as isize,
+    S8 = vk::SampleCountFlags::TYPE_8.as_raw() as isize,
+    S16 = vk::SampleCountFlags::TYPE_16.as_raw() as isize,
+    S32 = vk::SampleCountFlags::TYPE_32.as_raw() as isize,
+    S64 = vk::SampleCountFlags::TYPE_64.as_raw() as isize,
+}
+
+impl From<SampleCount> for vk::SampleCountFlags {
+    fn from(sample_count: SampleCount) -> Self {
+        vk::SampleCountFlags::from_raw(sample_count as u32)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ImageExtent {
+    pub width: u32,
+    pub height: u32,
+    pub depth_or_layers: u32,
+}
+
+impl ImageExtent {
+    /// Returns the total amount of texels in the image.
+    #[must_use]
+    pub fn texel_count(&self) -> u32 {
+        self.width * self.height * self.depth_or_layers
+    }
+
+    /// Returns the aspect ratio of width to height of the image.
+    #[must_use]
+    pub fn aspect_ratio(&self) -> f32 {
+        self.width as f32 / self.height as f32
+    }
+
+    /// Returns the aspect ratio of width to height of the image.
+    #[must_use]
+    pub fn max_mip_levels(&self, dim: ImageDimensions) -> u32 {
+        match dim {
+            ImageDimensions::D1 => 1,
+            ImageDimensions::D2 => 32 - self.width.max(self.height).leading_zeros(),
+            ImageDimensions::D3 => {
+                let max_axis = self.width.max(self.height.max(self.depth_or_layers));
+                32 - max_axis.leading_zeros()
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn mip_level_size(&self, level: u32, dim: ImageDimensions) -> ImageExtent {
+        ImageExtent {
+            width: 1_u32.max(self.width >> level),
+            height: 1_u32.max(self.width >> level),
+            depth_or_layers: match dim {
+                ImageDimensions::D1 | ImageDimensions::D2 => self.depth_or_layers,
+                ImageDimensions::D3 => u32::max(1, self.depth_or_layers >> level),
+            },
+        }
+    }
+}
+
+impl From<ImageExtent> for vk::Extent3D {
+    fn from(extent: ImageExtent) -> Self {
+        vk::Extent3D {
+            width: extent.width,
+            height: extent.height,
+            depth: extent.depth_or_layers,
+        }
+    }
+}
+
+macro_rules! raw_format {
+    ($name:tt) => {
+        vk::Format::$name.as_raw() as isize
+    };
+}
+
+/// Block compression type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BcFormat {
+    Bc1AlphaSrgb = raw_format!(BC1_RGBA_SRGB_BLOCK),
+    Bc1Srgb = raw_format!(BC1_RGB_SRGB_BLOCK),
+    Bc1AlphaUnorm = raw_format!(BC1_RGBA_UNORM_BLOCK),
+    Bc1Unorm = raw_format!(BC1_RGB_UNORM_BLOCK),
+    Bc2Srgb = raw_format!(BC2_SRGB_BLOCK),
+    Bc2Unorm = raw_format!(BC2_UNORM_BLOCK),
+    Bc3Srgb = raw_format!(BC3_SRGB_BLOCK),
+    Bc3Unorm = raw_format!(BC3_UNORM_BLOCK),
+    Bc4Snorm = raw_format!(BC4_SNORM_BLOCK),
+    Bc4Unorm = raw_format!(BC4_UNORM_BLOCK),
+    Bc5Snorm = raw_format!(BC5_SNORM_BLOCK),
+    Bc5Unorm = raw_format!(BC5_UNORM_BLOCK),
+    Bc7Srgb = raw_format!(BC7_SRGB_BLOCK),
+    Bc7Unorm = raw_format!(BC7_UNORM_BLOCK),
+}
+
+impl BcFormat {
+    pub fn block_size(&self) -> vk::DeviceSize {
+        match self {
+            BcFormat::Bc1AlphaSrgb
+            | BcFormat::Bc1Srgb
+            | BcFormat::Bc1AlphaUnorm
+            | BcFormat::Bc1Unorm => 8,
+            _ => 16,
+        }
+    }
+}
+
+impl From<BcFormat> for vk::Format {
+    fn from(format: BcFormat) -> Self {
+        vk::Format::from_raw(format as i32)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum RawFormat {
+    R8Unorm = raw_format!(R8_UNORM),
+    R8Snorm = raw_format!(R8_SNORM),
+    R8Uint = raw_format!(R8_UINT),
+    R8Sint = raw_format!(R8_SINT),
+    R8Srgb = raw_format!(R8_SRGB),
+    Rg8Unorm = raw_format!(R8G8_UNORM),
+    Rg8Snorm = raw_format!(R8G8_SNORM),
+    Rg8Uint = raw_format!(R8G8_UINT),
+    Rg8Sint = raw_format!(R8G8_SINT),
+    Rg8Srgb = raw_format!(R8G8_SRGB),
+    Rgb8Unorm = raw_format!(R8G8B8_UNORM),
+    Rgb8Snorm = raw_format!(R8G8B8_SNORM),
+    Rgb8Uint = raw_format!(R8G8B8_UINT),
+    Rgb8Sint = raw_format!(R8G8B8_SINT),
+    Rgb8Srgb = raw_format!(R8G8B8_SRGB),
+    Rgba8Unorm = raw_format!(R8G8B8A8_UNORM),
+    Rgba8Snorm = raw_format!(R8G8B8A8_SNORM),
+    Rgba8Uint = raw_format!(R8G8B8A8_UINT),
+    Rgba8Sint = raw_format!(R8G8B8A8_SINT),
+    Rgba8Srgb = raw_format!(R8G8B8A8_SRGB),
+
+    R16Unorm = raw_format!(R16_UNORM),
+    R16Snorm = raw_format!(R16_SNORM),
+    R16Uint = raw_format!(R16_UINT),
+    R16Sint = raw_format!(R16_SINT),
+    R16Sfloat = raw_format!(R16_SFLOAT),
+    Rg16Unorm = raw_format!(R16G16_UNORM),
+    Rg16Snorm = raw_format!(R16G16_SNORM),
+    Rg16Uint = raw_format!(R16G16_UINT),
+    Rg16Sint = raw_format!(R16G16_SINT),
+    Rg16Sfloat = raw_format!(R16G16_SFLOAT),
+    Rgb16Unorm = raw_format!(R16G16B16_UNORM),
+    Rgb16Snorm = raw_format!(R16G16B16_SNORM),
+    Rgb16Uint = raw_format!(R16G16B16_UINT),
+    Rgb16Sint = raw_format!(R16G16B16_SINT),
+    Rgb16Sfloat = raw_format!(R16G16B16_SFLOAT),
+    Rgba16Unorm = raw_format!(R16G16B16A16_UNORM),
+    Rgba16Snorm = raw_format!(R16G16B16A16_SNORM),
+    Rgba16Uint = raw_format!(R16G16B16A16_UINT),
+    Rgba16Sint = raw_format!(R16G16B16A16_SINT),
+    Rgba16Sfloat = raw_format!(R16G16B16A16_SFLOAT),
+
+    R32Uint = raw_format!(R32_UINT),
+    R32Sint = raw_format!(R32_SINT),
+    R32Sfloat = raw_format!(R32_SFLOAT),
+    Rg32Uint = raw_format!(R32G32_UINT),
+    Rg32Sint = raw_format!(R32G32_SINT),
+    Rg32Sfloat = raw_format!(R32G32_SFLOAT),
+    Rgb32Uint = raw_format!(R32G32B32_UINT),
+    Rgb32Sint = raw_format!(R32G32B32_SINT),
+    Rgb32Sfloat = raw_format!(R32G32B32_SFLOAT),
+    Rgba32Uint = raw_format!(R32G32B32A32_UINT),
+    Rgba32Sint = raw_format!(R32G32B32A32_SINT),
+    Rgba32Sfloat = raw_format!(R32G32B32A32_SFLOAT),
+
+    R64Uint = raw_format!(R64_UINT),
+    R64Sint = raw_format!(R64_SINT),
+    R64Sfloat = raw_format!(R64_SFLOAT),
+    Rg64Uint = raw_format!(R64G64_UINT),
+    Rg64Sint = raw_format!(R64G64_SINT),
+    Rg64Sfloat = raw_format!(R64G64_SFLOAT),
+    Rgb64Uint = raw_format!(R64G64B64_UINT),
+    Rgb64Sint = raw_format!(R64G64B64_SINT),
+    Rgb64Sfloat = raw_format!(R64G64B64_SFLOAT),
+    Rgba64Uint = raw_format!(R64G64B64A64_UINT),
+    Rgba64Sint = raw_format!(R64G64B64A64_SINT),
+    Rgba64Sfloat = raw_format!(R64G64B64A64_SFLOAT),
+}
+
+impl From<RawFormat> for vk::Format {
+    fn from(format: RawFormat) -> Self {
+        vk::Format::from_raw(format as i32)
+    }
+}
+
+impl RawFormat {
+    pub fn element_count(&self) -> vk::DeviceSize {
+        use RawFormat::*;
+        match self {
+            R8Unorm | R8Snorm | R8Uint | R8Sint | R8Srgb | R16Unorm | R16Snorm | R16Uint
+            | R16Sint | R16Sfloat | R32Uint | R32Sint | R32Sfloat | R64Uint | R64Sint
+            | R64Sfloat => 1,
+            Rg8Unorm | Rg8Snorm | Rg8Uint | Rg8Sint | Rg8Srgb | Rg16Unorm | Rg16Snorm
+            | Rg16Uint | Rg16Sint | Rg16Sfloat | Rg32Uint | Rg32Sint | Rg32Sfloat | Rg64Uint
+            | Rg64Sint | Rg64Sfloat => 2,
+            Rgb8Unorm | Rgb8Snorm | Rgb8Uint | Rgb8Sint | Rgb8Srgb | Rgb16Unorm | Rgb16Snorm
+            | Rgb16Uint | Rgb16Sint | Rgb16Sfloat | Rgb32Uint | Rgb32Sint | Rgb32Sfloat
+            | Rgb64Uint | Rgb64Sint | Rgb64Sfloat => 3,
+            _ => 4,
+        }
+    }
+
+    pub fn element_size(&self) -> vk::DeviceSize {
+        use RawFormat::*;
+        match self {
+            R8Unorm | R8Snorm | R8Uint | R8Sint | R8Srgb | Rg8Unorm | Rg8Snorm | Rg8Uint
+            | Rg8Sint | Rg8Srgb | Rgb8Unorm | Rgb8Snorm | Rgb8Uint | Rgb8Sint | Rgb8Srgb
+            | Rgba8Unorm | Rgba8Snorm | Rgba8Uint | Rgba8Sint | Rgba8Srgb => 1,
+            R16Unorm | R16Snorm | R16Uint | R16Sint | R16Sfloat | Rg16Unorm | Rg16Snorm
+            | Rg16Uint | Rg16Sint | Rg16Sfloat | Rgb16Unorm | Rgb16Snorm | Rgb16Uint
+            | Rgb16Sint | Rgb16Sfloat | Rgba16Unorm | Rgba16Snorm | Rgba16Uint | Rgba16Sint
+            | Rgba16Sfloat => 2,
+            R32Uint | R32Sint | Rg32Uint | R32Sfloat | Rg32Sint | Rg32Sfloat | Rgb32Uint
+            | Rgb32Sint | Rgb32Sfloat | Rgba32Uint | Rgba32Sint | Rgba32Sfloat => 3,
+            R64Uint | R64Sint | R64Sfloat | Rg64Uint | Rg64Sint | Rg64Sfloat | Rgb64Uint
+            | Rgb64Sint | Rgb64Sfloat | Rgba64Uint | Rgba64Sint | Rgba64Sfloat => 4,
+        }
+    }
+
+    pub fn texel_size(&self) -> vk::DeviceSize {
+        self.element_count() * self.element_size()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ImageFormat {
+    Bc(BcFormat),
+    Raw(RawFormat),
+}
+
+impl ImageFormat {
+    pub fn is_compressed(&self) -> bool {
+        matches!(self, ImageFormat::Bc(_))
+    }
+}
+
+impl From<ImageFormat> for vk::Format {
+    fn from(format: ImageFormat) -> Self {
+        match format {
+            ImageFormat::Bc(format) => format.into(),
+            ImageFormat::Raw(format) => format.into(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub enum ImageViewKind {
+    #[default]
+    View,
+    Cube,
+}
+
+impl fmt::Display for ImageViewKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let name = match self {
+            ImageViewKind::View => "view",
+            ImageViewKind::Cube => "cube",
+        };
+        write!(f, "{name}")
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PresentMode {
+    #[default]
+    Fifo = vk::PresentModeKHR::FIFO.as_raw() as isize,
+    Immediate = vk::PresentModeKHR::IMMEDIATE.as_raw() as isize,
+    Mailbox = vk::PresentModeKHR::MAILBOX.as_raw() as isize,
+}
+
+impl From<PresentMode> for vk::PresentModeKHR {
+    fn from(mode: PresentMode) -> Self {
+        vk::PresentModeKHR::from_raw(mode as i32)
+    }
+}
+
+#[derive(Default, Debug, Clone, Copy)]
+pub struct SurfaceExtent {
+    width: u32,
+    height: u32,
+}
+
+impl From<SurfaceExtent> for vk::Extent2D {
+    fn from(extent: SurfaceExtent) -> Self {
+        vk::Extent2D {
+            width: extent.width,
+            height: extent.height,
+        }
+    }
+}
+
+impl From<vk::Extent2D> for SurfaceExtent {
+    fn from(extent: vk::Extent2D) -> Self {
+        SurfaceExtent {
+            width: extent.width,
+            height: extent.height,
+        }
+    }
+}
+
+impl From<SurfaceExtent> for ImageExtent {
+    fn from(extent: SurfaceExtent) -> Self {
+        ImageExtent {
+            width: extent.width,
+            height: extent.height,
+            depth_or_layers: 1,
+        }
+    }
+}
+
+impl SurfaceExtent {
+    pub fn new(width: u32, height: u32) -> Self {
+        Self { width, height }
+    }
+
+    pub fn pixel_count(&self) -> u32 {
+        self.width * self.height
+    }
+}
+
 /// This indicates the number of descriptor bound to a slot.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum DescCount {
@@ -274,19 +649,16 @@ pub enum DescCount {
 
 impl DescCount {
     /// Returns true if the descriptor count is `Single`.
-    #[must_use]
     pub fn is_single(&self) -> bool {
         matches!(self, DescCount::Single)
     }
 
     /// Returns true if the descriptor count is `Bound`.
-    #[must_use]
     pub fn is_bound_array(&self) -> bool {
         matches!(self, DescCount::BoundArray(_))
     }
 
     /// Returns true if the descriptor count is `Unbound`.
-    #[must_use]
     pub fn is_unbound_array(&self) -> bool {
         matches!(self, DescCount::UnboundArray)
     }
@@ -319,25 +691,21 @@ pub struct DescBinding {
 
 impl DescBinding {
     /// The kind of the binding.
-    #[must_use]
     pub fn kind(&self) -> DescKind {
         self.kind
     }
 
     /// The descriptor count of the binding.
-    #[must_use]
     pub fn count(&self) -> DescCount {
         self.count
     }
 
     /// Get the access flags of the binding.
-    #[must_use]
     pub fn access(&self) -> Access {
         self.access_flags
     }
 
     /// Returns the shader stage where descriptor binding is used.
-    #[must_use]
     pub fn stage(&self) -> ShaderStage {
         self.stage
     }
@@ -405,7 +773,6 @@ pub enum PrimKind {
 
 impl PrimKind {
     /// The byte size of a single element of the type.
-    #[must_use]
     pub fn bytes(self) -> u32 {
         match self {
             PrimKind::Int | PrimKind::Uint | PrimKind::Float => 4,
@@ -432,7 +799,6 @@ impl PrimShape {
     /// use rendi_render::PrimShape;
     /// assert_eq!(PrimShape::Vec3.cardinality(), 3);
     /// ```
-    #[must_use]
     pub fn cardinality(self) -> u32 {
         self as u32
     }
@@ -447,19 +813,16 @@ pub struct PrimType {
 
 impl PrimType {
     /// The byte size of the type.
-    #[must_use]
     pub fn bytes(self) -> u32 {
         self.shape.cardinality() * self.kind.bytes()
     }
 
     /// The primitive kind of the type.
-    #[must_use]
     pub fn kind(self) -> PrimKind {
         self.kind
     }
 
     /// The shape of the type.
-    #[must_use]
     pub fn shape(self) -> PrimShape {
         self.shape
     }
@@ -468,7 +831,6 @@ impl PrimType {
 impl From<PrimType> for vk::Format {
     fn from(prim: PrimType) -> vk::Format {
         use {PrimKind::*, PrimShape::*};
-
         match (prim.kind(), prim.shape()) {
             (Int, Scalar) => vk::Format::R32_SINT,
             (Int, Vec2) => vk::Format::R32G32_SINT,
@@ -515,7 +877,6 @@ impl DescSetBindings {
     /// Get binding at `location`.
     ///
     /// Returns `None` if the set doesn't have a binding at `location`.
-    #[must_use]
     pub fn binding(&self, location: DescLocation) -> Option<&DescBinding> {
         self.binds.get(&location)
     }
@@ -523,7 +884,6 @@ impl DescSetBindings {
     /// Get the maximum binding location in the set.
     ///
     /// Returns `None` if the set doesn't have any bindings.
-    #[must_use]
     pub fn max_bound_location(&self) -> Option<DescLocation> {
         self.binds.last_key_value().map(|(k, _)| *k)
     }
@@ -531,7 +891,6 @@ impl DescSetBindings {
     /// Get the minimum binding location in the set.
     ///
     /// Returns `None` if the set doesn't have any bindings.
-    #[must_use]
     pub fn min_bound_location(&self) -> Option<DescLocation> {
         self.binds.first_key_value().map(|(k, _)| *k)
     }
@@ -542,7 +901,6 @@ impl DescSetBindings {
     }
 
     /// Returns the location of the unbound array binding in the set if there is any.
-    #[must_use]
     pub fn unbound_bind(&self) -> Option<DescLocation> {
         let (num, bind) = self.binds.last_key_value()?;
         matches!(bind.count(), DescCount::UnboundArray).then_some(*num)
@@ -600,7 +958,6 @@ impl ShaderBindings {
     /// Get the [`DescSetBindings`] at `location`.
     ///
     /// Returns `None` if there is no set at `location`.
-    #[must_use]
     pub fn set(&self, location: DescSetLocation) -> Option<&DescSetBindings> {
         self.sets.get(&location)
     }
@@ -608,7 +965,6 @@ impl ShaderBindings {
     /// Get the [`DescBinding`] at `slot`.
     ///
     /// Returns `None` if there is no binding at `slot`.
-    #[must_use]
     pub fn binding(&self, slot: BindSlot) -> Option<&DescBinding> {
         self.sets
             .get(&slot.set())
@@ -618,7 +974,6 @@ impl ShaderBindings {
     /// Get the maximum descriptor set location.
     ///
     /// Returns `None` if there are no bindings.
-    #[must_use]
     pub fn max_bound_set(&self) -> Option<DescSetLocation> {
         self.sets.last_key_value().map(|(k, _)| *k)
     }
@@ -626,7 +981,6 @@ impl ShaderBindings {
     /// Get the minimum descriptor set location.
     ///
     /// Returns `None` if there are no bindings.
-    #[must_use]
     pub fn min_bound_set(&self) -> Option<DescSetLocation> {
         self.sets.first_key_value().map(|(k, _)| *k)
     }
@@ -664,7 +1018,6 @@ pub struct ShaderInputs {
 }
 
 impl ShaderInputs {
-    #[must_use]
     fn new(inputs: Vec<(InputLocation, PrimType)>) -> Self {
         Self {
             inputs: SortedMap::from_unsorted(inputs),
@@ -672,13 +1025,11 @@ impl ShaderInputs {
     }
 
     /// The number of inputs.
-    #[must_use]
     pub fn count(&self) -> u32 {
         self.inputs.len() as u32
     }
 
     /// Returns true of there are any inputs.
-    #[must_use]
     pub fn has_any(&self) -> bool {
         self.count() != 0
     }
@@ -686,13 +1037,11 @@ impl ShaderInputs {
     /// Returns the input at location `location`.
     ///
     /// Returns `None` if there is no input at `location`.
-    #[must_use]
     pub fn get(&self, location: InputLocation) -> Option<PrimType> {
         self.inputs.get(&location).copied()
     }
 
     /// Iterate over all the inputs smallest to largest.
-    #[must_use]
     pub fn iter(&self) -> <&Self as IntoIterator>::IntoIter {
         self.into_iter()
     }
@@ -716,7 +1065,6 @@ pub struct GroupCount {
 }
 
 impl GroupCount {
-    #[must_use]
     pub fn new(x: u32, y: u32, z: u32) -> Self {
         Self {
             x: x.into(),
@@ -726,19 +1074,16 @@ impl GroupCount {
     }
 
     /// The x dimension of the group count.
-    #[must_use]
     pub fn x(&self) -> u32 {
         self.x.get()
     }
 
     /// The y dimension of the group count.
-    #[must_use]
     pub fn y(&self) -> u32 {
         self.y.get()
     }
 
     /// The z dimension of the group count.
-    #[must_use]
     pub fn z(&self) -> u32 {
         self.z.get()
     }
@@ -752,7 +1097,6 @@ impl GroupCount {
 
     /// Get the total group count.
     /// Returns `self.x() * self.y() * self.z()`.
-    #[must_use]
     pub fn total_group_count(&self) -> u32 {
         self.x() * self.y() * self.z()
     }
