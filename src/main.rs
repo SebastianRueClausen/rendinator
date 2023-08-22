@@ -42,8 +42,11 @@ fn main() {
     let mut state = State::new(aspect_ratio(window.inner_size()));
 
     let mut renderer = {
-        let scene = Scene::from_gltf(&AssetPath::new("sponza/Sponza.gltf", "sponza/Sponza.scene"))
-            .expect("failed to load scene");
+        let scene = Scene::from_gltf(&AssetPath::new(
+            "lantern/Lantern.gltf",
+            "lantern/Lantern.scene",
+        ))
+        .expect("failed to load scene");
 
         Renderer::new(window.clone(), &scene)
     };
@@ -138,7 +141,7 @@ impl State {
         let mut camera_delta = CameraDelta::default();
         let dt = self.last_update.elapsed().as_secs_f32();
 
-        let move_speed = 50.0;
+        let move_speed = 20.0;
         let mouse_sensitivity = 0.5;
 
         if self.inputs.is_key_pressed(VirtualKeyCode::W) {

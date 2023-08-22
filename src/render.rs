@@ -1,6 +1,6 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, mem};
 
-use glam::Vec4;
+use glam::{Mat4, Vec4};
 
 use crate::{
     asset,
@@ -128,7 +128,10 @@ impl RenderPhase {
                 .device
                 .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                     label: Some("shade"),
-                    push_constant_ranges: &[],
+                    push_constant_ranges: &[wgpu::PushConstantRange {
+                        stages: wgpu::ShaderStages::COMPUTE,
+                        range: 0..mem::size_of::<Mat4>() as u32,
+                    }],
                     bind_group_layouts: &[
                         ConstState::bind_group_layout(&context),
                         &scene_state.bind_group_layout,
@@ -217,6 +220,14 @@ impl RenderPhase {
         compute_pass.set_bind_group(0, &const_state.bind_group, &[]);
         compute_pass.set_bind_group(1, &scene_state.bind_group, &[]);
         compute_pass.set_bind_group(2, &self.shade_bind_group, &[]);
+
+        let mut ray_matrix = camera.proj_view();
+        ray_matrix.col_mut(3)[0] = 0.0;
+        ray_matrix.col_mut(3)[1] = 0.0;
+        ray_matrix.col_mut(3)[2] = 0.0;
+        ray_matrix = ray_matrix.inverse();
+
+        compute_pass.set_push_constants(0, bytemuck::bytes_of(&ray_matrix));
 
         let x = util::div_ceil(context.surface_size.width, 8);
         let y = util::div_ceil(context.surface_size.height, 8);

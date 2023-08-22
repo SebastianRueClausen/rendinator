@@ -19,6 +19,12 @@ struct Material {
     albedo_texture: u32,
     normal_texture: u32,
     specular_texture: u32,
+    emissive_texture: u32,
+    base_color: vec4f,
+    emissive: vec4f,
+    metallic: f32,
+    roughness: f32,
+    padding: array<u32, 2>,
 };
 
 struct Vertex {

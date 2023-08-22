@@ -91,19 +91,6 @@ fn sample_history_catmull_rom(texcoords: vec2f, size: vec2f) -> vec4f {
     return out;
 }
 
-fn aabb_clip(history_sample: vec3f, aabb_min: vec3f, aabb_max: vec3f) -> vec3f {
-    let p_clip = 0.5 * (aabb_max + aabb_min);
-    let e_clip = 0.5 * (aabb_max - aabb_min);
-
-    let v_clip = history_sample - p_clip;
-    let v_unit = v_clip.xyz / e_clip;
-
-    let a_unit = abs(v_unit);
-    let ma_unit = max(a_unit.x, max(a_unit.y, a_unit.z));
-
-    return select(history_sample, p_clip + v_clip / ma_unit, ma_unit > 1.0);
-}
-
 struct Neighborhood {
     min: vec3f,
     max: vec3f,

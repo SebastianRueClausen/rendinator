@@ -12,10 +12,61 @@ use super::{
     normal, quantize, BoundingSphere, Instance, Material, Mesh, Scene, Texture, Transform,
 };
 
+#[derive(Default)]
+struct FallbackTextures {
+    albedo_fallback_texture: Option<u32>,
+    emissive_fallback_texture: Option<u32>,
+    normal_fallback_texture: Option<u32>,
+    specular_fallback_texture: Option<u32>,
+}
+
+impl FallbackTextures {
+    fn albedo_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
+        *self.albedo_fallback_texture.get_or_insert_with(|| {
+            scene.add_texture(fallback_texture(ALBEDO_MAP_RAW_FORMAT, [u8::MAX; 4]))
+        })
+    }
+
+    fn emissive_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
+        *self.emissive_fallback_texture.get_or_insert_with(|| {
+            scene.add_texture(fallback_texture(EMISSIVE_MAP_RAW_FORMAT, [0; 4]))
+        })
+    }
+
+    fn normal_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
+        *self.normal_fallback_texture.get_or_insert_with(|| {
+            let mut normal = [128, 128, 255, 255];
+            octahedron_encode_pixel(&mut normal);
+
+            scene.add_texture(fallback_texture(NORMAL_MAP_RAW_FORMAT, normal))
+        })
+    }
+
+    fn specular_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
+        *self.specular_fallback_texture.get_or_insert_with(|| {
+            scene.add_texture(fallback_texture(SPECULAR_MAP_RAW_FORMAT, [255; 2]))
+        })
+    }
+
+    fn fallback_material(&mut self, scene: &mut Scene) -> Material {
+        Material {
+            albedo_texture: self.albedo_fallback_texture(scene),
+            normal_texture: self.normal_fallback_texture(scene),
+            specular_texture: self.specular_fallback_texture(scene),
+            emissive_texture: self.emissive_fallback_texture(scene),
+            base_color: Vec4::splat(1.0),
+            emissive: Vec4::splat(0.0),
+            metallic: 0.0,
+            roughness: 1.0,
+            padding: [0; 2],
+        }
+    }
+}
+
 pub struct Importer {
+    gltf: Gltf,
     buffer_data: Vec<Box<[u8]>>,
     parent_path: PathBuf,
-    gltf: Gltf,
 }
 
 impl Importer {
@@ -96,29 +147,40 @@ impl Importer {
         self.buffer_data(&view, Some(bytes), accessor.offset())
     }
 
-    fn load_material(&self, scene: &mut Scene, material: gltf::Material) -> Result<Material> {
+    fn load_material(
+        &self,
+        scene: &mut Scene,
+        fallback_textures: &mut FallbackTextures,
+        material: gltf::Material,
+    ) -> Result<Material> {
         let albedo_texture = {
             if let Some(accessor) = material.pbr_metallic_roughness().base_color_texture() {
                 let image = self.image(accessor.texture().source().source())?;
-                create_texture(image, ALBEDO_MAP_FORMAT, true, |_| ())?
+                let texture = create_texture(image, ALBEDO_MAP_FORMAT, true, |_| ())?;
+                scene.add_texture(texture)
             } else {
-                let color = material
-                    .pbr_metallic_roughness()
-                    .base_color_factor()
-                    .map(hdr_to_unorm);
-                fallback_texture(ALBEDO_MAP_RAW_FORMAT, color)
+                fallback_textures.albedo_fallback_texture(scene)
+            }
+        };
+
+        let emissive_texture = {
+            if let Some(accessor) = material.emissive_texture() {
+                let image = self.image(accessor.texture().source().source())?;
+                let texture = create_texture(image, EMISSIVE_MAP_FORMAT, true, |_| ())?;
+                scene.add_texture(texture)
+            } else {
+                fallback_textures.emissive_fallback_texture(scene)
             }
         };
 
         let normal_texture = {
             if let Some(accessor) = material.normal_texture() {
                 let image = self.image(accessor.texture().source().source())?;
-                create_texture(image, NORMAL_MAP_FORMAT, true, octahedron_encode_pixel)?
+                let texture =
+                    create_texture(image, NORMAL_MAP_FORMAT, true, octahedron_encode_pixel)?;
+                scene.add_texture(texture)
             } else {
-                let mut pixel = [128, 128, 255, 255];
-                octahedron_encode_pixel(&mut pixel);
-
-                fallback_texture(NORMAL_MAP_RAW_FORMAT, [pixel[0], pixel[1]])
+                fallback_textures.normal_fallback_texture(scene)
             }
         };
 
@@ -126,25 +188,37 @@ impl Importer {
             let accessor = material
                 .pbr_metallic_roughness()
                 .metallic_roughness_texture();
+
             if let Some(accessor) = accessor {
                 let image = self.image(accessor.texture().source().source())?;
-                create_texture(image, SPECULAR_MAP_FORMAT, true, |rgba| {
+                let texture = create_texture(image, SPECULAR_MAP_FORMAT, true, |rgba| {
                     // Change metallic channel to red.
                     rgba[0] = rgba[2];
-                })?
+                })?;
+                scene.add_texture(texture)
             } else {
-                let metallic = material.pbr_metallic_roughness().metallic_factor();
-                let roughness = material.pbr_metallic_roughness().roughness_factor();
-
-                let pixel = [(255.0 * metallic) as u8, (255.0 * roughness) as u8];
-                fallback_texture(SPECULAR_MAP_RAW_FORMAT, pixel)
+                fallback_textures.specular_fallback_texture(scene)
             }
         };
 
+        let metallic = material.pbr_metallic_roughness().metallic_factor();
+        let roughness = material.pbr_metallic_roughness().roughness_factor();
+
+        let base_color = Vec4::from_array(material.pbr_metallic_roughness().base_color_factor());
+        let emissive = Vec3::from_array(material.emissive_factor()).extend(1.0);
+
+        println!("{:?}", emissive);
+
         Ok(Material {
-            albedo_texture: scene.add_texture(albedo_texture),
-            normal_texture: scene.add_texture(normal_texture),
-            specular_texture: scene.add_texture(specular_texture),
+            albedo_texture,
+            emissive_texture,
+            normal_texture,
+            specular_texture,
+            base_color,
+            emissive,
+            metallic,
+            roughness,
+            padding: [0; 2],
         })
     }
 
@@ -178,7 +252,13 @@ impl Importer {
         Ok(indices)
     }
 
-    fn load_mesh(&self, scene: &mut Scene, mesh: gltf::Mesh) -> Result<Mesh> {
+    /// Note: Call this after loading materials.
+    fn load_mesh(
+        &self,
+        scene: &mut Scene,
+        fallback_textures: &mut FallbackTextures,
+        mesh: gltf::Mesh,
+    ) -> Result<Mesh> {
         use gltf::accessor::{DataType, Dimensions};
 
         let primitives: Result<Vec<_>> = mesh
@@ -189,18 +269,7 @@ impl Importer {
                     .index()
                     .map(|material| material as u32)
                     .unwrap_or_else(|| {
-                        let material = Material {
-                            albedo_texture: scene
-                                .add_texture(fallback_texture(ALBEDO_MAP_RAW_FORMAT, [255; 4])),
-                            normal_texture: scene.add_texture({
-                                let mut normal = [128, 128, 255, 255];
-                                octahedron_encode_pixel(&mut normal);
-                                fallback_texture(NORMAL_MAP_RAW_FORMAT, [normal[0], normal[1]])
-                            }),
-                            specular_texture: scene
-                                .add_texture(fallback_texture(SPECULAR_MAP_RAW_FORMAT, [0, 255])),
-                        };
-
+                        let material = fallback_textures.fallback_material(scene);
                         scene.add_material(material)
                     });
 
@@ -291,32 +360,37 @@ impl Importer {
         })
     }
 
-    pub fn load_scene(&self) -> Result<Scene> {
+    pub fn load_scene(self) -> Result<Scene> {
         let mut scene = Scene::default();
+        let mut fallback_textures = FallbackTextures::default();
+
         scene.instances = load_instances(self.gltf.scenes().flat_map(|scene| scene.nodes()));
         scene.materials = self
             .gltf
             .materials()
-            .map(|material| self.load_material(&mut scene, material))
+            .map(|material| self.load_material(&mut scene, &mut fallback_textures, material))
             .collect::<Result<_>>()?;
         scene.meshes = self
             .gltf
             .meshes()
-            .map(|mesh| self.load_mesh(&mut scene, mesh))
+            .map(|mesh| self.load_mesh(&mut scene, &mut fallback_textures, mesh))
             .collect::<Result<_>>()?;
+
         Ok(scene)
     }
 }
 
 fn load_indices(scene: &mut Scene, indices: &[u32]) -> Range<u32> {
-    let index_offset = scene.vertices.len() as u32;
-    let index_start = scene.indices.len() as u32;
-    let index_end = index_start + indices.len() as u32;
+    let offset = scene.vertices.len() as u32;
 
-    let indices = indices.iter().map(|index| index + index_offset);
-    scene.indices.extend(indices);
+    let start = scene.indices.len() as u32;
+    let end = start + indices.len() as u32;
 
-    index_start..index_end
+    scene
+        .indices
+        .extend(indices.iter().map(|index| index + offset));
+
+    start..end
 }
 
 fn bounding_sphere(primitive: &gltf::Primitive) -> BoundingSphere {
@@ -506,11 +580,6 @@ fn octahedron_encode_pixel(pixel: &mut [u8]) {
     pixel[1] = quantize::quantize_unorm::<8>(uv.y) as u8;
 }
 
-fn hdr_to_unorm(hdr: f32) -> u8 {
-    let norm = (hdr * 255.0) as u8;
-    norm.min(255)
-}
-
 fn compress_image(format: wgpu::TextureFormat, image: image::RgbaImage) -> Result<Vec<u8>> {
     let format = match format {
         wgpu::TextureFormat::Bc1RgbaUnorm | wgpu::TextureFormat::Bc1RgbaUnormSrgb => {
@@ -522,18 +591,16 @@ fn compress_image(format: wgpu::TextureFormat, image: image::RgbaImage) -> Resul
         }
     };
 
-    let (width, height) = (image.width() as usize, image.height() as usize);
-
-    let size = format.compressed_size(width, height);
-    let data = image.into_raw();
-
     let params = texpresso::Params {
         algorithm: texpresso::Algorithm::IterativeClusterFit,
         ..Default::default()
     };
 
+    let (width, height) = (image.width() as usize, image.height() as usize);
+    let size = format.compressed_size(width, height);
+
     let mut output = vec![0x0; size];
-    format.compress(&data, width, height, params, &mut output);
+    format.compress(&image.into_raw(), width, height, params, &mut output);
 
     Ok(output)
 }
@@ -658,7 +725,12 @@ impl<'a> mikktspace::Geometry for TangentGenerator<'a> {
 
 const ALBEDO_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bc1RgbaUnormSrgb;
 const ALBEDO_MAP_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
 const NORMAL_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bc5RgUnorm;
 const NORMAL_MAP_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
+
 const SPECULAR_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bc5RgUnorm;
 const SPECULAR_MAP_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Unorm;
+
+const EMISSIVE_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bc1RgbaUnormSrgb;
+const EMISSIVE_MAP_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;

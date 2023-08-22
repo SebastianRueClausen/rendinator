@@ -25,7 +25,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            intensity: 0.4,
+            intensity: 0.15,
             lf_freq: 0.7,
             lf_curve: 0.95,
             hp_freq: 1.0,

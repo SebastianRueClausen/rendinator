@@ -30,6 +30,8 @@ var visibility_buffer: texture_2d<u32>;
 @group(2) @binding(1)
 var color_buffer: texture_storage_2d<rgba16float, read_write>;
 
+var<push_constant> ray_matrix: mat4x4f;
+
 struct DirectionalLight {
     direction: vec4f,
     irradiance: vec4f,
@@ -72,7 +74,7 @@ fn barycentric(world_positions: array<vec3f, 3>, ndc: vec2f, screen_size: vec2f)
     var bary: Barycentric;
 
     ray.origin = consts.camera_pos.xyz;
-    ray.direction = (consts.inverse_proj_view * vec4f(ndc, 1.0, 1.0)).xyz;
+    ray.direction = (ray_matrix * vec4f(ndc, 1.0, 1.0)).xyz;
 
     var tri: Triangle;
     tri.p0 = world_positions[0];
@@ -82,10 +84,10 @@ fn barycentric(world_positions: array<vec3f, 3>, ndc: vec2f, screen_size: vec2f)
     bary.lambda = intersection(tri, ray);
     let texel_size = 2.0 / screen_size;
 
-    ray.direction = (consts.inverse_proj_view * vec4f(ndc.x + texel_size.x, ndc.y, 1.0, 1.0)).xyz;
+    ray.direction = (ray_matrix * vec4f(ndc.x + texel_size.x, ndc.y, 1.0, 1.0)).xyz;
     let hx = intersection(tri, ray);
 
-    ray.direction = (consts.inverse_proj_view * vec4f(ndc.x, ndc.y + texel_size.y, 1.0, 1.0)).xyz;
+    ray.direction = (ray_matrix * vec4f(ndc.x, ndc.y + texel_size.y, 1.0, 1.0)).xyz;
     let hy = intersection(tri, ray);
 
     bary.ddx = bary.lambda - hx;
@@ -124,7 +126,7 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     var triangle_index = visibility & mesh::TRIANGLE_INDEX_MASK;
 
     if triangle_index == 0u {
-        textureStore(color_buffer, texel_id, vec4f(5.0));
+        textureStore(color_buffer, texel_id, vec4f(0.8));
         return;
     }
 
@@ -218,6 +220,17 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     // Setup shade data.
     var shade: pbr::ShadeParameters;
 
+    var emissive = textureSampleGrad(
+        textures[material.emissive_texture],
+        texture_sampler,
+        uv,
+        uv_ddx,
+        uv_ddy,
+        vec2i(0, 0),
+    ).rgb;
+
+    emissive *= material.emissive.rgb;
+
     shade.albedo = textureSampleGrad(
         textures[material.albedo_texture],
         texture_sampler,
@@ -225,7 +238,7 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
         uv_ddx,
         uv_ddy,
         vec2i(0, 0),
-    ).xyz;
+    ).rgb;
 
     let specular_params = textureSampleGrad(
         textures[material.specular_texture],
@@ -236,8 +249,11 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
         vec2i(0, 0),
     );
 
-    shade.metallic = specular_params.r;
-    shade.roughness = specular_params.g * specular_params.g;
+    shade.albedo *= material.base_color.rgb;
+
+    let roughness = specular_params.g * material.roughness;
+    shade.metallic = specular_params.r * material.metallic;
+    shade.roughness = roughness * roughness;
 
     shade.fresnel_min = mix(vec3f(0.04), shade.albedo, shade.metallic);
     shade.fresnel_max = saturate(dot(shade.fresnel_min, vec3f(50.0 * 0.33)));
@@ -269,6 +285,6 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
 
     let ambient = shade.albedo * 0.2;
 
-    let final_color = vec4f(radiance + ambient, 1.0);
+    let final_color = vec4f(radiance + ambient + emissive, 1.0);
     textureStore(color_buffer, texel_id, final_color);
 }

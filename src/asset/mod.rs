@@ -109,6 +109,12 @@ pub struct Material {
     albedo_texture: u32,
     normal_texture: u32,
     specular_texture: u32,
+    emissive_texture: u32,
+    base_color: Vec4,
+    emissive: Vec4,
+    metallic: f32,
+    roughness: f32,
+    padding: [u32; 2],
 }
 
 #[derive(Debug, Serialize, Deserialize)]
