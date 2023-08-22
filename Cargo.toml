@@ -1,0 +1,25 @@
+[package]
+name = "visibility"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+env_logger = "0.10.0"
+wgpu = { version = "0.16.3", features = ["serde", "trace", "replay", "naga", "expose-ids"] }
+winit = "0.28.6"
+bit-set = "0.5.3"
+egui = "0.22.0"
+glam = { version = "0.24.1", features = ["bytemuck", "serde"] }
+pollster = "0.3.0"
+bytemuck = { version = "1.13.1", features = ["derive"] }
+serde = { version = "1.0.183", features = ["derive"] }
+half = { version = "2.3.1", features = ["bytemuck", "serde"] }
+gltf = "1.2.0"
+image = "0.24.7"
+texpresso = "2.0.1"
+mikktspace = "0.3.0"
+bincode = "1.3.3"
+eyre = "0.6.8"
+naga = "0.12.0"
+naga_oil = "0.8.1"
+bitflags = { version = "2.4.0", features = ["bytemuck"] }
