@@ -22,11 +22,11 @@ struct LightParameters {
     light_dot_half: f32,
 };
 
-fn fresnel_schlick(shade: ShadeParameters, light: LightParameters) -> vec3f {
-    let flipped = 1.0 - light.view_dot_half;
+fn fresnel_schlick(fresnel_min: vec3f, fresnel_max: f32, view_dot_half: f32) -> vec3f {
+    let flipped = 1.0 - view_dot_half;
     let flipped_2 = flipped * flipped;
     let flipped_5 = flipped * flipped_2 * flipped_2;
-    return shade.fresnel_min + (shade.fresnel_max - shade.fresnel_min) * flipped_5;
+    return fresnel_min + (fresnel_max - fresnel_min) * flipped_5;
 }
 
 fn ggx_visibility(shade: ShadeParameters, light: LightParameters) -> f32 {
@@ -52,14 +52,20 @@ fn ggx_normal_dist(shade: ShadeParameters, light: LightParameters) -> f32 {
     return k * k * (1.0 / util::PI);
 }
 
-fn specular(shade: ShadeParameters, light: LightParameters) -> vec3<f32> {
+fn specular(shade: ShadeParameters, light: LightParameters) -> vec3f {
     let d = ggx_normal_dist(shade, light);
     let v = ggx_visibility(shade, light);
-    let f = fresnel_schlick(shade, light);
+    let f = fresnel_schlick(shade.fresnel_min, shade.fresnel_max, light.view_dot_half);
     return (light.specular_intensity * d * v) * f;
 }
 
-fn diffuse(shade: ShadeParameters) -> vec3<f32> {
+fn lambert_diffuse(shade: ShadeParameters) -> vec3f {
     let diffuse_color = shade.albedo * (1.0 - shade.metallic);
     return diffuse_color * (1.0 / util::PI);
+}
+
+fn burley_diffuse(shade: ShadeParameters, light: LightParameters) -> vec3f {
+    let light_scatter = fresnel_schlick(vec3f(1.0), shade.fresnel_max, light.normal_dot_light);
+    let view_scatter  = fresnel_schlick(vec3f(1.0), shade.fresnel_max, shade.normal_dot_view);
+    return light_scatter * view_scatter * (1.0 / util::PI);
 }

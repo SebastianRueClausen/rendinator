@@ -3,6 +3,16 @@
 const PI = 3.14159265358979323846264;
 const TAU = 6.28318530717958647692528;
 
+struct Ray {
+    origin: vec3f,
+    direction: vec3f,
+}
+
+struct Sphere {
+    center: vec3f,
+    radius: f32,
+}
+
 fn dequantize_unorm(bits: u32, value: u32) -> f32 {
     let scale = f32((1 << bits) - 1);
     return f32(value) / scale;

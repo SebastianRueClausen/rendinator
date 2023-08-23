@@ -2,6 +2,7 @@
 #import pbr
 #import consts
 #import util
+#import light
 
 @group(0) @binding(0)
 var<uniform> consts: consts::Consts;
@@ -32,23 +33,13 @@ var color_buffer: texture_storage_2d<rgba16float, read_write>;
 
 var<push_constant> ray_matrix: mat4x4f;
 
-struct DirectionalLight {
-    direction: vec4f,
-    irradiance: vec4f,
-};
-
 struct Triangle {
     p0: vec3f,
     p1: vec3f,
     p2: vec3f,
 }
 
-struct Ray {
-    origin: vec3f,
-    direction: vec3f,
-}
-
-fn intersection(tri: Triangle, ray: Ray) -> vec3f {
+fn intersection(tri: Triangle, ray: util::Ray) -> vec3f {
     let edge_to_origin = ray.origin - tri.p0;
     let edge_2 = tri.p2 - tri.p0;
     let edge_1 = tri.p1 - tri.p0;
@@ -70,7 +61,7 @@ struct Barycentric {
 };
 
 fn barycentric(world_positions: array<vec3f, 3>, ndc: vec2f, screen_size: vec2f) -> Barycentric {
-    var ray: Ray;
+    var ray: util::Ray;
     var bary: Barycentric;
 
     ray.origin = consts.camera_pos.xyz;
@@ -261,9 +252,9 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     shade.view_direction = normalize(consts.camera_pos.xyz - position);
     shade.normal_dot_view = clamp(dot(normal, shade.view_direction), 0.0001, 1.0);
 
-    var directional_light: DirectionalLight;
+    var directional_light: light::DirectionalLight;
     directional_light.direction = vec4f(0.0, 1.0, 0.0, 1.0);
-    directional_light.irradiance = vec4f(1.0);
+    directional_light.irradiance = vec4f(4.0);
 
     var light: pbr::LightParameters;
     light.specular_intensity = 1.0;
@@ -277,7 +268,7 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
 
     let diffuse_color = shade.albedo * (1.0 - shade.metallic);
     let specular = pbr::specular(shade, light);
-    let diffuse = pbr::diffuse(shade);
+    let diffuse = diffuse_color * pbr::burley_diffuse(shade, light);
 
     let radiance = (diffuse + specular)
         * light.normal_dot_light

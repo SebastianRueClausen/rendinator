@@ -29,7 +29,7 @@ impl FallbackTextures {
 
     fn emissive_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
         *self.emissive_fallback_texture.get_or_insert_with(|| {
-            scene.add_texture(fallback_texture(EMISSIVE_MAP_RAW_FORMAT, [0; 4]))
+            scene.add_texture(fallback_texture(EMISSIVE_MAP_RAW_FORMAT, [255; 4]))
         })
     }
 
@@ -205,9 +205,9 @@ impl Importer {
         let roughness = material.pbr_metallic_roughness().roughness_factor();
 
         let base_color = Vec4::from_array(material.pbr_metallic_roughness().base_color_factor());
-        let emissive = Vec3::from_array(material.emissive_factor()).extend(1.0);
 
-        println!("{:?}", emissive);
+        let emissive = Vec3::from_array(material.emissive_factor()).extend(1.0)
+            * material.emissive_strength().unwrap_or(1.0);
 
         Ok(Material {
             albedo_texture,

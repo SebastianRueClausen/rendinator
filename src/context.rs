@@ -161,6 +161,7 @@ fn create_shader_composer() -> naga_oil::compose::Composer {
     add_include!("include_shaders/consts.wgsl");
     add_include!("include_shaders/mesh.wgsl");
     add_include!("include_shaders/pbr.wgsl");
+    add_include!("include_shaders/light.wgsl");
 
     composer
 }
