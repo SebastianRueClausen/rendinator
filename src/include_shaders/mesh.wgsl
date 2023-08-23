@@ -24,7 +24,8 @@ struct Material {
     emissive: vec4f,
     metallic: f32,
     roughness: f32,
-    padding: array<u32, 2>,
+    ior: f32,
+    padding: array<u32, 1>,
 };
 
 struct Vertex {

@@ -54,11 +54,12 @@ impl FallbackTextures {
             normal_texture: self.normal_fallback_texture(scene),
             specular_texture: self.specular_fallback_texture(scene),
             emissive_texture: self.emissive_fallback_texture(scene),
-            base_color: Vec4::splat(1.0),
-            emissive: Vec4::splat(0.0),
-            metallic: 0.0,
-            roughness: 1.0,
-            padding: [0; 2],
+            base_color: DEFAULT_COLOR,
+            emissive: DEFAULT_EMISSIVE,
+            metallic: DEFAULT_METALLIC,
+            roughness: DEFAULT_ROUGHNESS,
+            ior: DEFAULT_IOR,
+            padding: [0; 1],
         }
     }
 }
@@ -203,6 +204,7 @@ impl Importer {
 
         let metallic = material.pbr_metallic_roughness().metallic_factor();
         let roughness = material.pbr_metallic_roughness().roughness_factor();
+        let ior = material.ior().unwrap_or(DEFAULT_IOR);
 
         let base_color = Vec4::from_array(material.pbr_metallic_roughness().base_color_factor());
 
@@ -218,7 +220,8 @@ impl Importer {
             emissive,
             metallic,
             roughness,
-            padding: [0; 2],
+            ior,
+            padding: [0; 1],
         })
     }
 
@@ -734,3 +737,10 @@ const SPECULAR_MAP_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg8Uno
 
 const EMISSIVE_MAP_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bc1RgbaUnormSrgb;
 const EMISSIVE_MAP_RAW_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8UnormSrgb;
+
+const DEFAULT_IOR: f32 = 1.4;
+const DEFAULT_METALLIC: f32 = 0.0;
+const DEFAULT_ROUGHNESS: f32 = 1.0;
+
+const DEFAULT_COLOR: Vec4 = Vec4::splat(1.0);
+const DEFAULT_EMISSIVE: Vec4 = Vec4::splat(0.0);

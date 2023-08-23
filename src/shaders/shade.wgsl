@@ -246,7 +246,10 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     shade.metallic = specular_params.r * material.metallic;
     shade.roughness = roughness * roughness;
 
-    shade.fresnel_min = mix(vec3f(0.04), shade.albedo, shade.metallic);
+    var dielectric_specular = (material.ior - 1.0) / (material.ior + 1.0);
+    dielectric_specular *= dielectric_specular;
+
+    shade.fresnel_min = mix(vec3f(dielectric_specular), shade.albedo, shade.metallic);
     shade.fresnel_max = saturate(dot(shade.fresnel_min, vec3f(50.0 * 0.33)));
 
     shade.view_direction = normalize(consts.camera_pos.xyz - position);

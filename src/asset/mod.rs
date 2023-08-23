@@ -114,7 +114,8 @@ pub struct Material {
     emissive: Vec4,
     metallic: f32,
     roughness: f32,
-    padding: [u32; 2],
+    ior: f32,
+    padding: [u32; 1],
 }
 
 #[derive(Debug, Serialize, Deserialize)]
