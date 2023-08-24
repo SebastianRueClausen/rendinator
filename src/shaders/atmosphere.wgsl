@@ -154,7 +154,7 @@ fn integrate_atmospheric_scattering(
 
 	let transmittance = absorb(optical_depth);
 
-    let exposure = 4.0;
+    let exposure = 20.0;
     let sky = (rayleigh * RAYLEIGH_COEFF + mie * MIE_COEFF) * light.irradiance.xyz * exposure;
 
     return sky;
@@ -165,14 +165,14 @@ fn cube_map_face(index: u32) -> mat3x3f {
         case 0u: {
             return mat3x3f(
                 vec3f(0.0, 0.0, 1.0),
-                vec3f(0.0, -1.0, 0.0),
+                vec3f(0.0, 1.0, 0.0),
                 vec3f(1.0, 0.0, 0.0),
             );
         }
         case 1u: {
             return mat3x3f(
                 vec3f(0.0, 0.0, -1.0),
-                vec3f(0.0, -1.0, 0.0),
+                vec3f(0.0, 1.0, 0.0),
                 vec3f(-1.0, 0.0, 0.0),
             );
         }
@@ -180,27 +180,27 @@ fn cube_map_face(index: u32) -> mat3x3f {
             return mat3x3f(
                 vec3f(1.0, 0.0, 0.0),
                 vec3f(0.0, 0.0, -1.0),
-                vec3f(0.0, 1.0, 0.0),
+                vec3f(0.0, -1.0, 0.0),
             );
         }
         case 3u: {
             return mat3x3f(
                 vec3f(1.0, 0.0, 0.0),
                 vec3f(0.0, 0.0, 1.0),
-                vec3f(0.0, -1.0, 0.0),
+                vec3f(0.0, 1.0, 0.0),
             );
         }
         case 4u: {
             return mat3x3f(
                 vec3f(-1.0, 0.0, 0.0),
-                vec3f(0.0, -1.0, 0.0),
+                vec3f(0.0, 1.0, 0.0),
                 vec3f(0.0, 0.0, 1.0),
             );
         }
         default: {
             return mat3x3f(
                 vec3f(1.0, 0.0, 0.0),
-                vec3f(0.0, -1.0, 0.0),
+                vec3f(0.0, 1.0, 0.0),
                 vec3f(0.0, 0.0, -1.0),
             );
         }
@@ -220,10 +220,13 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3u) {
 
     var light: light::DirectionalLight;
     light.direction = vec4f(0.0, 1.0, 0.0, 1.0);
-    light.irradiance = vec4f(10.0);
+    light.irradiance = vec4f(1.0);
+
+    var ndc = vec3f(uv * 2.0 - 1.0, -1.0);
+    ndc.y *= -1.0;
 
     var ray: util::Ray;
-    ray.direction = normalize(cube_map_face(face) * vec3f(uv * 2.0 - 1.0, 1.0));
+    ray.direction = normalize(cube_map_face(face) * ndc);
     ray.origin = vec3f(200.0);
 
     var atmosphere: util::Sphere;

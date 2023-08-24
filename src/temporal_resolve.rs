@@ -19,6 +19,7 @@ impl TemporalResolvePhase {
         let module = context.create_shader_module(
             include_str!("shaders/temporal_resolve.wgsl"),
             "shaders/temporal_resolve.wgsl",
+            &[],
         );
 
         let shader = context

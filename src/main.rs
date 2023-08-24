@@ -21,7 +21,7 @@ use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::WindowBuilder;
 
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use camera::{Camera, CameraDelta};
 use renderer::Renderer;
@@ -96,10 +96,12 @@ fn main() {
             _ => (),
         },
         Event::RedrawRequested(window_id) if window_id == window.id() => {
-            state.handle_inputs();
+            let delta_time = state.last_update.elapsed();
             state.last_update = Instant::now();
 
-            if let Err(err) = renderer.draw(&state.camera) {
+            state.handle_inputs(delta_time);
+
+            if let Err(err) = renderer.draw(delta_time, &state.camera) {
                 match err {
                     wgpu::SurfaceError::Lost => {
                         state.camera.resize_proj(aspect_ratio(window.inner_size()));
@@ -135,27 +137,27 @@ impl State {
         }
     }
 
-    fn handle_inputs(&mut self) {
+    fn handle_inputs(&mut self, delta_time: Duration) {
         let mut camera_delta = CameraDelta::default();
-        let dt = self.last_update.elapsed().as_secs_f32();
+        let delta_time = delta_time.as_secs_f32();
 
         let move_speed = 20.0;
         let mouse_sensitivity = 0.5;
 
         if self.inputs.is_key_pressed(VirtualKeyCode::W) {
-            camera_delta.forward += move_speed * dt;
+            camera_delta.forward += move_speed * delta_time;
         }
 
         if self.inputs.is_key_pressed(VirtualKeyCode::S) {
-            camera_delta.backward += move_speed * dt;
+            camera_delta.backward += move_speed * delta_time;
         }
 
         if self.inputs.is_key_pressed(VirtualKeyCode::A) {
-            camera_delta.left += move_speed * dt;
+            camera_delta.left += move_speed * delta_time;
         }
 
         if self.inputs.is_key_pressed(VirtualKeyCode::D) {
-            camera_delta.right += move_speed * dt;
+            camera_delta.right += move_speed * delta_time;
         }
 
         let mouse_delta = self.inputs.take_mouse_delta();

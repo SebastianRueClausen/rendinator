@@ -27,6 +27,7 @@ impl RenderPhase {
         let visiblity_module = context.create_shader_module(
             include_str!("shaders/visibility.wgsl"),
             "shaders/visibility.wgsl",
+            &[],
         );
 
         let visibility_shader = context
@@ -82,8 +83,11 @@ impl RenderPhase {
                 multiview: None,
             });
 
-        let shade_module =
-            context.create_shader_module(include_str!("shaders/shade.wgsl"), "shaders/shade.wgsl");
+        let shade_module = context.create_shader_module(
+            include_str!("shaders/shade.wgsl"),
+            "shaders/shade.wgsl",
+            &[],
+        );
 
         let shade_shader = context
             .device

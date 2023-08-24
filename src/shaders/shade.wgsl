@@ -270,7 +270,7 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
 
     var directional_light: light::DirectionalLight;
     directional_light.direction = vec4f(0.0, 1.0, 0.0, 1.0);
-    directional_light.irradiance = vec4f(4.0);
+    directional_light.irradiance = vec4f(1.0);
 
     var light: pbr::LightParameters;
     light.specular_intensity = 1.0;

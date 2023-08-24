@@ -1,5 +1,6 @@
 use std::rc::Rc;
 
+pub use naga_oil::compose::ShaderDefValue;
 use winit::{dpi::PhysicalSize, window::Window};
 
 pub struct Context {
@@ -89,6 +90,8 @@ impl Context {
 
         let shader_composer = create_shader_composer();
 
+        println!("{format:?}");
+
         Self {
             limits: adapter.limits(),
             surface_format: format,
@@ -104,11 +107,22 @@ impl Context {
         }
     }
 
-    pub fn create_shader_module(&mut self, source: &str, path: &str) -> naga::Module {
+    pub fn create_shader_module(
+        &mut self,
+        source: &str,
+        path: &str,
+        defs: &[(&str, ShaderDefValue)],
+    ) -> naga::Module {
+        let shader_defs = defs
+            .iter()
+            .map(|(def, value)| (def.to_string(), value.clone()))
+            .collect();
+
         self.shader_composer
             .make_naga_module(naga_oil::compose::NagaModuleDescriptor {
                 source,
                 file_path: &path,
+                shader_defs,
                 ..Default::default()
             })
             .unwrap_or_else(|err| {

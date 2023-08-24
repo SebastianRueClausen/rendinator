@@ -15,6 +15,7 @@ impl AtmospherePhase {
         let module = context.create_shader_module(
             include_str!("shaders/atmosphere.wgsl"),
             "shaders/atmosphere.wgsl",
+            &[],
         );
 
         let shader = context

@@ -20,6 +20,6 @@ texpresso = "2.0.1"
 mikktspace = "0.3.0"
 bincode = "1.3.3"
 eyre = "0.6.8"
-naga = "0.12.0"
+naga = { version = "0.12.0", features = ["span"] }
 naga_oil = "0.8.1"
 bitflags = { version = "2.4.0", features = ["bytemuck"] }

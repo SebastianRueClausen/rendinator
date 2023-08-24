@@ -1,5 +1,6 @@
 use std::iter;
 use std::rc::Rc;
+use std::time::Duration;
 
 use winit::{dpi::PhysicalSize, window::Window};
 
@@ -8,7 +9,7 @@ use crate::atmosphere::AtmospherePhase;
 use crate::bloom::BloomPhase;
 use crate::camera::Camera;
 use crate::context::Context;
-use crate::display::BlendPhase;
+use crate::display::DisplayPhase;
 use crate::render::RenderPhase;
 use crate::resources::{ConstState, Consts, RenderState, SceneState, Skybox};
 use crate::temporal_resolve::TemporalResolvePhase;
@@ -17,7 +18,7 @@ pub struct Renderer {
     context: Context,
     atmosphere_phase: AtmospherePhase,
     render_phase: RenderPhase,
-    display_phase: BlendPhase,
+    display_phase: DisplayPhase,
     bloom_phase: BloomPhase,
     temporal_resolve_phase: TemporalResolvePhase,
     const_state: ConstState,
@@ -42,7 +43,8 @@ impl Renderer {
         let bloom_phase = BloomPhase::new(&mut context, &render_state);
 
         let display_format = context.surface_format;
-        let display_phase = BlendPhase::new(&mut context, display_format, &render_state.post.view);
+        let display_phase =
+            DisplayPhase::new(&mut context, display_format, &render_state.post.view);
 
         Self {
             context,
@@ -59,7 +61,11 @@ impl Renderer {
         }
     }
 
-    pub fn draw(&mut self, camera: &Camera) -> Result<(), wgpu::SurfaceError> {
+    pub fn draw(
+        &mut self,
+        delta_time: Duration,
+        camera: &Camera,
+    ) -> Result<(), wgpu::SurfaceError> {
         let consts = Consts::new(camera, &self.context, self.consts.take());
         self.consts = Some(consts);
 
@@ -107,22 +113,8 @@ impl Renderer {
                 ..Default::default()
             });
 
-        let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("final"),
-            depth_stencil_attachment: None,
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &frame_buffer,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: true,
-                },
-            })],
-        });
-
         self.display_phase
-            .record(wgpu::Color::WHITE, &mut render_pass);
-        drop(render_pass);
+            .record(&self.context, delta_time, &frame_buffer, &mut encoder);
 
         self.context.queue.submit(iter::once(encoder.finish()));
         surface_texture.present();
@@ -141,6 +133,6 @@ impl Renderer {
         self.bloom_phase
             .resize_surface(&self.context, &self.render_state);
         self.display_phase
-            .change_input(&self.context, &self.render_state.post.view);
+            .resize_surface(&self.context, &self.render_state.post.view);
     }
 }

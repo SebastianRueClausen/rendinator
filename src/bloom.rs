@@ -44,8 +44,11 @@ pub struct BloomPhase {
 
 impl BloomPhase {
     pub fn new(context: &mut Context, render_state: &RenderState) -> Self {
-        let module =
-            context.create_shader_module(include_str!("shaders/bloom.wgsl"), "shaders/bloom.wgsl");
+        let module = context.create_shader_module(
+            include_str!("shaders/bloom.wgsl"),
+            "shaders/bloom.wgsl",
+            &[],
+        );
 
         let shader = context
             .device
