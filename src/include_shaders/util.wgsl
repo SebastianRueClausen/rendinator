@@ -48,5 +48,5 @@ fn luminance(color: vec3f) -> f32 {
 }
 
 fn rgb_to_srgb(color: vec3f) -> vec3f {
-    return pow(color, vec3<f32>(1.0 / 2.2));
+    return pow(color, vec3f(1.0 / 2.2));
 }

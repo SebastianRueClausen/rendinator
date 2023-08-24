@@ -6,7 +6,7 @@ use crate::{
     asset,
     camera::{self, Camera},
     context::Context,
-    resources::{self, ConstState, RenderState, SceneState},
+    resources::{self, ConstState, RenderState, SceneState, Skybox},
     util,
 };
 
@@ -22,6 +22,7 @@ impl RenderPhase {
         context: &mut Context,
         scene_state: &SceneState,
         render_state: &RenderState,
+        skybox: &Skybox,
     ) -> RenderPhase {
         let visiblity_module = context.create_shader_module(
             include_str!("shaders/visibility.wgsl"),
@@ -110,6 +111,16 @@ impl RenderPhase {
                         wgpu::BindGroupLayoutEntry {
                             binding: 1,
                             visibility: wgpu::ShaderStages::COMPUTE,
+                            ty: wgpu::BindingType::Texture {
+                                view_dimension: wgpu::TextureViewDimension::Cube,
+                                sample_type: wgpu::TextureSampleType::Float { filterable: true },
+                                multisampled: false,
+                            },
+                            count: None,
+                        },
+                        wgpu::BindGroupLayoutEntry {
+                            binding: 2,
+                            visibility: wgpu::ShaderStages::COMPUTE,
                             ty: wgpu::BindingType::StorageTexture {
                                 format: resources::COLOR_BUFFER_FORMAT,
                                 view_dimension: wgpu::TextureViewDimension::D2,
@@ -121,7 +132,7 @@ impl RenderPhase {
                 });
 
         let shade_bind_group =
-            create_shade_bind_group(context, render_state, &shade_bind_group_layout);
+            create_shade_bind_group(context, render_state, skybox, &shade_bind_group_layout);
 
         let pipeline_layout =
             context
@@ -156,9 +167,14 @@ impl RenderPhase {
         }
     }
 
-    pub fn resize_surface(&mut self, context: &Context, render_state: &RenderState) {
+    pub fn resize_surface(
+        &mut self,
+        context: &Context,
+        render_state: &RenderState,
+        skybox: &Skybox,
+    ) {
         self.shade_bind_group =
-            create_shade_bind_group(context, render_state, &self.shade_bind_group_layout);
+            create_shade_bind_group(context, render_state, skybox, &self.shade_bind_group_layout);
     }
 
     pub fn record(
@@ -239,6 +255,7 @@ impl RenderPhase {
 fn create_shade_bind_group(
     context: &Context,
     render_state: &RenderState,
+    skybox: &Skybox,
     layout: &wgpu::BindGroupLayout,
 ) -> wgpu::BindGroup {
     context
@@ -253,6 +270,10 @@ fn create_shade_bind_group(
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&skybox.cube_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
                     resource: wgpu::BindingResource::TextureView(&render_state.color.view),
                 },
             ],

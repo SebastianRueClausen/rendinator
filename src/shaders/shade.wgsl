@@ -10,6 +10,9 @@ var<uniform> consts: consts::Consts;
 @group(0) @binding(1)
 var texture_sampler: sampler;
 
+@group(0) @binding(2)
+var linear_sampler: sampler;
+
 @group(1) @binding(0)
 var<storage, read> primitives: array<mesh::Primitive>;
 
@@ -29,6 +32,9 @@ var textures: binding_array<texture_2d<f32>>;
 var visibility_buffer: texture_2d<u32>;
 
 @group(2) @binding(1)
+var skybox: texture_cube<f32>;
+
+@group(2) @binding(2)
 var color_buffer: texture_storage_2d<rgba16float, read_write>;
 
 var<push_constant> ray_matrix: mat4x4f;
@@ -117,7 +123,14 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     var triangle_index = visibility & mesh::TRIANGLE_INDEX_MASK;
 
     if triangle_index == 0u {
-        textureStore(color_buffer, texel_id, vec4f(0.8));
+        let skybox_color = textureSampleLevel(
+            skybox,
+            linear_sampler,
+            (ray_matrix * vec4f(ndc, 1.0, 1.0)).xyz,
+            0.0,
+    );
+
+        textureStore(color_buffer, texel_id, skybox_color);
         return;
     }
 

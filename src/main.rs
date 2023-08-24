@@ -1,5 +1,5 @@
 mod asset;
-// mod atmosphere;
+mod atmosphere;
 mod bloom;
 mod camera;
 mod context;

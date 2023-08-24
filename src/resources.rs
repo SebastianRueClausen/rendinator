@@ -203,6 +203,45 @@ impl RenderTarget {
     }
 }
 
+pub struct Skybox {
+    pub texture: wgpu::Texture,
+    pub array_view: wgpu::TextureView,
+    pub cube_view: wgpu::TextureView,
+}
+
+impl Skybox {
+    pub fn new(context: &Context) -> Self {
+        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("skybox"),
+            size: SKYBOX_SIZE,
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SKYBOX_FORMAT,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let array_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("skybox array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let cube_view = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("skybox cube"),
+            dimension: Some(wgpu::TextureViewDimension::Cube),
+            ..Default::default()
+        });
+
+        Self {
+            texture,
+            array_view,
+            cube_view,
+        }
+    }
+}
+
 pub struct RenderState {
     pub visibility: RenderTarget,
     pub depth: RenderTarget,
@@ -448,3 +487,10 @@ impl SceneState {
 pub const DEPTH_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth24Plus;
 pub const VISIBILITY_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Uint;
 pub const COLOR_BUFFER_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+
+pub const SKYBOX_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
+pub const SKYBOX_SIZE: wgpu::Extent3d = wgpu::Extent3d {
+    width: 64,
+    height: 64,
+    depth_or_array_layers: 6,
+};

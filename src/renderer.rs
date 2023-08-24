@@ -4,16 +4,18 @@ use std::rc::Rc;
 use winit::{dpi::PhysicalSize, window::Window};
 
 use crate::asset;
+use crate::atmosphere::AtmospherePhase;
 use crate::bloom::BloomPhase;
 use crate::camera::Camera;
 use crate::context::Context;
 use crate::display::BlendPhase;
 use crate::render::RenderPhase;
-use crate::resources::{ConstState, Consts, RenderState, SceneState};
+use crate::resources::{ConstState, Consts, RenderState, SceneState, Skybox};
 use crate::temporal_resolve::TemporalResolvePhase;
 
 pub struct Renderer {
     context: Context,
+    atmosphere_phase: AtmospherePhase,
     render_phase: RenderPhase,
     display_phase: BlendPhase,
     bloom_phase: BloomPhase,
@@ -21,6 +23,7 @@ pub struct Renderer {
     const_state: ConstState,
     render_state: RenderState,
     scene_state: SceneState,
+    skybox: Skybox,
     consts: Option<Consts>,
 }
 
@@ -31,8 +34,10 @@ impl Renderer {
         let const_state = ConstState::new(&context);
         let render_state = RenderState::new(&context);
         let scene_state = SceneState::new(&context, scene);
+        let skybox = Skybox::new(&context);
 
-        let render_phase = RenderPhase::new(&mut context, &scene_state, &render_state);
+        let atmosphere_phase = AtmospherePhase::new(&mut context, &skybox);
+        let render_phase = RenderPhase::new(&mut context, &scene_state, &render_state, &skybox);
         let temporal_resolve_phase = TemporalResolvePhase::new(&mut context, &render_state);
         let bloom_phase = BloomPhase::new(&mut context, &render_state);
 
@@ -42,7 +47,9 @@ impl Renderer {
         Self {
             context,
             const_state,
+            atmosphere_phase,
             render_state,
+            skybox,
             temporal_resolve_phase,
             bloom_phase,
             scene_state,
@@ -67,6 +74,10 @@ impl Renderer {
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                     label: Some("main encoder"),
                 });
+
+        if consts.frame_index == 0 {
+            self.atmosphere_phase.record(&mut encoder);
+        }
 
         self.render_phase.record(
             &self.context,
@@ -124,7 +135,7 @@ impl Renderer {
         self.render_state = RenderState::new(&self.context);
 
         self.render_phase
-            .resize_surface(&self.context, &self.render_state);
+            .resize_surface(&self.context, &self.render_state, &self.skybox);
         self.temporal_resolve_phase
             .resize_surface(&self.context, &self.render_state);
         self.bloom_phase
