@@ -9,21 +9,31 @@ use crate::atmosphere::AtmospherePhase;
 use crate::bloom::BloomPhase;
 use crate::camera::Camera;
 use crate::context::Context;
+use crate::depth_reduce::DepthReducePhase;
 use crate::display::DisplayPhase;
-use crate::render::RenderPhase;
-use crate::resources::{ConstState, Consts, RenderState, SceneState, Skybox};
+use crate::resources::{
+    ConstState, Consts, DepthPyramid, RenderState, SceneState, ShadowCascades, Skybox,
+};
+use crate::shade::ShadePhase;
+use crate::shadow::ShadowPhase;
 use crate::temporal_resolve::TemporalResolvePhase;
+use crate::visibility::VisiblityPhase;
 
 pub struct Renderer {
     context: Context,
     atmosphere_phase: AtmospherePhase,
-    render_phase: RenderPhase,
+    depth_reduce_phase: DepthReducePhase,
+    shadow_phase: ShadowPhase,
+    visibility_phase: VisiblityPhase,
+    render_phase: ShadePhase,
     display_phase: DisplayPhase,
     bloom_phase: BloomPhase,
     temporal_resolve_phase: TemporalResolvePhase,
     const_state: ConstState,
+    shadow_cascades: ShadowCascades,
     render_state: RenderState,
     scene_state: SceneState,
+    depth_pyramid: DepthPyramid,
     skybox: Skybox,
     consts: Option<Consts>,
 }
@@ -35,10 +45,22 @@ impl Renderer {
         let const_state = ConstState::new(&context);
         let render_state = RenderState::new(&context);
         let scene_state = SceneState::new(&context, scene);
+        let shadow_cascades = ShadowCascades::new(&context);
+        let depth_pyramid = DepthPyramid::new(&context);
         let skybox = Skybox::new(&context);
 
         let atmosphere_phase = AtmospherePhase::new(&mut context, &skybox);
-        let render_phase = RenderPhase::new(&mut context, &scene_state, &render_state, &skybox);
+        let depth_reduce_phase = DepthReducePhase::new(&mut context, &render_state, &depth_pyramid);
+        let shadow_phase =
+            ShadowPhase::new(&mut context, &scene_state, &shadow_cascades, &depth_pyramid);
+        let visibility_phase = VisiblityPhase::new(&mut context, &scene_state);
+        let render_phase = ShadePhase::new(
+            &mut context,
+            &scene_state,
+            &render_state,
+            &shadow_cascades,
+            &skybox,
+        );
         let temporal_resolve_phase = TemporalResolvePhase::new(&mut context, &render_state);
         let bloom_phase = BloomPhase::new(&mut context, &render_state);
 
@@ -50,11 +72,16 @@ impl Renderer {
             context,
             const_state,
             atmosphere_phase,
+            depth_reduce_phase,
+            shadow_phase,
+            visibility_phase,
             render_state,
+            depth_pyramid,
             skybox,
             temporal_resolve_phase,
             bloom_phase,
             scene_state,
+            shadow_cascades,
             render_phase,
             display_phase,
             consts: None,
@@ -82,14 +109,32 @@ impl Renderer {
                 });
 
         if consts.frame_index == 0 {
-            self.atmosphere_phase.record(&mut encoder);
+            self.atmosphere_phase
+                .record(&self.const_state, &mut encoder);
         }
+
+        self.visibility_phase.record(
+            &self.const_state,
+            &self.render_state,
+            &self.scene_state,
+            camera,
+            &mut encoder,
+        );
+
+        self.depth_reduce_phase
+            .record(&self.depth_pyramid, &self.const_state, &mut encoder);
+
+        self.shadow_phase.record(
+            &self.const_state,
+            &self.shadow_cascades,
+            &self.scene_state,
+            &mut encoder,
+        );
 
         self.render_phase.record(
             &self.context,
             camera,
             &self.const_state,
-            &self.render_state,
             &self.scene_state,
             &mut encoder,
         );
@@ -125,9 +170,21 @@ impl Renderer {
     pub fn resize_surface(&mut self, size: PhysicalSize<u32>) {
         self.context.resize_surface(size);
         self.render_state = RenderState::new(&self.context);
+        self.depth_pyramid = DepthPyramid::new(&self.context);
 
-        self.render_phase
-            .resize_surface(&self.context, &self.render_state, &self.skybox);
+        self.depth_reduce_phase.rezize_surface(
+            &self.context,
+            &self.render_state,
+            &self.depth_pyramid,
+        );
+        self.shadow_phase
+            .resize_surface(&self.context, &self.shadow_cascades, &self.depth_pyramid);
+        self.render_phase.resize_surface(
+            &self.context,
+            &self.render_state,
+            &self.shadow_cascades,
+            &self.skybox,
+        );
         self.temporal_resolve_phase
             .resize_surface(&self.context, &self.render_state);
         self.bloom_phase

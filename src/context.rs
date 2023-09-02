@@ -90,8 +90,6 @@ impl Context {
 
         let shader_composer = create_shader_composer();
 
-        println!("{format:?}");
-
         Self {
             limits: adapter.limits(),
             surface_format: format,
@@ -171,11 +169,11 @@ fn create_shader_composer() -> naga_oil::compose::Composer {
         };
     }
 
+    add_include!("include_shaders/light.wgsl");
     add_include!("include_shaders/util.wgsl");
     add_include!("include_shaders/consts.wgsl");
     add_include!("include_shaders/mesh.wgsl");
     add_include!("include_shaders/pbr.wgsl");
-    add_include!("include_shaders/light.wgsl");
 
     composer
 }

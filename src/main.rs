@@ -3,12 +3,15 @@ mod atmosphere;
 mod bloom;
 mod camera;
 mod context;
+mod depth_reduce;
 mod display;
-mod render;
 mod renderer;
 mod resources;
+mod shade;
+mod shadow;
 mod temporal_resolve;
 mod util;
+mod visibility;
 
 use asset::{AssetPath, Scene};
 use bit_set::BitSet;

@@ -6,11 +6,11 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-use bytemuck::{Pod, Zeroable};
+use bytemuck::{NoUninit, Pod, Zeroable};
 use glam::{Mat4, UVec2, Vec2, Vec4};
 
 use crate::{
-    asset::{BoundingSphere, Scene, Transform},
+    asset::{BoundingSphere, DirectionalLight, Scene, Transform},
     camera::Camera,
     context::Context,
     temporal_resolve,
@@ -20,14 +20,16 @@ use crate::{
 #[derive(Debug, Copy, Clone, Zeroable, Pod)]
 pub struct Consts {
     pub camera_pos: Vec4,
+    pub camera_front: Vec4,
     pub proj_view: Mat4,
     pub prev_proj_view: Mat4,
     pub inverse_proj_view: Mat4,
+    pub sun: DirectionalLight,
     pub frustrum_z_planes: Vec2,
     pub surface_size: UVec2,
     pub jitter: Vec2,
     pub frame_index: u32,
-    pub padding: [u32; 1],
+    pub camera_fov: f32,
 }
 
 impl Consts {
@@ -44,11 +46,19 @@ impl Consts {
 
         let jitter = temporal_resolve::jitter(frame_index as usize, surface_size);
 
+        let sun = DirectionalLight {
+            direction: Vec4::new(0.0, 1.0, 0.0, 1.0),
+            irradiance: Vec4::splat(1.0),
+        };
+
         Self {
             camera_pos: camera.pos.extend(1.0),
+            camera_front: camera.front.extend(1.0),
+            camera_fov: camera.fov,
             inverse_proj_view: proj_view.inverse(),
             proj_view,
             prev_proj_view,
+            sun,
             frustrum_z_planes: Vec2 {
                 x: camera.z_near,
                 y: camera.z_far,
@@ -56,7 +66,6 @@ impl Consts {
             surface_size,
             frame_index,
             jitter,
-            padding: Default::default(),
         }
     }
 }
@@ -91,6 +100,9 @@ impl ConstState {
             mipmap_filter: wgpu::FilterMode::Linear,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
+            address_mode_u: wgpu::AddressMode::ClampToEdge,
+            address_mode_v: wgpu::AddressMode::ClampToEdge,
+            address_mode_w: wgpu::AddressMode::ClampToEdge,
             ..Default::default()
         });
 
@@ -238,6 +250,121 @@ impl Skybox {
             texture,
             array_view,
             cube_view,
+        }
+    }
+}
+
+pub struct DepthPyramid {
+    pub texture: wgpu::Texture,
+    pub mips: Vec<wgpu::TextureView>,
+    pub whole: wgpu::TextureView,
+}
+
+impl DepthPyramid {
+    pub fn new(context: &Context) -> Self {
+        let mip_level_count = context.surface_size.max_mips(wgpu::TextureDimension::D2) - 1;
+        let size = context
+            .surface_size
+            .mip_level_size(1, wgpu::TextureDimension::D2);
+
+        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("depth pyramid"),
+            dimension: wgpu::TextureDimension::D2,
+            format: DEPTH_PYRAMID_FORMAT,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
+            view_formats: &[],
+            mip_level_count,
+            sample_count: 1,
+            size,
+        });
+
+        let mips = (0..mip_level_count)
+            .map(|level| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("depth pyramid"),
+                    base_mip_level: level,
+                    mip_level_count: Some(1),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        let whole = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("whole depth pyramid"),
+            ..Default::default()
+        });
+
+        Self {
+            texture,
+            mips,
+            whole,
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, NoUninit)]
+struct ShadowCascade {
+    matrix: Mat4,
+    corners: [Vec4; 8],
+    center: Vec4,
+    near: f32,
+    far: f32,
+    padding: [u32; 2],
+}
+
+pub struct ShadowCascades {
+    pub cascades: Vec<wgpu::TextureView>,
+    pub cascade_array: wgpu::TextureView,
+    pub cascade_info: wgpu::Buffer,
+}
+
+impl ShadowCascades {
+    pub fn new(context: &Context) -> Self {
+        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("shadow cascade"),
+            size: wgpu::Extent3d {
+                width: SHADOW_CASCADE_SIZE,
+                height: SHADOW_CASCADE_SIZE,
+                depth_or_array_layers: SHADOW_CASCADE_COUNT as u32,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: SHADOW_CASCADE_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+
+        let cascades = (0..SHADOW_CASCADE_COUNT)
+            .map(|layer| {
+                texture.create_view(&wgpu::TextureViewDescriptor {
+                    label: Some("shadow cascade"),
+                    base_array_layer: layer as u32,
+                    array_layer_count: Some(1),
+                    dimension: Some(wgpu::TextureViewDimension::D2),
+                    ..Default::default()
+                })
+            })
+            .collect();
+
+        let cascade_array = texture.create_view(&wgpu::TextureViewDescriptor {
+            label: Some("shadow cascade array"),
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
+
+        let cascade_info = context.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("cascade buffer"),
+            size: mem::size_of::<ShadowCascade>() as u64 * SHADOW_CASCADE_COUNT as u64,
+            usage: wgpu::BufferUsages::STORAGE,
+            mapped_at_creation: false,
+        });
+
+        Self {
+            cascades,
+            cascade_array,
+            cascade_info,
         }
     }
 }
@@ -494,3 +621,9 @@ pub const SKYBOX_SIZE: wgpu::Extent3d = wgpu::Extent3d {
     height: 64,
     depth_or_array_layers: 6,
 };
+
+pub const DEPTH_PYRAMID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
+pub const SHADOW_CASCADE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth16Unorm;
+
+pub const SHADOW_CASCADE_SIZE: u32 = 1024;
+pub const SHADOW_CASCADE_COUNT: usize = 2;

@@ -43,6 +43,10 @@ fn octahedron_decode(octahedron: vec2f) -> vec3f {
     return normalize(normal);
 }
 
+fn linearize_depth(near: f32, far: f32, depth: f32) -> f32 {
+    return (2.0 * near * far) / (far + near - depth * (far - near));
+}
+
 fn luminance(color: vec3f) -> f32 {
     return dot(color, vec3f(0.2126, 0.7152, 0.0722));
 }

@@ -2,7 +2,7 @@ use std::borrow::Cow;
 
 use crate::{
     context::Context,
-    resources::{self, Skybox},
+    resources::{self, ConstState, Skybox, SKYBOX_FORMAT},
 };
 
 pub struct AtmospherePhase {
@@ -25,16 +25,43 @@ impl AtmospherePhase {
                 source: wgpu::ShaderSource::Naga(Cow::Owned(module)),
             });
 
+        let bind_group_layout =
+            context
+                .device
+                .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                    label: Some("atmosphere"),
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE,
+                        ty: wgpu::BindingType::StorageTexture {
+                            access: wgpu::StorageTextureAccess::WriteOnly,
+                            format: SKYBOX_FORMAT,
+                            view_dimension: wgpu::TextureViewDimension::D2Array,
+                        },
+                        count: None,
+                    }],
+                });
+
+        let pipeline_layout =
+            context
+                .device
+                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                    label: Some("atmosphere"),
+                    bind_group_layouts: &[
+                        ConstState::bind_group_layout(context),
+                        &bind_group_layout,
+                    ],
+                    push_constant_ranges: &[],
+                });
+
         let pipeline = context
             .device
             .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
                 label: Some("atmosphere"),
-                layout: None,
+                layout: Some(&pipeline_layout),
                 module: &shader,
                 entry_point: "main",
             });
-
-        let bind_group_layout = pipeline.get_bind_group_layout(0);
 
         let bind_group = context
             .device
@@ -53,13 +80,14 @@ impl AtmospherePhase {
         }
     }
 
-    pub fn record(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn record(&self, const_state: &ConstState, encoder: &mut wgpu::CommandEncoder) {
         let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("atmosphere"),
         });
 
         compute_pass.set_pipeline(&self.pipeline);
-        compute_pass.set_bind_group(0, &self.bind_group, &[]);
+        compute_pass.set_bind_group(0, &const_state.bind_group, &[]);
+        compute_pass.set_bind_group(1, &self.bind_group, &[]);
 
         let x = resources::SKYBOX_SIZE.width / 8;
         let y = resources::SKYBOX_SIZE.height / 8;

@@ -208,6 +208,9 @@ fn cube_map_face(index: u32) -> mat3x3f {
 }
 
 @group(0) @binding(0)
+var<uniform> consts: consts::Consts;
+
+@group(1) @binding(0)
 var skybox: texture_storage_2d_array<rgba16float, write>;
 
 @compute
@@ -217,10 +220,6 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3u) {
 
     let skybox_size = textureDimensions(skybox);
     var uv = (vec2f(invocation_id.xy) + 0.5) / vec2f(skybox_size.xy);
-
-    var light: light::DirectionalLight;
-    light.direction = vec4f(0.0, 1.0, 0.0, 1.0);
-    light.irradiance = vec4f(1.0);
 
     var ndc = vec3f(uv * 2.0 - 1.0, -1.0);
     ndc.y *= -1.0;
@@ -233,7 +232,7 @@ fn main(@builtin(global_invocation_id) invocation_id: vec3u) {
     atmosphere.center = EARTH_CENTER;
     atmosphere.radius = EARTH_RADIUS + ATMOS_HEIGHT;
 
-    let color = integrate_atmospheric_scattering(light, ray, atmosphere);
+    let color = integrate_atmospheric_scattering(consts.sun, ray, atmosphere);
 
     textureStore(skybox, invocation_id.xy, face, vec4f(color, 1.0));
 }

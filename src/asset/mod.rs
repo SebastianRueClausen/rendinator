@@ -19,8 +19,8 @@ use normal::TangentFrame;
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Pod, Zeroable, Serialize, Deserialize)]
 pub struct DirectionalLight {
-    direction: Vec4,
-    irradiance: Vec4,
+    pub direction: Vec4,
+    pub irradiance: Vec4,
 }
 
 impl Default for DirectionalLight {
