@@ -162,6 +162,7 @@ fn integrate_atmospheric_scattering(
 
 fn cube_map_face(index: u32) -> mat3x3f {
     switch index {
+        // +X
         case 0u: {
             return mat3x3f(
                 vec3f(0.0, 0.0, 1.0),
@@ -169,6 +170,7 @@ fn cube_map_face(index: u32) -> mat3x3f {
                 vec3f(1.0, 0.0, 0.0),
             );
         }
+        // -X
         case 1u: {
             return mat3x3f(
                 vec3f(0.0, 0.0, -1.0),
@@ -176,20 +178,23 @@ fn cube_map_face(index: u32) -> mat3x3f {
                 vec3f(-1.0, 0.0, 0.0),
             );
         }
+        // +Y
         case 2u: {
             return mat3x3f(
                 vec3f(1.0, 0.0, 0.0),
-                vec3f(0.0, 0.0, -1.0),
+                vec3f(0.0, 0.0, 1.0),
                 vec3f(0.0, -1.0, 0.0),
             );
         }
+        // -Y
         case 3u: {
             return mat3x3f(
                 vec3f(1.0, 0.0, 0.0),
-                vec3f(0.0, 0.0, 1.0),
+                vec3f(0.0, 0.0, -1.0),
                 vec3f(0.0, 1.0, 0.0),
             );
         }
+        // +Z
         case 4u: {
             return mat3x3f(
                 vec3f(-1.0, 0.0, 0.0),
@@ -197,6 +202,7 @@ fn cube_map_face(index: u32) -> mat3x3f {
                 vec3f(0.0, 0.0, 1.0),
             );
         }
+        // -Z
         default: {
             return mat3x3f(
                 vec3f(1.0, 0.0, 0.0),

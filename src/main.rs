@@ -3,7 +3,6 @@ mod atmosphere;
 mod bloom;
 mod camera;
 mod context;
-mod depth_reduce;
 mod display;
 mod renderer;
 mod resources;
@@ -46,7 +45,7 @@ fn main() {
     let mut state = State::new(aspect_ratio(window.inner_size()));
 
     let mut renderer = {
-        let scene = Scene::from_gltf(&AssetPath::new("sponza/Sponza.gltf", "sponza/Sponza.scene"))
+        let scene = Scene::from_gltf(&AssetPath::new("bistro/bistro.gltf", "bistro/bistro.scene"))
             .expect("failed to load scene");
 
         Renderer::new(window.clone(), &scene)

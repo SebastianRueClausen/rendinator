@@ -31,12 +31,12 @@ fn vertex(
     let bounding_sphere = primitives[primitive_index].bounding_sphere;
 
     let index = indices[vertex_index];
-    let position = mesh::position(bounding_sphere, vertices[index]);
+    let pos = mesh::position(bounding_sphere, vertices[index]);
 
-    let proj_view = shadow_cascades[cascade_index].matrix;
+    let proj_view = shadow_cascades[cascade_index].proj_view;
 
-    let world_position = transform * vec4f(position, 1.0);
-    out.clip_position = proj_view * world_position;
+    let world_pos = transform * vec4f(pos, 1.0);
+    out.clip_position = proj_view * world_pos;
 
     return out;
 }

@@ -1,71 +1,57 @@
 use eyre::{Result, WrapErr};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use gltf::Gltf;
-use std::ops::Range;
+use image::GenericImageView;
+use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use std::{fs, io, mem};
 
-use crate::asset::{Primitive, Vertex};
-
-use super::{
-    normal, quantize, BoundingSphere, Instance, Material, Mesh, Scene, Texture, Transform,
+use asset::{
+    BoundingSphere, Instance, Lod, Material, Mesh, Meshlet, Model, Scene, Texture, TextureKind,
+    Transform, Vertex,
 };
+
+use crate::normals;
 
 #[derive(Default)]
 struct FallbackTextures {
-    albedo_fallback_texture: Option<u32>,
-    emissive_fallback_texture: Option<u32>,
-    normal_fallback_texture: Option<u32>,
-    specular_fallback_texture: Option<u32>,
+    albedo: Option<u32>,
+    emissive: Option<u32>,
+    normal: Option<u32>,
+    specular: Option<u32>,
 }
 
 impl FallbackTextures {
     fn insert_fallback(scene: &mut Scene, specs: &TextureSpecs) -> u32 {
-        println!("fallback texture");
+        let mip: Vec<_> = specs.fallback.iter().copied().cycle().take(16).collect();
+        let mip = compress_bytes(specs.kind, 2, 2, &mip).into_boxed_slice();
 
         scene.add_texture(Texture {
-            mips: specs.fallback.iter().copied().collect(),
-            format: specs.raw_format,
-            mip_level_count: 1,
-            extent: wgpu::Extent3d {
-                depth_or_array_layers: 1,
-                width: 1,
-                height: 1,
-            },
+            kind: specs.kind,
+            width: 2,
+            height: 2,
+            mips: vec![mip],
         })
     }
 
-    fn albedo_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
-        *self.albedo_fallback_texture.get_or_insert_with(|| {
-            Self::insert_fallback(scene, &ALBEDO_TEXTURE_SPECS)
-        })
-    }
+    fn fallback_texture(&mut self, scene: &mut Scene, kind: TextureKind) -> u32 {
+        let (field, specs) = match kind {
+            TextureKind::Albedo => (&mut self.albedo, &ALBEDO_TEXTURE_SPECS),
+            TextureKind::Normal => (&mut self.normal, &NORMAL_TEXTURE_SPECS),
+            TextureKind::Specular => (&mut self.specular, &SPECULAR_TEXTURE_SPECS),
+            TextureKind::Emissive => (&mut self.emissive, &EMISSIVE_TEXTURE_SPECS),
+        };
 
-    fn emissive_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
-        *self.emissive_fallback_texture.get_or_insert_with(|| {
-            Self::insert_fallback(scene, &EMISSIVE_TEXTURE_SPECS)
-        })
-    }
-
-    fn normal_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
-        *self.normal_fallback_texture.get_or_insert_with(|| {
-            Self::insert_fallback(scene, &NORMAL_TEXTURE_SPECS)
-        })
-    }
-
-    fn specular_fallback_texture(&mut self, scene: &mut Scene) -> u32 {
-        *self.specular_fallback_texture.get_or_insert_with(|| {
-            Self::insert_fallback(scene, &SPECULAR_TEXTURE_SPECS)
-        })
+        *field.get_or_insert_with(|| Self::insert_fallback(scene, specs))
     }
 
     fn fallback_material(&mut self, scene: &mut Scene) -> Material {
         Material {
-            albedo_texture: self.albedo_fallback_texture(scene),
-            normal_texture: self.normal_fallback_texture(scene),
-            specular_texture: self.specular_fallback_texture(scene),
-            emissive_texture: self.emissive_fallback_texture(scene),
+            albedo_texture: self.fallback_texture(scene, TextureKind::Albedo),
+            normal_texture: self.fallback_texture(scene, TextureKind::Normal),
+            specular_texture: self.fallback_texture(scene, TextureKind::Specular),
+            emissive_texture: self.fallback_texture(scene, TextureKind::Emissive),
             base_color: DEFAULT_COLOR,
             emissive: DEFAULT_EMISSIVE,
             metallic: DEFAULT_METALLIC,
@@ -129,7 +115,8 @@ impl Importer {
                 };
 
                 let input = self.buffer_data(&view, None, 0);
-                image::load(io::Cursor::new(&input), format).wrap_err("failed to load inline image")
+                let cursor = io::Cursor::new(&input);
+                image::load(cursor, format).wrap_err("failed to load inline image")
             }
             gltf::image::Source::Uri { uri, .. } => {
                 let uri = Path::new(uri);
@@ -148,10 +135,8 @@ impl Importer {
         offset: usize,
     ) -> &[u8] {
         let start = view.offset() + offset;
-        let end = view.offset() + offset + byte_count.unwrap_or(view.length() - offset);
-        let index = view.buffer().index();
-
-        &self.buffer_data[index][start..end]
+        let end = start + byte_count.unwrap_or(view.length() - offset);
+        &self.buffer_data[view.buffer().index()][start..end]
     }
 
     fn accessor_data(&self, accessor: &gltf::Accessor) -> &[u8] {
@@ -169,20 +154,20 @@ impl Importer {
         let albedo_texture = {
             if let Some(accessor) = material.pbr_metallic_roughness().base_color_texture() {
                 let image = self.image(accessor.texture().source().source())?;
-                let texture = create_texture(image, &ALBEDO_TEXTURE_SPECS, true, |_| ())?;
+                let texture = create_texture(image, &ALBEDO_TEXTURE_SPECS, true, |_| ());
                 scene.add_texture(texture)
             } else {
-                fallback_textures.albedo_fallback_texture(scene)
+                fallback_textures.fallback_texture(scene, TextureKind::Albedo)
             }
         };
 
         let emissive_texture = {
             if let Some(accessor) = material.emissive_texture() {
                 let image = self.image(accessor.texture().source().source())?;
-                let texture = create_texture(image, &EMISSIVE_TEXTURE_SPECS, true, |_| ())?;
+                let texture = create_texture(image, &EMISSIVE_TEXTURE_SPECS, true, |_| ());
                 scene.add_texture(texture)
             } else {
-                fallback_textures.emissive_fallback_texture(scene)
+                fallback_textures.fallback_texture(scene, TextureKind::Emissive)
             }
         };
 
@@ -197,15 +182,15 @@ impl Importer {
                     };
 
                     let normal = normal * 2.0 - 1.0;
-                    let uv = normal::encode_octahedron(normal);
+                    let uv = asset::normal::encode_octahedron(normal);
 
-                    pixel[0] = quantize::quantize_unorm::<8>(uv.x) as u8;
-                    pixel[1] = quantize::quantize_unorm::<8>(uv.y) as u8;
-                })?;
+                    pixel[0] = asset::utilities::quantize_unorm(uv.x, 8) as u8;
+                    pixel[1] = asset::utilities::quantize_unorm(uv.y, 8) as u8;
+                });
 
                 scene.add_texture(texture)
             } else {
-                fallback_textures.normal_fallback_texture(scene)
+                fallback_textures.fallback_texture(scene, TextureKind::Normal)
             }
         };
 
@@ -213,38 +198,29 @@ impl Importer {
             let accessor = material
                 .pbr_metallic_roughness()
                 .metallic_roughness_texture();
-
             if let Some(accessor) = accessor {
                 let image = self.image(accessor.texture().source().source())?;
                 let texture = create_texture(image, &SPECULAR_TEXTURE_SPECS, true, |rgba| {
                     // Change metallic channel to red.
                     rgba[0] = rgba[2];
-                })?;
+                });
                 scene.add_texture(texture)
             } else {
-                fallback_textures.specular_fallback_texture(scene)
+                fallback_textures.fallback_texture(scene, TextureKind::Specular)
             }
         };
 
-        let metallic = material.pbr_metallic_roughness().metallic_factor();
-        let roughness = material.pbr_metallic_roughness().roughness_factor();
-        let ior = material.ior().unwrap_or(DEFAULT_IOR);
-
-        let base_color = Vec4::from_array(material.pbr_metallic_roughness().base_color_factor());
-
-        let emissive = Vec3::from_array(material.emissive_factor()).extend(1.0)
-            * material.emissive_strength().unwrap_or(1.0);
-
         Ok(Material {
+            metallic: material.pbr_metallic_roughness().metallic_factor(),
+            roughness: material.pbr_metallic_roughness().roughness_factor(),
+            ior: material.ior().unwrap_or(DEFAULT_IOR),
+            base_color: material.pbr_metallic_roughness().base_color_factor().into(),
+            emissive: Vec3::from_array(material.emissive_factor()).extend(1.0)
+                * material.emissive_strength().unwrap_or(1.0),
             albedo_texture,
-            emissive_texture,
             normal_texture,
             specular_texture,
-            base_color,
-            emissive,
-            metallic,
-            roughness,
-            ior,
+            emissive_texture,
             padding: [0; 1],
         })
     }
@@ -280,15 +256,15 @@ impl Importer {
     }
 
     /// Note: Call this after loading materials.
-    fn load_mesh(
+    fn load_model(
         &self,
         scene: &mut Scene,
         fallback_textures: &mut FallbackTextures,
         mesh: gltf::Mesh,
-    ) -> Result<Mesh> {
+    ) -> Result<Model> {
         use gltf::accessor::{DataType, Dimensions};
 
-        let primitives: Result<Vec<_>> = mesh
+        let meshes: Result<Vec<_>> = mesh
             .primitives()
             .map(|primitive| {
                 let material = primitive
@@ -300,7 +276,7 @@ impl Importer {
                         scene.add_material(material)
                     });
 
-                let indices = self.load_indices(&primitive)?;
+                let mut indices = self.load_indices(&primitive)?;
 
                 let position_accessor = primitive
                     .get(&gltf::Semantic::Positions)
@@ -320,7 +296,7 @@ impl Importer {
                     .collect();
 
                 let normals = match primitive.get(&gltf::Semantic::Normals) {
-                    None => generate_normals(&positions, &indices),
+                    None => normals::generate_normals(&positions, &indices),
                     Some(accessor) => {
                         verify_accessor("normals", &accessor, DataType::F32, Dimensions::Vec3)?;
                         self.accessor_data(&accessor)
@@ -342,7 +318,7 @@ impl Importer {
                 };
 
                 let tangents = match primitive.get(&gltf::Semantic::Tangents) {
-                    None => generate_tangents(&positions, &texcoords, &normals, &indices)?,
+                    None => normals::generate_tangents(&positions, &texcoords, &normals, &indices)?,
                     Some(accessor) => {
                         verify_accessor("tangents", &accessor, DataType::F32, Dimensions::Vec4)?;
                         self.accessor_data(&accessor)
@@ -352,39 +328,82 @@ impl Importer {
                     }
                 };
 
-                let indices = load_indices(scene, &indices);
                 let bounding_sphere = bounding_sphere(&primitive);
+                let vertices: Vec<_> = texcoords
+                    .iter()
+                    .cloned()
+                    .zip(normals.iter().cloned())
+                    .zip(tangents.iter().cloned())
+                    .zip(positions.iter().cloned())
+                    .map(|(((texcoord, normal), tangent), position)| {
+                        Vertex::encode(
+                            &bounding_sphere,
+                            position,
+                            normal,
+                            texcoord,
+                            tangent,
+                            material,
+                        )
+                    })
+                    .collect();
 
-                scene.vertices.extend(
-                    texcoords
-                        .iter()
-                        .cloned()
-                        .zip(normals.iter().cloned())
-                        .zip(tangents.iter().cloned())
-                        .zip(positions.iter().cloned())
-                        .map(|(((texcoord, normal), tangent), position)| {
-                            Vertex::new(
-                                &bounding_sphere,
-                                position,
-                                normal,
-                                texcoord,
-                                tangent,
-                                material,
-                            )
-                        }),
-                );
+                let vertex_adapter = meshopt::VertexDataAdapter {
+                    reader: Cursor::new(bytemuck::cast_slice(&positions)),
+                    vertex_stride: mem::size_of::<Vec3>(),
+                    vertex_count: positions.len(),
+                    position_offset: 0,
+                };
 
-                Ok(Primitive {
+                let vertex_offset = scene.vertices.len();
+                scene.vertices.extend(vertices);
+
+                let mut lods = [Lod::default(); 8];
+                let mut lod_count = 0;
+
+                for lod in &mut lods {
+                    lod.index_offset = scene.indices.len() as u32;
+                    lod.index_count = indices.len() as u32;
+                    lod_count += 1;
+
+                    scene.indices.extend_from_slice(&indices);
+
+                    lod.meshlet_count = build_meshlets(scene, &indices, &vertex_adapter) as u32;
+                    lod.meshlet_offset = scene.meshlets.len() as u32;
+
+                    if lod_count < 8 {
+                        let target_count = (indices.len() as f32 * 0.75).ceil() as usize;
+                        let new_indices =
+                            meshopt::simplify(&indices, &vertex_adapter, target_count, 1e-2);
+
+                        if new_indices.len() == indices.len() {
+                            break;
+                        }
+
+                        indices = new_indices;
+                    }
+                }
+
+                while scene.meshlets.len() % 64 != 0 {
+                    scene.meshlets.push(Meshlet::default());
+                }
+
+                Ok(Mesh {
+                    vertex_offset: vertex_offset as u32,
+                    vertex_count: texcoords.len() as u32,
                     bounding_sphere,
-                    indices,
                     material,
+                    lods,
+                    lod_count,
                 })
             })
             .collect();
 
-        Ok(Mesh {
-            primitives: primitives?,
-        })
+        let mesh_indices = meshes?
+            .into_iter()
+            .map(|mesh| scene.add_mesh(mesh))
+            .collect();
+
+        Ok(Model { mesh_indices })
     }
 
     pub fn load_scene(self) -> Result<Scene> {
@@ -399,27 +418,58 @@ impl Importer {
             .map(|material| self.load_material(&mut scene, &mut fallback_textures, material))
             .collect::<Result<_>>()?;
 
-        scene.meshes = self
+        scene.models = self
             .gltf
             .meshes()
-            .map(|mesh| self.load_mesh(&mut scene, &mut fallback_textures, mesh))
+            .map(|mesh| self.load_model(&mut scene, &mut fallback_textures, mesh))
             .collect::<Result<_>>()?;
 
         Ok(scene)
     }
 }
 
-fn load_indices(scene: &mut Scene, indices: &[u32]) -> Range<u32> {
-    let offset = scene.vertices.len() as u32;
+fn build_meshlets(
+    scene: &mut Scene,
+    indices: &[u32],
+    vertices: &meshopt::VertexDataAdapter,
+) -> usize {
+    let mut meshlets: Vec<_> =
+        meshopt::clusterize::build_meshlets(indices, vertices.vertex_count, 64, 64)
+            .iter()
+            .map(|meshlet| {
+                let data_offset = scene.meshlet_data.len() as u32;
 
-    let start = scene.indices.len() as u32;
-    let end = start + indices.len() as u32;
+                let meshlet_vertices = &meshlet.vertices[..meshlet.vertex_count as usize];
+                let meshlet_indices = &meshlet.indices[..meshlet.triangle_count as usize];
 
-    scene
-        .indices
-        .extend(indices.iter().map(|index| index + offset));
+                scene.meshlet_data.extend_from_slice(meshlet_vertices);
 
-    start..end
+                for triangle in meshlet_indices {
+                    let [a, b, c] = triangle.map(|i| i as u32);
+                    scene.meshlet_data.push(a << 24 | b << 16 | c << 8);
+                }
+
+                let bounds = meshopt::compute_meshlet_bounds(meshlet, vertices);
+                let bounding_sphere = BoundingSphere {
+                    center: Vec3::from_array(bounds.center),
+                    radius: bounds.radius,
+                };
+
+                Meshlet {
+                    bounding_sphere,
+                    cone_axis: bounds.cone_axis_s8,
+                    cone_cutoff: bounds.cone_cutoff_s8,
+                    vertex_count: meshlet.vertex_count,
+                    triangle_count: meshlet.triangle_count,
+                    data_offset,
+                }
+            })
+            .collect();
+
+    let count = meshlets.len();
+    scene.meshlets.append(&mut meshlets);
+
+    count
 }
 
 fn bounding_sphere(primitive: &gltf::Primitive) -> BoundingSphere {
@@ -436,28 +486,25 @@ fn bounding_sphere(primitive: &gltf::Primitive) -> BoundingSphere {
 }
 
 fn load_instances<'a>(nodes: impl Iterator<Item = gltf::Node<'a>>) -> Vec<Instance> {
-    let nodes = nodes.map(|node| {
-        let mesh = node.mesh().map(|mesh| mesh.index() as u32);
-        let transform = Transform::from(Mat4::from_cols_array_2d(&node.transform().matrix()));
+    nodes
+        .filter_map(|node| {
+            let mesh_index = node.mesh().map(|mesh| mesh.index() as u32);
+            let transform = Transform::from(Mat4::from_cols_array_2d(&node.transform().matrix()));
 
-        let children = load_instances(node.children());
-        let name = node.name().map(String::from);
+            let children = load_instances(node.children());
 
-        Instance {
-            name,
-            mesh,
-            transform,
-            children,
-        }
-    });
-
-    nodes.collect()
+            Some(Instance {
+                mesh_index,
+                transform,
+                children,
+            })
+        })
+        .collect()
 }
 
 struct TextureSpecs {
-    compressed_format: wgpu::TextureFormat,
-    raw_format: wgpu::TextureFormat,
-    fallback: &'static [u8],
+    kind: TextureKind,
+    fallback: [u8; 4],
 }
 
 fn create_texture(
@@ -465,116 +512,52 @@ fn create_texture(
     specs: &TextureSpecs,
     create_mips: bool,
     mut encode: impl FnMut(&mut [u8]) + Clone + Copy,
-) -> Result<Texture> {
-    let mut mip_level_count = if create_mips {
-        let extent = u32::max(image.width(), image.height()) as f32;
-        extent.log2().floor() as u32 + 1
+) -> Texture {
+    // May be incorrect in very certain situations.
+    if image.width() < 2 || image.height() < 2 {
+        image.resize_exact(2, 2, image::imageops::Nearest);
+    }
+
+    let (width, height) = image.dimensions();
+
+    let mip_level_count = if create_mips {
+        let extent = u32::max(width, height) as f32;
+        let count = extent.log2().floor() as u32;
+        count.saturating_sub(2) + 1
     } else {
         1
     };
 
-    let extent = wgpu::Extent3d {
-        width: image.width(),
-        height: image.height(),
-        depth_or_array_layers: 1,
-    };
-
-    let format = {
-        let (block_width, block_height) = specs.compressed_format.block_dimensions();
-        if extent.width >= block_width && extent.height >= block_height {
-            specs.compressed_format
-        } else {
-            specs.raw_format
-        }
-    };
-
-    let filter_type = image::imageops::FilterType::Lanczos3;
-
-    let texture = if format.is_compressed() {
-        let (block_width, block_height) = format.block_dimensions();
-
-        if create_mips {
-            // Block compressed textures can't have 1x1 and 2x2 mips.
-            mip_level_count -= 2;
-        }
-
-        let mut mips = Vec::new();
-        for level in 0..mip_level_count {
+    let mips = (0..mip_level_count)
+        .map(|level| {
             image = if level == 0 {
                 image.resize_exact(
-                    round_to_block_extent(image.width(), block_width),
-                    round_to_block_extent(image.height(), block_height),
-                    filter_type,
+                    round_to_block_extent(image.width(), 2),
+                    round_to_block_extent(image.height(), 2),
+                    image::imageops::FilterType::Lanczos3,
                 )
             } else {
                 image.resize_exact(
-                    round_to_block_extent(image.width() / 2, block_width),
-                    round_to_block_extent(image.height() / 2, block_height),
-                    filter_type,
+                    round_to_block_extent(image.width() / 2, 2),
+                    round_to_block_extent(image.height() / 2, 2),
+                    image::imageops::FilterType::Lanczos3,
                 )
             };
 
             let mut mip = image.clone().into_rgba8();
             mip.pixels_mut().for_each(|pixel| encode(&mut pixel.0));
-            mips.append(&mut compress_image(format, mip)?);
-        }
 
-        Texture {
-            mips: mips.into_boxed_slice(),
-            mip_level_count,
-            extent,
-            format,
-        }
-    } else {
-        let mut mips = Vec::new();
+            compress_bytes(specs.kind, mip.width(), mip.height(), &mip.into_raw())
+                .into_boxed_slice()
+        })
+        .collect();
 
-        for level in 0..mip_level_count {
-            if level != 0 {
-                image = image.resize_exact(image.width() / 2, image.height() / 2, filter_type);
-            }
-
-            let mut raw = match format.components() {
-                1 => {
-                    let mut mip = image.clone().into_luma8();
-                    mip.pixels_mut().for_each(|pixel| encode(&mut pixel.0));
-                    mip.into_raw()
-                }
-                2 => {
-                    let mut mip = image.clone().into_rgb8();
-                    mip.pixels_mut().for_each(|pixel| encode(&mut pixel.0));
-
-                    let size = mip.width() * mip.height() * 2;
-                    let mut raw = Vec::with_capacity(size as usize);
-
-                    for pixel in mip.pixels() {
-                        raw.push(pixel[1]);
-                        raw.push(pixel[2]);
-                    }
-
-                    raw
-                }
-                4 => {
-                    let mut mip = image.clone().into_rgba8();
-                    mip.pixels_mut().for_each(|pixel| encode(&mut pixel.0));
-                    mip.into_raw()
-                }
-                format => {
-                    return Err(eyre::eyre!("invalid format: {format:?}"));
-                }
-            };
-
-            mips.append(&mut raw);
-        }
-
-        Texture {
-            mips: mips.into_boxed_slice(),
-            mip_level_count,
-            extent,
-            format,
-        }
-    };
-    
-    Ok(texture)
+    Texture {
+        kind: specs.kind,
+        mips,
+        width,
+        height,
+    }
 }
 
 fn round_to_block_extent(extent: u32, block_extent: u32) -> u32 {
@@ -583,15 +566,10 @@ fn round_to_block_extent(extent: u32, block_extent: u32) -> u32 {
     u32::max(rounded, block_extent)
 }
 
-fn compress_image(format: wgpu::TextureFormat, image: image::RgbaImage) -> Result<Vec<u8>> {
-    let format = match format {
-        wgpu::TextureFormat::Bc1RgbaUnorm | wgpu::TextureFormat::Bc1RgbaUnormSrgb => {
-            texpresso::Format::Bc1
-        }
-        wgpu::TextureFormat::Bc5RgSnorm | wgpu::TextureFormat::Bc5RgUnorm => texpresso::Format::Bc5,
-        format => {
-            panic!("invalid format {format:?}");
-        }
+fn compress_bytes(kind: TextureKind, width: u32, height: u32, bytes: &[u8]) -> Vec<u8> {
+    let format = match kind {
+        TextureKind::Albedo | TextureKind::Emissive => texpresso::Format::Bc1,
+        TextureKind::Normal | TextureKind::Specular => texpresso::Format::Bc5,
     };
 
     let params = texpresso::Params {
@@ -599,13 +577,15 @@ fn compress_image(format: wgpu::TextureFormat, image: image::RgbaImage) -> Resul
         ..Default::default()
     };
 
-    let (width, height) = (image.width() as usize, image.height() as usize);
+    let width = width as usize;
+    let height = height as usize;
+
     let size = format.compressed_size(width, height);
 
     let mut output = vec![0x0; size];
-    format.compress(&image.into_raw(), width, height, params, &mut output);
+    format.compress(bytes, width, height, params, &mut output);
 
-    Ok(output)
+    output
 }
 
 fn verify_accessor(
@@ -633,122 +613,25 @@ fn verify_accessor(
     Ok(())
 }
 
-fn generate_normals(positions: &[Vec3], indices: &[u32]) -> Vec<Vec3> {
-    let mut normals = vec![Vec3::ZERO; positions.len()];
-
-    for triangle in indices.chunks(3) {
-        let [idx0, idx1, idx2] = triangle else {
-            panic!("indices isn't multiple of 3");
-        };
-
-        let a = positions[*idx0 as usize];
-        let b = positions[*idx1 as usize];
-        let c = positions[*idx2 as usize];
-
-        let normal = (b - a).cross(c - a);
-        normals[*idx0 as usize] += normal;
-        normals[*idx1 as usize] += normal;
-        normals[*idx2 as usize] += normal;
-    }
-
-    for normal in &mut normals {
-        *normal = normal.normalize();
-    }
-
-    normals
-}
-
-fn generate_tangents(
-    positions: &[Vec3],
-    texcoords: &[Vec2],
-    normals: &[Vec3],
-    indices: &[u32],
-) -> Result<Vec<Vec4>> {
-    let tangents = vec![Vec4::ZERO; positions.len()];
-
-    let mut generator = TangentGenerator {
-        positions,
-        texcoords,
-        normals,
-        indices,
-        tangents,
-    };
-
-    if !mikktspace::generate_tangents(&mut generator) {
-        return Err(eyre::eyre!("failed to generate tangents"));
-    }
-
-    for tangent in &mut generator.tangents {
-        tangent[3] *= -1.0;
-    }
-
-    Ok(generator.tangents)
-}
-
-struct TangentGenerator<'a> {
-    positions: &'a [Vec3],
-    texcoords: &'a [Vec2],
-    normals: &'a [Vec3],
-    indices: &'a [u32],
-    tangents: Vec<Vec4>,
-}
-
-impl<'a> TangentGenerator<'a> {
-    fn index(&self, face: usize, vertex: usize) -> usize {
-        self.indices[face * 3 + vertex] as usize
-    }
-}
-
-impl<'a> mikktspace::Geometry for TangentGenerator<'a> {
-    fn num_faces(&self) -> usize {
-        self.indices.len() / 3
-    }
-
-    fn num_vertices_of_face(&self, _: usize) -> usize {
-        3
-    }
-
-    fn position(&self, face: usize, vert: usize) -> [f32; 3] {
-        self.positions[self.index(face, vert)].into()
-    }
-
-    fn normal(&self, face: usize, vert: usize) -> [f32; 3] {
-        self.normals[self.index(face, vert)].into()
-    }
-
-    fn tex_coord(&self, face: usize, vert: usize) -> [f32; 2] {
-        self.texcoords[self.index(face, vert)].into()
-    }
-
-    fn set_tangent_encoded(&mut self, tangent: [f32; 4], face: usize, vert: usize) {
-        let index = self.index(face, vert);
-        self.tangents[index] = tangent.into();
-    }
-}
-
 const ALBEDO_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    compressed_format: wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-    raw_format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    fallback: &[u8::MAX; 4],
+    kind: TextureKind::Albedo,
+    fallback: [u8::MAX; 4],
 };
 
 const NORMAL_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    compressed_format: wgpu::TextureFormat::Bc5RgUnorm,
-    raw_format: wgpu::TextureFormat::Rg8Unorm,
+    kind: TextureKind::Normal,
     // Octahedron encoded normal pointing straight out.
-    fallback: &[128; 2],
+    fallback: [128; 4],
 };
 
 const SPECULAR_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    compressed_format: wgpu::TextureFormat::Bc5RgUnorm,
-    raw_format: wgpu::TextureFormat::Rg8Unorm,
-    fallback: &[u8::MAX; 2],
+    kind: TextureKind::Specular,
+    fallback: [u8::MAX; 4],
 };
 
 const EMISSIVE_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    compressed_format: wgpu::TextureFormat::Bc1RgbaUnormSrgb,
-    raw_format: wgpu::TextureFormat::Rgba8UnormSrgb,
-    fallback: &[u8::MAX; 4],
+    kind: TextureKind::Emissive,
+    fallback: [u8::MAX; 4],
 };
 
 const DEFAULT_IOR: f32 = 1.4;

@@ -16,7 +16,7 @@ impl Camera {
 
     pub fn new(aspect_ratio: f32) -> Self {
         let z_near = 0.1;
-        let z_far = 1000.0;
+        let z_far = 50.0;
         let fov = std::f32::consts::PI / 4.0;
 
         let proj = calc_proj(fov, aspect_ratio, z_near, z_far);

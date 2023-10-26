@@ -1,26 +1,18 @@
-use std::{borrow::Cow, mem};
+use std::{array, borrow::Cow, iter, mem};
 
-use bytemuck::NoUninit;
+use glam::{Mat4, Vec4, Vec4Swizzles};
 
 use crate::{
+    camera::Camera,
     context::Context,
     resources::{
-        ConstState, DepthPyramid, SceneState, ShadowCascades, SHADOW_CASCADE_FORMAT,
-        SHADOW_CASCADE_SIZE,
+        Consts, SceneState, ShadowCascade, ShadowCascades, SHADOW_CASCADE_COUNT,
+        SHADOW_CASCADE_FORMAT,
     },
 };
 
-#[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct ShadowParams {
-    cascade_size: u32,
-    lambda: f32,
-    near_offset: f32,
-}
-
 pub struct ShadowPhase {
     render_cascade: wgpu::RenderPipeline,
-    setup_cascades: wgpu::ComputePipeline,
     bind_group_layout: wgpu::BindGroupLayout,
     bind_group: wgpu::BindGroup,
 }
@@ -30,22 +22,7 @@ impl ShadowPhase {
         context: &mut Context,
         scene_state: &SceneState,
         shadow_cascades: &ShadowCascades,
-        depth_pyramid: &DepthPyramid,
     ) -> Self {
-        let cascade_setup_module = context.create_shader_module(
-            include_str!("shaders/cascade_setup.wgsl"),
-            "shaders/cascade_setup.wgsl",
-            &[],
-        );
-
-        let cascade_setup_shader =
-            context
-                .device
-                .create_shader_module(wgpu::ShaderModuleDescriptor {
-                    label: Some("cascade setup"),
-                    source: wgpu::ShaderSource::Naga(Cow::Owned(cascade_setup_module)),
-                });
-
         let cascade_render_module = context.create_shader_module(
             include_str!("shaders/shadow_render.wgsl"),
             "shaders/shadow_render.wgsl",
@@ -65,57 +42,19 @@ impl ShadowPhase {
                 .device
                 .create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                     label: Some("shadow"),
-                    entries: &[
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 0,
-                            visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
-                            ty: wgpu::BindingType::Buffer {
-                                ty: wgpu::BufferBindingType::Storage { read_only: false },
-                                has_dynamic_offset: false,
-                                min_binding_size: None,
-                            },
-                            count: None,
+                    entries: &[wgpu::BindGroupLayoutEntry {
+                        binding: 0,
+                        visibility: wgpu::ShaderStages::COMPUTE | wgpu::ShaderStages::VERTEX,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: false },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
-                        wgpu::BindGroupLayoutEntry {
-                            binding: 1,
-                            visibility: wgpu::ShaderStages::COMPUTE,
-                            ty: wgpu::BindingType::Texture {
-                                sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                                view_dimension: wgpu::TextureViewDimension::D2,
-                                multisampled: false,
-                            },
-                            count: None,
-                        },
-                    ],
-                });
-
-        let bind_group =
-            create_bind_group(context, &shadow_cascades, depth_pyramid, &bind_group_layout);
-
-        let setup_cascades_layout =
-            context
-                .device
-                .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                    label: Some("cascade setup"),
-                    bind_group_layouts: &[
-                        ConstState::bind_group_layout(context),
-                        &bind_group_layout,
-                    ],
-                    push_constant_ranges: &[wgpu::PushConstantRange {
-                        stages: wgpu::ShaderStages::COMPUTE,
-                        range: 0..mem::size_of::<ShadowParams>() as u32,
+                        count: None,
                     }],
                 });
 
-        let setup_cascades =
-            context
-                .device
-                .create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-                    label: Some("cascade setup"),
-                    layout: Some(&setup_cascades_layout),
-                    module: &cascade_setup_shader,
-                    entry_point: "main",
-                });
+        let bind_group = create_bind_group(context, &shadow_cascades, &bind_group_layout);
 
         let render_cascade_layout =
             context
@@ -144,7 +83,7 @@ impl ShadowPhase {
                     depth_stencil: Some(wgpu::DepthStencilState {
                         format: SHADOW_CASCADE_FORMAT,
                         depth_write_enabled: true,
-                        depth_compare: wgpu::CompareFunction::Never,
+                        depth_compare: wgpu::CompareFunction::Less,
                         stencil: wgpu::StencilState::default(),
                         bias: wgpu::DepthBiasState::default(),
                     }),
@@ -156,50 +95,20 @@ impl ShadowPhase {
         Self {
             bind_group,
             bind_group_layout,
-            setup_cascades,
             render_cascade,
         }
     }
 
-    pub fn resize_surface(
-        &mut self,
-        context: &Context,
-        shadow_cascades: &ShadowCascades,
-        depth_pyramid: &DepthPyramid,
-    ) {
-        self.bind_group = create_bind_group(
-            context,
-            &shadow_cascades,
-            depth_pyramid,
-            &self.bind_group_layout,
-        );
+    pub fn resize_surface(&mut self, context: &Context, shadow_cascades: &ShadowCascades) {
+        self.bind_group = create_bind_group(context, &shadow_cascades, &self.bind_group_layout);
     }
 
     pub fn record(
         &self,
-        const_state: &ConstState,
         shadow_cascades: &ShadowCascades,
         scene_state: &SceneState,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        let mut compute_pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("setup cascades"),
-        });
-
-        let params = ShadowParams {
-            cascade_size: SHADOW_CASCADE_SIZE,
-            lambda: 0.4,
-            near_offset: 250.0,
-        };
-
-        compute_pass.set_pipeline(&self.setup_cascades);
-        compute_pass.set_bind_group(0, &const_state.bind_group, &[]);
-        compute_pass.set_bind_group(1, &self.bind_group, &[]);
-        compute_pass.set_push_constants(0, bytemuck::bytes_of(&params));
-        compute_pass.dispatch_workgroups(1, 1, 1);
-
-        drop(compute_pass);
-
         for (index, cascade) in shadow_cascades.cascades.iter().enumerate() {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("render cascade"),
@@ -207,7 +116,7 @@ impl ShadowPhase {
                 depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
                     view: cascade,
                     depth_ops: Some(wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(0.0),
+                        load: wgpu::LoadOp::Clear(1.0),
                         store: true,
                     }),
                     stencil_ops: None,
@@ -232,7 +141,6 @@ impl ShadowPhase {
 fn create_bind_group(
     context: &Context,
     shadow_cascades: &ShadowCascades,
-    depth_pyramid: &DepthPyramid,
     layout: &wgpu::BindGroupLayout,
 ) -> wgpu::BindGroup {
     context
@@ -240,19 +148,114 @@ fn create_bind_group(
         .create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("shadow"),
             layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &shadow_cascades.cascade_info,
-                        offset: 0,
-                        size: None,
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::TextureView(&depth_pyramid.whole),
-                },
-            ],
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                    buffer: &shadow_cascades.cascade_info,
+                    offset: 0,
+                    size: None,
+                }),
+            }],
         })
+}
+
+pub fn create_cascades(camera: &Camera, consts: &Consts) -> Vec<ShadowCascade> {
+    let lambda = 0.6;
+
+    let mut cascades: Vec<_> = iter::repeat(ShadowCascade::default())
+        .take(SHADOW_CASCADE_COUNT)
+        .collect();
+
+    let frustrum_corners: [_; 8] = array::from_fn(|index| {
+        let z = index / 4;
+
+        let index = index - z * 4;
+        let y = index / 2;
+        let x = index % 2;
+
+        let value = consts.inverse_proj_view
+            * Vec4::new(
+                2.0 * x as f32 - 1.0,
+                2.0 * y as f32 - 1.0,
+                2.0 * z as f32 - 1.0,
+                1.0,
+            );
+
+        value / value.w
+    });
+
+    let mut center: Vec4 = frustrum_corners.iter().sum();
+    center /= 8.0;
+
+    let radius = frustrum_corners
+        .iter()
+        .fold(0.0, |radius, corner| corner.distance(center).max(radius));
+
+    for cascade in &mut cascades {
+        let light_pos = center.xyz() + consts.sun.direction.xyz() * radius;
+        let focal_point = center.xyz();
+
+        let view = Mat4::look_at_rh(light_pos, focal_point, Camera::UP);
+
+        let (min, max) =
+            frustrum_corners
+                .into_iter()
+                .fold((Vec4::MAX, Vec4::MIN), |(min, max), corner| {
+                    let corner = view * corner;
+                    (corner.min(min), corner.max(max))
+                });
+
+        let proj = Mat4::orthographic_rh(min.x, max.x, min.y, max.y, 0.0, camera.z_far - camera.z_near);
+        cascade.proj_view = proj * view;
+    }
+
+    /*
+    let depth_range = camera.z_far - camera.z_near;
+
+    let min_depth = camera.z_near;
+    let max_depth = min_depth + depth_range;
+
+    let depth_ratio = max_depth / min_depth;
+
+    for (index, cascade) in cascades.iter_mut().enumerate() {
+        let p = (index as f32 + 1.0) / SHADOW_CASCADE_COUNT as f32;
+        let log_depth = min_depth * depth_ratio.powf(p);
+
+        let uniform = min_depth + depth_range * p;
+        let depth = lambda * (log_depth - uniform) + uniform;
+
+        cascade.split = (depth - camera.z_near) / depth_range;
+    }
+
+    let frustrum_corners = frustrum_corners(consts.inverse_proj_view);
+    let mut center: Vec4 = frustrum_corners
+        .iter()
+        .sum();
+    center /= 8.0;
+
+    for cascade in &mut cascades {
+        let mut frustrum_corners = frustrum_corners;
+
+        for index in 0..4 {
+            let dist = frustrum_corners[i + 4] - frustrum_corners[i]
+        }
+
+        let eye = center - consts.sun.direction;
+        let view = Mat4::look_at_lh(eye.xyz(), center.xyz(), Camera::UP);
+
+        let (min, max) = frustrum_corners
+            .iter()
+            .fold((Vec4::MAX, Vec4::MIN), |(min, max), corner| {
+                let corner = view * *corner;
+                (corner.max(max), corner.min(min))
+            });
+
+        let proj = Mat4::orthographic_lh(min.x, max.x, min.y, max.y, min.z, max.z);
+
+        cascade.split_depth = camera.z_near + cascade.split * depth_range;
+        cascade.proj_view = proj * view;
+    }
+    */
+
+    cascades
 }

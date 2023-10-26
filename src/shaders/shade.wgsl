@@ -114,41 +114,44 @@ fn interp_3d(lambda: vec3f, values: array<vec3f, 3>) -> vec3f {
     return fma(vec3f(lambda[0]), values[0], fma(vec3f(lambda[1]), values[1], lambda[2] * values[2]));
 }
 
-fn shadow_occlusion(depth: f32, normal: vec3f, world_pos: vec3f) -> f32 {
-    let light_dir = consts.sun.direction.xyz * -1.0;
+fn shadow_occlusion(normal: vec3f, world_pos: vec3f) -> f32 {
     let cascade_count = arrayLength(&shadow_cascade_infos);
-    var cascade_index = 0u;
+    let depth = length(world_pos - consts.camera_pos.xyz);
 
+    var cascade_index = 0u;
     for (var i = 0u; i < cascade_count - 1u; i += 1u) {
         let info = &shadow_cascade_infos[i];
 
-        if depth > (*info).far {
+        if depth < (*info).split_depth {
             cascade_index = i + 1u;
         }
     }
 
     let info = &shadow_cascade_infos[cascade_index];
+    var shadow_coords = (*info).proj_view * vec4f(world_pos, 1.0);
+    shadow_coords /= shadow_coords.w;
 
-    let blend = clamp((depth -  (*info).far * 0.995) * 200.0, 0.0, 1.0);
-    let light_pos = (*info).matrix * vec4f(world_pos, 1.0);
-    let light_depth = light_pos.z;
+    var map_coords = shadow_coords.xy;
+    map_coords.y *= -1.0;
+    map_coords = map_coords / 2.0 + 0.5;
 
-    let bias = max(0.0005 * (1.0 - dot(normal, light_dir)), 0.0005);
+    let bias = 0.005;
+    let scale = 0.75;
 
+    let texel_size = scale * vec2f(1.0) / vec2f(textureDimensions(shadow_cascades));
     var shadow = 0.0;
-    let texel_size = vec2f(1.0) / vec2f(textureDimensions(shadow_cascades));
 
     for (var x = -1; x <= 1; x += 1) {
 	    for (var y = -1; y <= 1; y += 1) {
 			let pcf = textureSampleLevel(
                 shadow_cascades,
                 linear_sampler,
-                light_pos.xy + vec2f(f32(x), f32(y)) * texel_size,
+                map_coords + vec2f(f32(x), f32(y)) * texel_size,
                 cascade_index,
                 0.0,
             );
 
-	        shadow += light_depth - select(0.0, 1.0, bias > pcf);
+	        shadow += select(0.0, 1.0, shadow_coords.z - bias > pcf);
 	    }
 	}
 
@@ -168,7 +171,6 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     ndc.y *= -1.0;
 
     let visibility = textureLoad(visibility_buffer, texel_id, 0).x;
-    let depth = textureLoad(depth_buffer, texel_id, 0);
 
     let primitive_index = (visibility >> mesh::TRIANGLE_INDEX_BITS) - 1u;
     var triangle_index = visibility & mesh::TRIANGLE_INDEX_MASK;
@@ -332,20 +334,18 @@ fn shade(@builtin(global_invocation_id) invocation_id: vec3u) {
     let diffuse_color = shade.albedo * (1.0 - shade.metallic);
     let specular = pbr::specular(shade, light);
     let diffuse = diffuse_color * pbr::burley_diffuse(shade, light);
-    let shadow = shadow_occlusion(depth, normal, position);
+    let ambient = shade.albedo * 0.07;
+    let shadow = shadow_occlusion(normal, position);
 
     /*
     let radiance = (diffuse + specular)
         * light.normal_dot_light
         * consts.sun.irradiance.xyz
         * (1.0 - shadow);
-
-    let ambient = shade.albedo * 0.2;
-
     let final_color = vec4f(radiance + ambient + emissive, 1.0);
     */
 
-    let final_color = vec4f(shadow);
+    let final_color = vec4f(bary.lambda, 1.0);
 
     textureStore(color_buffer, texel_id, final_color);
 }

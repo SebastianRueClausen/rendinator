@@ -54,7 +54,7 @@ impl Context {
             &wgpu::DeviceDescriptor {
                 limits: wgpu::Limits {
                     max_push_constant_size: 128,
-                    max_sampled_textures_per_shader_stage: 128,
+                    max_sampled_textures_per_shader_stage: 1024,
                     ..Default::default()
                 },
                 label: Some("device"),

@@ -44,7 +44,7 @@ fn octahedron_decode(octahedron: vec2f) -> vec3f {
 }
 
 fn linearize_depth(near: f32, far: f32, depth: f32) -> f32 {
-    return (2.0 * near * far) / (far + near - depth * (far - near));
+    return (2.0 * near) / (far + near - depth * (far - near));
 }
 
 fn luminance(color: vec3f) -> f32 {

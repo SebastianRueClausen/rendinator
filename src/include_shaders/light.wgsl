@@ -6,10 +6,8 @@ struct DirectionalLight {
 }
 
 struct ShadowCascade {
-    matrix: mat4x4f,
-    corners: array<vec4f, 8>,
-    center: vec4f,
-    near: f32,
-    far: f32,
+    proj_view: mat4x4f,
+    split: f32,
+    split_depth: f32,
     padding: array<u32, 2>,
 }

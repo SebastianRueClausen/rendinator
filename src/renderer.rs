@@ -4,15 +4,14 @@ use std::time::Duration;
 
 use winit::{dpi::PhysicalSize, window::Window};
 
-use crate::asset;
+use crate::{asset, shadow};
 use crate::atmosphere::AtmospherePhase;
 use crate::bloom::BloomPhase;
 use crate::camera::Camera;
 use crate::context::Context;
-use crate::depth_reduce::DepthReducePhase;
 use crate::display::DisplayPhase;
 use crate::resources::{
-    ConstState, Consts, DepthPyramid, RenderState, SceneState, ShadowCascades, Skybox,
+    ConstState, Consts, RenderState, SceneState, ShadowCascades, Skybox,
 };
 use crate::shade::ShadePhase;
 use crate::shadow::ShadowPhase;
@@ -22,7 +21,6 @@ use crate::visibility::VisiblityPhase;
 pub struct Renderer {
     context: Context,
     atmosphere_phase: AtmospherePhase,
-    depth_reduce_phase: DepthReducePhase,
     shadow_phase: ShadowPhase,
     visibility_phase: VisiblityPhase,
     render_phase: ShadePhase,
@@ -33,7 +31,6 @@ pub struct Renderer {
     shadow_cascades: ShadowCascades,
     render_state: RenderState,
     scene_state: SceneState,
-    depth_pyramid: DepthPyramid,
     skybox: Skybox,
     consts: Option<Consts>,
 }
@@ -46,13 +43,11 @@ impl Renderer {
         let render_state = RenderState::new(&context);
         let scene_state = SceneState::new(&context, scene);
         let shadow_cascades = ShadowCascades::new(&context);
-        let depth_pyramid = DepthPyramid::new(&context);
         let skybox = Skybox::new(&context);
 
         let atmosphere_phase = AtmospherePhase::new(&mut context, &skybox);
-        let depth_reduce_phase = DepthReducePhase::new(&mut context, &render_state, &depth_pyramid);
         let shadow_phase =
-            ShadowPhase::new(&mut context, &scene_state, &shadow_cascades, &depth_pyramid);
+            ShadowPhase::new(&mut context, &scene_state, &shadow_cascades);
         let visibility_phase = VisiblityPhase::new(&mut context, &scene_state);
         let render_phase = ShadePhase::new(
             &mut context,
@@ -72,11 +67,9 @@ impl Renderer {
             context,
             const_state,
             atmosphere_phase,
-            depth_reduce_phase,
             shadow_phase,
             visibility_phase,
             render_state,
-            depth_pyramid,
             skybox,
             temporal_resolve_phase,
             bloom_phase,
@@ -96,10 +89,16 @@ impl Renderer {
         let consts = Consts::new(camera, &self.context, self.consts.take());
         self.consts = Some(consts);
 
-        let bytes = bytemuck::bytes_of(&consts);
+        let const_bytes = bytemuck::bytes_of(&consts);
         self.context
             .queue
-            .write_buffer(&self.const_state.const_buffer, 0, bytes);
+            .write_buffer(&self.const_state.const_buffer, 0, const_bytes);
+
+        let cascades = shadow::create_cascades(camera, &consts);
+
+        let cascades_bytes = bytemuck::cast_slice(&cascades);
+        self.context
+            .queue.write_buffer(&self.shadow_cascades.cascade_info, 0, cascades_bytes);
 
         let mut encoder =
             self.context
@@ -121,11 +120,7 @@ impl Renderer {
             &mut encoder,
         );
 
-        self.depth_reduce_phase
-            .record(&self.depth_pyramid, &self.const_state, &mut encoder);
-
         self.shadow_phase.record(
-            &self.const_state,
             &self.shadow_cascades,
             &self.scene_state,
             &mut encoder,
@@ -170,15 +165,9 @@ impl Renderer {
     pub fn resize_surface(&mut self, size: PhysicalSize<u32>) {
         self.context.resize_surface(size);
         self.render_state = RenderState::new(&self.context);
-        self.depth_pyramid = DepthPyramid::new(&self.context);
 
-        self.depth_reduce_phase.rezize_surface(
-            &self.context,
-            &self.render_state,
-            &self.depth_pyramid,
-        );
         self.shadow_phase
-            .resize_surface(&self.context, &self.shadow_cascades, &self.depth_pyramid);
+            .resize_surface(&self.context, &self.shadow_cascades);
         self.render_phase.resize_surface(
             &self.context,
             &self.render_state,

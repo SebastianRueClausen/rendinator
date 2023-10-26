@@ -263,7 +263,7 @@ impl BloomPhase {
         render_state: &RenderState,
         encoder: &mut wgpu::CommandEncoder,
     ) {
-        let input = self.bloom_mips.last().unwrap();
+        let input = self.bloom_mips.first().unwrap();
 
         let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("final bloom upsample"),

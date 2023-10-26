@@ -1,0 +1,17 @@
+[package]
+name = "render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ash = "0.37.3"
+glam = "0.24.2"
+eyre = "0.6.8"
+winit = "0.26.1"
+raw-window-handle = "^0.4.2"
+asset = { path = "../asset" }
+bytemuck = "1.14.0"
+vk-shader-macros = "0.2.9"
+
+[[example]]
+name = "scene"

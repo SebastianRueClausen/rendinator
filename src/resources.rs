@@ -6,7 +6,7 @@ use std::{
 };
 use wgpu::util::DeviceExt;
 
-use bytemuck::{NoUninit, Pod, Zeroable};
+use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, UVec2, Vec2, Vec4};
 
 use crate::{
@@ -22,6 +22,7 @@ pub struct Consts {
     pub camera_pos: Vec4,
     pub camera_front: Vec4,
     pub proj_view: Mat4,
+    pub proj: Mat4,
     pub prev_proj_view: Mat4,
     pub inverse_proj_view: Mat4,
     pub sun: DirectionalLight,
@@ -47,7 +48,7 @@ impl Consts {
         let jitter = temporal_resolve::jitter(frame_index as usize, surface_size);
 
         let sun = DirectionalLight {
-            direction: Vec4::new(0.0, 1.0, 0.0, 1.0),
+            direction: Vec4::new(0.0, 1.0, 0.1, 1.0).normalize(),
             irradiance: Vec4::splat(1.0),
         };
 
@@ -57,6 +58,7 @@ impl Consts {
             camera_fov: camera.fov,
             inverse_proj_view: proj_view.inverse(),
             proj_view,
+            proj: camera.proj,
             prev_proj_view,
             sun,
             frustrum_z_planes: Vec2 {
@@ -91,7 +93,7 @@ impl ConstState {
             mipmap_filter: wgpu::FilterMode::Linear,
             mag_filter: wgpu::FilterMode::Linear,
             min_filter: wgpu::FilterMode::Linear,
-            anisotropy_clamp: 1,
+            anisotropy_clamp: 16,
             ..Default::default()
         });
 
@@ -254,63 +256,13 @@ impl Skybox {
     }
 }
 
-pub struct DepthPyramid {
-    pub texture: wgpu::Texture,
-    pub mips: Vec<wgpu::TextureView>,
-    pub whole: wgpu::TextureView,
-}
-
-impl DepthPyramid {
-    pub fn new(context: &Context) -> Self {
-        let mip_level_count = context.surface_size.max_mips(wgpu::TextureDimension::D2) - 1;
-        let size = context
-            .surface_size
-            .mip_level_size(1, wgpu::TextureDimension::D2);
-
-        let texture = context.device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("depth pyramid"),
-            dimension: wgpu::TextureDimension::D2,
-            format: DEPTH_PYRAMID_FORMAT,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::STORAGE_BINDING,
-            view_formats: &[],
-            mip_level_count,
-            sample_count: 1,
-            size,
-        });
-
-        let mips = (0..mip_level_count)
-            .map(|level| {
-                texture.create_view(&wgpu::TextureViewDescriptor {
-                    label: Some("depth pyramid"),
-                    base_mip_level: level,
-                    mip_level_count: Some(1),
-                    ..Default::default()
-                })
-            })
-            .collect();
-
-        let whole = texture.create_view(&wgpu::TextureViewDescriptor {
-            label: Some("whole depth pyramid"),
-            ..Default::default()
-        });
-
-        Self {
-            texture,
-            mips,
-            whole,
-        }
-    }
-}
-
 #[repr(C)]
-#[derive(Clone, Copy, NoUninit)]
-struct ShadowCascade {
-    matrix: Mat4,
-    corners: [Vec4; 8],
-    center: Vec4,
-    near: f32,
-    far: f32,
-    padding: [u32; 2],
+#[derive(Debug, Default, Clone, Copy, Zeroable, Pod)]
+pub struct ShadowCascade {
+    pub proj_view: Mat4,
+    pub split: f32,
+    pub split_depth: f32,
+    pub padding: [u32; 2],
 }
 
 pub struct ShadowCascades {
@@ -357,7 +309,9 @@ impl ShadowCascades {
         let cascade_info = context.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("cascade buffer"),
             size: mem::size_of::<ShadowCascade>() as u64 * SHADOW_CASCADE_COUNT as u64,
-            usage: wgpu::BufferUsages::STORAGE,
+            usage: wgpu::BufferUsages::STORAGE
+                | wgpu::BufferUsages::COPY_SRC
+                | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
 
@@ -443,36 +397,24 @@ impl SceneState {
         let mut primitive_draw_infos = Vec::new();
 
         scene.visit_instances(|instance, parent_transform| {
-            let transform: Mat4 = instance.transform.into();
-
-            let transform = if let Some(parent_transform) = parent_transform.copied() {
-                parent_transform * transform
-            } else {
-                transform
-            };
-
-            let inverse_transpose_transform = transform.inverse().transpose();
+            let mut transform: Mat4 = instance.transform.into();
+            if let Some(parent_transform) = parent_transform.copied() {
+                transform = parent_transform * transform
+            }
 
             if let Some(mesh) = instance.mesh {
-                let mesh = &scene.meshes[mesh as usize];
-
-                for primitive in &mesh.primitives {
-                    let bounding_sphere = primitive.bounding_sphere;
-
+                for primitive in &scene.meshes[mesh as usize].primitives {
                     primitives.push(Primitive {
-                        inverse_transpose_transform,
-                        bounding_sphere,
+                        inverse_transpose_transform: transform.inverse().transpose(),
+                        bounding_sphere: primitive.bounding_sphere,
                         transform,
                     });
-
-                    let bounding_sphere = primitive
-                        .bounding_sphere
-                        .transformed(Transform::from(transform));
-
                     primitive_draw_infos.push(PrimitiveDrawInfo {
                         indices: primitive.indices.clone(),
                         material: primitive.material,
-                        bounding_sphere,
+                        bounding_sphere: primitive
+                            .bounding_sphere
+                            .transformed(Transform::from(transform)),
                     });
                 }
             }
@@ -622,8 +564,6 @@ pub const SKYBOX_SIZE: wgpu::Extent3d = wgpu::Extent3d {
     depth_or_array_layers: 6,
 };
 
-pub const DEPTH_PYRAMID_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rg32Float;
 pub const SHADOW_CASCADE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth16Unorm;
-
-pub const SHADOW_CASCADE_SIZE: u32 = 1024;
-pub const SHADOW_CASCADE_COUNT: usize = 2;
+pub const SHADOW_CASCADE_SIZE: u32 = 2048;
+pub const SHADOW_CASCADE_COUNT: usize = 1;
