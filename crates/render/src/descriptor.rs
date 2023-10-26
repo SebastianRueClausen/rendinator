@@ -130,14 +130,14 @@ pub(crate) enum Binding<'a> {
     SampledImage(&'a [&'a ImageView]),
 }
 
-pub(crate) fn descriptor_data(
+pub(crate) fn descriptor_data<'a>(
     device: &Device,
     layout: &Layout,
-    bindings: &[Binding],
+    bindings: impl IntoIterator<Item = Binding<'a>>,
 ) -> Vec<u8> {
     let mut descriptor_data = vec![0x0; layout.size(device) as usize];
 
-    for (location, binding) in bindings.iter().enumerate() {
+    for (location, binding) in bindings.into_iter().enumerate() {
         let offset = unsafe {
             let offset = device
                 .descriptor_buffer_loader

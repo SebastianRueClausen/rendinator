@@ -3,7 +3,7 @@ use std::slice;
 use ash::extensions::khr;
 use ash::vk;
 use eyre::{Context, Result};
-use raw_window_handle::HasRawWindowHandle;
+use raw_window_handle::RawWindowHandle;
 
 use crate::device::Device;
 use crate::instance::Instance;
@@ -20,7 +20,8 @@ impl Swapchain {
     pub(super) fn new(
         instance: &Instance,
         device: &Device,
-        window: &winit::window::Window,
+        window: RawWindowHandle,
+        extent: vk::Extent2D,
     ) -> Result<Self> {
         let (surface_loader, surface) = create_surface(instance, window)?;
 
@@ -43,10 +44,7 @@ impl Swapchain {
             .image_format(format)
             .queue_family_indices(slice::from_ref(&device.queue_family_index))
             .pre_transform(vk::SurfaceTransformFlagsKHR::IDENTITY)
-            .image_extent(vk::Extent2D {
-                width: window.inner_size().width,
-                height: window.inner_size().height,
-            })
+            .image_extent(extent)
             .composite_alpha({
                 let composite_modes = [
                     vk::CompositeAlphaFlagsKHR::OPAQUE,
@@ -89,12 +87,10 @@ impl Swapchain {
 
 pub fn create_surface(
     instance: &Instance,
-    window: &winit::window::Window,
+    window: RawWindowHandle,
 ) -> Result<(khr::Surface, vk::SurfaceKHR)> {
     let loader = khr::Surface::new(&instance.entry, instance);
-
-    use raw_window_handle::RawWindowHandle;
-    let surface = match window.raw_window_handle() {
+    let surface = match window {
         #[cfg(target_os = "windows")]
         RawWindowHandle::Win32(handle) => {
             let info = vk::Win32SurfaceCreateInfoKHR::default()

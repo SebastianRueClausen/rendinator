@@ -7,11 +7,13 @@ edition = "2021"
 ash = "0.37.3"
 glam = "0.24.2"
 eyre = "0.6.8"
-winit = "0.26.1"
 raw-window-handle = "^0.4.2"
 asset = { path = "../asset" }
 bytemuck = "1.14.0"
 vk-shader-macros = "0.2.9"
+
+[dev-dependencies]
+winit = "0.26.1"
 
 [[example]]
 name = "scene"

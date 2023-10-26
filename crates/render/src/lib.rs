@@ -1,17 +1,18 @@
 use std::collections::HashMap;
 use std::{mem, slice};
 
-use ash::vk;
+use ash::vk::{self};
 use command::CommandBuffer;
 use descriptor::{Binding, DescriptorBuffer, LayoutBinding};
 use device::Device;
 use eyre::Result;
 use instance::Instance;
+use raw_window_handle::RawWindowHandle;
 use resources::{
     Allocator, Buffer, BufferKind, BufferRequest, BufferWrite, Image,
     ImageRequest, ImageViewRequest, ImageWrite, Memory,
 };
-use shader::{Pipeline, PipelineRequest, PipelineStage, Shader, ShaderRequest};
+use shader::{Pipeline, PipelineLayout, Shader, ShaderRequest};
 use swapchain::Swapchain;
 
 mod command;
@@ -21,6 +22,14 @@ mod instance;
 mod resources;
 mod shader;
 mod swapchain;
+
+pub struct RendererRequest<'a> {
+    pub window: RawWindowHandle,
+    pub width: u32,
+    pub height: u32,
+    pub validate: bool,
+    pub scene: &'a asset::Scene,
+}
 
 pub struct Renderer {
     instance: Instance,
@@ -36,17 +45,22 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    pub fn new(validate: bool, window: &winit::window::Window) -> Result<Self> {
-        let instance = Instance::new(validate)?;
+    pub fn new(request: RendererRequest) -> Result<Self> {
+        let instance = Instance::new(request.validate)?;
         let device = Device::new(&instance)?;
-        let swapchain = Swapchain::new(&instance, &device, window)?;
-        let scene = asset::Scene::default();
+
+        let extent =
+            vk::Extent2D { width: request.width, height: request.height };
+        let swapchain =
+            Swapchain::new(&instance, &device, request.window, extent)?;
+
+        let scene = request.scene;
 
         let shaders = create_shaders(&device)?;
-        let pipelines = create_pipelines(&device, &scene, &shaders)?;
+        let pipelines = create_pipelines(&device, scene, &shaders)?;
 
-        let buffers = create_buffers(&device, &scene)?;
-        let images = create_images(&device, &scene)?;
+        let buffers = create_buffers(&device, scene)?;
+        let images = create_images(&device, scene)?;
 
         let mut allocator = Allocator::new(&device);
         buffers.values().for_each(|buffer| allocator.alloc_buffer(buffer));
@@ -59,7 +73,7 @@ impl Renderer {
         let descriptor_buffer =
             DescriptorBuffer::new(&device, &descriptor_data.data)?;
 
-        upload_data(&device, &scene, &buffers, &images)?;
+        upload_data(&device, scene, &buffers, &images)?;
 
         Ok(Self {
             descriptor_buffer,
@@ -161,6 +175,8 @@ impl Drop for Renderer {
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum ShaderId {
     Test,
+    Vertex,
+    Fragment,
 }
 
 fn create_shaders(device: &Device) -> Result<HashMap<ShaderId, Shader>> {
@@ -171,6 +187,7 @@ fn create_shaders(device: &Device) -> Result<HashMap<ShaderId, Shader>> {
         Shader::new(
             device,
             &ShaderRequest {
+                stage: vk::ShaderStageFlags::COMPUTE,
                 source: vk_shader_macros::include_glsl!(
                     "src/shaders/test.glsl",
                     kind: comp,
@@ -385,6 +402,7 @@ fn upload_data(
 #[derive(Clone, Copy, Hash, PartialEq, Eq)]
 enum PipelineId {
     Test,
+    Draw,
 }
 
 fn create_pipelines(
@@ -396,13 +414,26 @@ fn create_pipelines(
 
     pipelines.insert(
         PipelineId::Test,
-        Pipeline::new(
+        Pipeline::compute(
             device,
-            &PipelineRequest {
-                push_constant_range: None,
-                stage: PipelineStage::Compute {
-                    shader: &shaders[&ShaderId::Test],
-                },
+            &shaders[&ShaderId::Test],
+            &PipelineLayout {
+                push_constant: None,
+                bindings: &[LayoutBinding {
+                    ty: vk::DescriptorType::STORAGE_BUFFER,
+                    count: 1,
+                }],
+            },
+        )?,
+    );
+
+    pipelines.insert(
+        PipelineId::Draw,
+        Pipeline::compute(
+            device,
+            &shaders[&ShaderId::Test],
+            &PipelineLayout {
+                push_constant: None,
                 bindings: &[LayoutBinding {
                     ty: vk::DescriptorType::STORAGE_BUFFER,
                     count: 1,
@@ -414,16 +445,28 @@ fn create_pipelines(
     Ok(pipelines)
 }
 
-#[derive(Default)]
 struct DescriptorData {
+    alignment: usize,
     data: Vec<u8>,
 }
 
 impl DescriptorData {
+    fn new(device: &Device) -> Self {
+        Self {
+            data: Vec::default(),
+            alignment: device
+                .descriptor_buffer_properties
+                .descriptor_buffer_offset_alignment
+                as usize,
+        }
+    }
+
     fn insert(&mut self, mut data: Vec<u8>) -> vk::DeviceSize {
+        while self.data.len() % self.alignment != 0 {
+            self.data.push(0);
+        }
         let offset = self.data.len() as vk::DeviceSize;
         self.data.append(&mut data);
-
         offset
     }
 }
@@ -445,14 +488,12 @@ fn create_passes(
     pipelines: &HashMap<PipelineId, Pipeline>,
 ) -> Result<(HashMap<PassId, Pass>, DescriptorData)> {
     let mut passes = HashMap::default();
-    let mut descriptor_data = DescriptorData::default();
+    let mut descriptor_data = DescriptorData::new(device);
 
     let offset = descriptor_data.insert(descriptor::descriptor_data(
         device,
         &pipelines[&PipelineId::Test].descriptor_layout,
-        &[Binding::StorageBuffer(slice::from_ref(
-            &&buffers[&BufferId::Vertices],
-        ))],
+        [Binding::StorageBuffer(&[&buffers[&BufferId::Vertices]])],
     ));
 
     passes.insert(
