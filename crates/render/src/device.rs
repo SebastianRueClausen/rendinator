@@ -3,7 +3,7 @@ use std::slice;
 
 use ash::extensions::{ext, khr};
 use ash::vk;
-use eyre::Result;
+use eyre::{Context, Result};
 
 use crate::instance::Instance;
 
@@ -23,21 +23,17 @@ impl Device {
     pub(super) fn new(instance: &Instance) -> Result<Self> {
         let (physical_device, queue_family_index) =
             select_physical_device(instance)?;
-
         let memory_properties = unsafe {
             instance.get_physical_device_memory_properties(physical_device)
         };
-
         let queue_info = vk::DeviceQueueCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .queue_priorities(&[1.0]);
-
         let extensions = [
             khr::Swapchain::name().as_ptr(),
             ext::MeshShader::name().as_ptr(),
             ext::DescriptorBuffer::name().as_ptr(),
         ];
-
         let mut features = vk::PhysicalDeviceFeatures2::builder()
             .features({
                 vk::PhysicalDeviceFeatures::builder()
@@ -48,12 +44,10 @@ impl Device {
                     .build()
             })
             .build();
-
         let mut features_1_1 = vk::PhysicalDeviceVulkan11Features::builder()
             .storage_buffer16_bit_access(true)
             .shader_draw_parameters(true)
             .build();
-
         let mut features_1_2 = vk::PhysicalDeviceVulkan12Features::builder()
             .buffer_device_address(true)
             .descriptor_binding_variable_descriptor_count(true)
@@ -64,25 +58,21 @@ impl Device {
             .sampler_filter_minmax(true)
             .scalar_block_layout(true)
             .build();
-
         let mut features_1_3 = vk::PhysicalDeviceVulkan13Features::builder()
             .dynamic_rendering(true)
             .synchronization2(true)
             .maintenance4(true)
             .build();
-
         let mut features_mesh =
             vk::PhysicalDeviceMeshShaderFeaturesEXT::builder()
                 .task_shader(true)
                 .mesh_shader(true)
                 .build();
-
         let mut features_descriptor_buffer =
             vk::PhysicalDeviceDescriptorBufferFeaturesEXT::builder()
                 .descriptor_buffer(true)
                 .descriptor_buffer_image_layout_ignored(true)
                 .build();
-
         let device_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(slice::from_ref(&queue_info))
             .enabled_extension_names(&extensions)
@@ -92,24 +82,20 @@ impl Device {
             .push_next(&mut features_1_3)
             .push_next(&mut features_mesh)
             .push_next(&mut features_descriptor_buffer);
-
         let device = unsafe {
             instance.create_device(physical_device, &device_info, None)?
         };
         let queue = unsafe { device.get_device_queue(queue_family_index, 0) };
-
         let command_pool = unsafe {
             let info = vk::CommandPoolCreateInfo::builder()
                 .flags(vk::CommandPoolCreateFlags::empty())
                 .queue_family_index(queue_family_index);
             device.create_command_pool(&info, None)?
         };
-
         let descriptor_buffer_loader =
             ext::DescriptorBuffer::new(instance, &device);
         let descriptor_buffer_properties =
             get_descriptor_buffer_properties(instance, physical_device);
-
         Ok(Self {
             device,
             physical_device,
@@ -122,10 +108,8 @@ impl Device {
         })
     }
 
-    pub(crate) fn wait_until_idle(&self) {
-        unsafe {
-            self.device_wait_idle().expect("failed to wait idle");
-        }
+    pub(crate) fn wait_until_idle(&self) -> Result<()> {
+        unsafe { self.device_wait_idle().wrap_err("failed to wait idle") }
     }
 
     pub(super) fn destroy(&self) {
@@ -153,11 +137,11 @@ fn get_graphics_queue_family_index(
     }
     .into_iter()
     .enumerate()
-    .find_map(|(family_family_index, queue)| {
+    .find_map(|(queue_index, queue)| {
         queue
             .queue_flags
             .contains(vk::QueueFlags::GRAPHICS)
-            .then_some(family_family_index as u32)
+            .then_some(queue_index as u32)
     })
 }
 
@@ -171,7 +155,6 @@ fn get_descriptor_buffer_properties(
         let mut props = vk::PhysicalDeviceProperties2::builder()
             .push_next(&mut descriptor_buffer_properties);
         instance.get_physical_device_properties2(physical_device, &mut props);
-
         descriptor_buffer_properties
     }
 }
@@ -181,30 +164,24 @@ pub(super) fn select_physical_device(
 ) -> Result<(vk::PhysicalDevice, u32)> {
     let mut fallback = None;
     let mut preferred = None;
-
     unsafe {
         for physical_device in instance.enumerate_physical_devices()? {
             let properties =
                 instance.get_physical_device_properties(physical_device);
-
             let Some(queue_index) =
                 get_graphics_queue_family_index(instance, physical_device)
             else {
                 continue;
             };
-
             if properties.api_version < vk::make_api_version(0, 1, 3, 0) {
                 continue;
             }
-
             if properties.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
                 preferred.get_or_insert((physical_device, queue_index));
             }
-
             fallback.get_or_insert((physical_device, queue_index));
         }
     }
-
     preferred
         .or(fallback)
         .ok_or_else(|| eyre::eyre!("no suitable physical device found"))

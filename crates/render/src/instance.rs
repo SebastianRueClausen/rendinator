@@ -15,13 +15,11 @@ pub(crate) struct Instance {
 impl Instance {
     pub(super) fn new(validate: bool) -> Result<Self> {
         let entry = unsafe { ash::Entry::load().wrap_err("loading entry")? };
-
         let mut debug_info = {
             use vk::{
                 DebugUtilsMessageSeverityFlagsEXT as Severity,
                 DebugUtilsMessageTypeFlagsEXT as Type,
             };
-
             vk::DebugUtilsMessengerCreateInfoEXT::builder()
                 .message_severity(
                     Severity::ERROR
@@ -34,16 +32,13 @@ impl Instance {
                 )
                 .pfn_user_callback(Some(debug_callback))
         };
-
         let layers = if validate {
             vec![CString::new("VK_LAYER_KHRONOS_validation").unwrap()]
         } else {
             vec![]
         };
-
         let layer_names: Vec<_> =
             layers.iter().map(|layer| layer.as_ptr()).collect();
-
         let extension_names = [
             ext::DebugUtils::name().as_ptr(),
             khr::Surface::name().as_ptr(),
@@ -54,23 +49,18 @@ impl Instance {
             #[cfg(target_os = "linux")]
             khr::XcbSurface::name().as_ptr(),
         ];
-
         let application_info = vk::ApplicationInfo::builder()
             .api_version(vk::make_api_version(0, 1, 3, 0));
-
         let instance_info = vk::InstanceCreateInfo::builder()
             .push_next(&mut debug_info)
             .application_info(&application_info)
             .enabled_layer_names(&layer_names)
             .enabled_extension_names(&extension_names);
-
         let instance = unsafe { entry.create_instance(&instance_info, None)? };
-
         let debug_utils = ext::DebugUtils::new(&entry, &instance);
         let debug_messenger = unsafe {
             debug_utils.create_debug_utils_messenger(&debug_info, None)?
         };
-
         Ok(Self { entry, instance, debug_utils, debug_messenger })
     }
 

@@ -1,3 +1,5 @@
+use std::cell::Cell;
+use std::hash;
 use std::ops::{self, Deref};
 
 use ash::vk;
@@ -21,10 +23,10 @@ impl BufferKind {
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
         let specific_flags = match self {
             BufferKind::Storage => vk::BufferUsageFlags::STORAGE_BUFFER,
-            BufferKind::Descriptor { sampler } if sampler => {
+            BufferKind::Descriptor { sampler: true } => {
                 vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT
             }
-            BufferKind::Descriptor { sampler } => {
+            BufferKind::Descriptor { sampler: false } => {
                 vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT
             }
             BufferKind::Index => {
@@ -46,6 +48,7 @@ pub(crate) struct BufferRequest {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Buffer {
     pub buffer: vk::Buffer,
+    #[allow(dead_code)]
     pub size: vk::DeviceSize,
 }
 
@@ -84,10 +87,21 @@ impl Buffer {
     }
 }
 
+fn format_aspect(format: vk::Format) -> vk::ImageAspectFlags {
+    match format {
+        vk::Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
+        _ => vk::ImageAspectFlags::COLOR,
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ImageViewRequest {
     pub mip_level_count: u32,
     pub base_mip_level: u32,
+}
+
+impl ImageViewRequest {
+    pub const BASE: Self = Self { mip_level_count: 1, base_mip_level: 0 };
 }
 
 #[derive(Debug, Clone)]
@@ -105,17 +119,14 @@ impl ops::Deref for ImageView {
 }
 
 impl ImageView {
-    fn new(
+    pub fn new(
         device: &Device,
         image: vk::Image,
         format: vk::Format,
         request: ImageViewRequest,
     ) -> Result<Self> {
         let ImageViewRequest { base_mip_level, mip_level_count } = request;
-        let aspect_mask = match format {
-            vk::Format::D32_SFLOAT => vk::ImageAspectFlags::DEPTH,
-            _ => vk::ImageAspectFlags::COLOR,
-        };
+        let aspect_mask = format_aspect(format);
         let image_view_info = vk::ImageViewCreateInfo::builder()
             .image(image)
             .view_type(vk::ImageViewType::TYPE_2D)
@@ -155,8 +166,10 @@ pub(crate) struct ImageRequest<'a> {
 pub(crate) struct Image {
     pub image: vk::Image,
     pub extent: vk::Extent3D,
-    pub format: vk::Format,
+    pub aspect: vk::ImageAspectFlags,
     pub views: Vec<ImageView>,
+    pub swapchain: bool,
+    pub layout: Cell<vk::ImageLayout>,
 }
 
 impl ops::Deref for Image {
@@ -164,6 +177,20 @@ impl ops::Deref for Image {
 
     fn deref(&self) -> &Self::Target {
         &self.image
+    }
+}
+
+impl PartialEq for Image {
+    fn eq(&self, other: &Self) -> bool {
+        self.image == other.image
+    }
+}
+
+impl Eq for Image {}
+
+impl hash::Hash for Image {
+    fn hash<H: hash::Hasher>(&self, state: &mut H) {
+        self.image.hash(state);
     }
 }
 
@@ -191,10 +218,13 @@ impl Image {
                 ImageView::new(device, image, request.format, view_request)
             })
             .collect::<Result<_>>()?;
+        let aspect = format_aspect(request.format);
         Ok(Self {
-            image,
+            layout: vk::ImageLayout::UNDEFINED.into(),
             extent: request.extent,
-            format: request.format,
+            swapchain: false,
+            aspect,
+            image,
             views,
         })
     }
@@ -205,13 +235,22 @@ impl Image {
         )
     }
 
+    pub fn layout(&self) -> vk::ImageLayout {
+        self.layout.get()
+    }
+
+    pub fn set_layout(&self, layout: vk::ImageLayout) {
+        self.layout.set(layout);
+    }
+
     pub fn destroy(&self, device: &Device) {
         unsafe {
             for view in &self.views {
                 view.destroy(device);
             }
-
-            device.destroy_image(self.image, None);
+            if !self.swapchain {
+                device.destroy_image(self.image, None);
+            }
         }
     }
 }
@@ -237,12 +276,10 @@ fn memory_type_index(
     {
         let has_bits = memory_type_bits & (1 << index) != 0;
         let has_flags = memory_type.property_flags.contains(memory_flags);
-
         if has_bits && has_flags {
             return Ok(index as u32);
         }
     }
-
     Err(eyre::eyre!("invalid memory type"))
 }
 
@@ -289,12 +326,11 @@ impl Memory {
 
     pub fn map(&self, device: &Device) -> Result<*mut u8> {
         let flags = vk::MemoryMapFlags::empty();
-        let ptr = unsafe {
+        Ok(unsafe {
             device
                 .map_memory(self.memory, 0, vk::WHOLE_SIZE, flags)
-                .wrap_err("failed to map memory")?
-        };
-        Ok(ptr as *mut u8)
+                .wrap_err("failed to map memory")? as *mut u8
+        })
     }
 
     pub fn unmap(&self, device: &Device) {
@@ -374,13 +410,11 @@ pub(crate) fn buffer_memory(
         memory_flags,
         memory_reqs.memory_type_bits,
     )?;
-
     bind_buffer_memory(
         device,
         &buffer_memory,
         &[BufferRange { offset: 0, buffer }],
     )?;
-
     Ok(buffer_memory)
 }
 
@@ -395,11 +429,9 @@ impl Scratch {
             device,
             &BufferRequest { size, kind: BufferKind::Scratch },
         )?;
-
         let memory_flags = vk::MemoryPropertyFlags::HOST_VISIBLE
             | vk::MemoryPropertyFlags::HOST_COHERENT;
         let memory = buffer_memory(device, &buffer, memory_flags)?;
-
         Ok(Self { buffer, memory })
     }
 
@@ -422,7 +454,6 @@ pub(crate) fn upload_buffer_data(
     let scratch_size =
         buffer_writes.iter().map(|write| write.data.len() as u64).sum();
     let scratch = Scratch::new(device, scratch_size)?;
-
     buffer_writes.iter().fold(
         scratch.memory.map(device)?,
         |ptr, write| unsafe {
@@ -430,12 +461,9 @@ pub(crate) fn upload_buffer_data(
             ptr.add(write.data.len())
         },
     );
-
     scratch.memory.unmap(device);
-
     buffer_writes.iter().fold(0, |offset, write| unsafe {
         let byte_count = write.data.len() as u64;
-
         if byte_count != 0 {
             let buffer_copy = vk::BufferCopy::builder()
                 .src_offset(offset)
@@ -448,10 +476,8 @@ pub(crate) fn upload_buffer_data(
                 &[*buffer_copy],
             );
         }
-
         offset + byte_count
     });
-
     Ok(scratch)
 }
 
@@ -471,7 +497,6 @@ pub(crate) fn upload_image_data(
         .flat_map(|write| write.mips.iter().map(|mip| mip.len() as u64))
         .sum();
     let scratch = Scratch::new(device, scratch_size)?;
-
     image_writes.iter().flat_map(|write| write.mips.iter()).fold(
         scratch.memory.map(device)?,
         |ptr, mip| unsafe {
@@ -479,9 +504,7 @@ pub(crate) fn upload_image_data(
             ptr.add(mip.len())
         },
     );
-
     scratch.memory.unmap(device);
-
     image_writes
         .iter()
         .flat_map(|write| {
@@ -509,10 +532,8 @@ pub(crate) fn upload_image_data(
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &[*image_copy],
             );
-
             offset + data.len() as u64
         });
-
     Ok(scratch)
 }
 
@@ -542,7 +563,6 @@ impl<'a> Allocator<'a> {
     ) -> u64 {
         let offset = self.offset.next_multiple_of(alignment);
         self.offset = offset + size;
-
         offset
     }
 
@@ -551,7 +571,6 @@ impl<'a> Allocator<'a> {
             self.device.get_buffer_memory_requirements(*buffer.deref())
         };
         let offset = self.allocate_range(reqs.alignment, reqs.size);
-
         self.memory_type_bits &= reqs.memory_type_bits;
         self.buffer_ranges.push(BufferRange { buffer, offset });
     }
@@ -561,7 +580,6 @@ impl<'a> Allocator<'a> {
             self.device.get_image_memory_requirements(*image.deref())
         };
         let offset = self.allocate_range(reqs.alignment, reqs.size);
-
         self.memory_type_bits &= reqs.memory_type_bits;
         self.image_ranges.push(ImageRange { image, offset });
     }
@@ -576,10 +594,8 @@ impl<'a> Allocator<'a> {
             memory_flags,
             self.memory_type_bits,
         )?;
-
         bind_buffer_memory(self.device, &memory, &self.buffer_ranges)?;
         bind_image_memory(self.device, &memory, &self.image_ranges)?;
-
         Ok(memory)
     }
 }

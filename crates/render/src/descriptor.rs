@@ -1,3 +1,4 @@
+use std::mem;
 use std::ops::Deref;
 
 use ash::vk;
@@ -66,7 +67,6 @@ impl Layout {
                 .create_descriptor_set_layout(&layout_info, None)
                 .wrap_err("failed to create descriptor set layout")?
         };
-
         Ok(Self { layout })
     }
 
@@ -98,22 +98,17 @@ impl DescriptorBuffer {
                 size: data.len() as vk::DeviceSize,
             },
         )?;
-
         let memory = buffer_memory(
             device,
             &buffer,
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
-
         let scratch = command::quickie(device, |command_buffer| {
             let write = [BufferWrite { buffer: &buffer, data }];
             resources::upload_buffer_data(device, command_buffer, &write)
         })?;
-
         scratch.destroy(device);
-
         let address = buffer.device_address(device);
-
         Ok(Self { buffer, memory, address })
     }
 
@@ -123,130 +118,171 @@ impl DescriptorBuffer {
     }
 }
 
-pub(crate) enum Binding<'a> {
-    StorageBuffer(&'a [&'a Buffer]),
-    UniformBuffer(&'a [&'a Buffer]),
-    StorageImage(&'a [&'a ImageView]),
-    SampledImage(&'a [&'a ImageView]),
+pub(crate) struct Builder<'a> {
+    layout: &'a Layout,
+    device: &'a Device,
+    bound: usize,
+    data: Vec<u8>,
 }
 
-pub(crate) fn descriptor_data<'a>(
-    device: &Device,
-    layout: &Layout,
-    bindings: impl IntoIterator<Item = Binding<'a>>,
-) -> Vec<u8> {
-    let mut descriptor_data = vec![0x0; layout.size(device) as usize];
+impl<'a> Builder<'a> {
+    pub fn new(device: &'a Device, layout: &'a Layout) -> Self {
+        let size = layout.size(device) as usize;
+        Self { data: vec![0; size], bound: 0, layout, device }
+    }
 
-    for (location, binding) in bindings.into_iter().enumerate() {
-        let offset = unsafe {
-            let offset = device
+    fn offset(&self, location: usize) -> usize {
+        unsafe {
+            let offset = self
+                .device
                 .descriptor_buffer_loader
                 .get_descriptor_set_layout_binding_offset(
-                    *layout.deref(),
+                    **self.layout,
                     location as u32,
                 );
             offset as usize
-        };
-
-        match binding {
-            Binding::StorageBuffer(buffers) => {
-                let size = device
-                    .descriptor_buffer_properties
-                    .storage_buffer_descriptor_size;
-                for (index, buffer) in buffers.iter().enumerate() {
-                    let descriptor_address_info =
-                        vk::DescriptorAddressInfoEXT::builder()
-                            .address(buffer.device_address(device))
-                            .range(buffer.size)
-                            .build();
-                    let descriptor_info = vk::DescriptorGetInfoEXT::builder()
-                        .ty(vk::DescriptorType::STORAGE_BUFFER)
-                        .data(vk::DescriptorDataEXT {
-                            p_storage_buffer: &descriptor_address_info
-                                as *const _,
-                        });
-                    let start = offset + size * index;
-                    unsafe {
-                        device.descriptor_buffer_loader.get_descriptor(
-                            &descriptor_info,
-                            &mut descriptor_data[start..start + size],
-                        );
-                    }
-                }
-            }
-            Binding::UniformBuffer(buffers) => {
-                let size = device
-                    .descriptor_buffer_properties
-                    .uniform_buffer_descriptor_size;
-                for (index, buffer) in buffers.iter().enumerate() {
-                    let descriptor_address_info =
-                        vk::DescriptorAddressInfoEXT::builder()
-                            .address(buffer.device_address(device))
-                            .range(buffer.size)
-                            .build();
-                    let descriptor_info = vk::DescriptorGetInfoEXT::builder()
-                        .ty(vk::DescriptorType::UNIFORM_BUFFER)
-                        .data(vk::DescriptorDataEXT {
-                            p_uniform_buffer: &descriptor_address_info
-                                as *const _,
-                        });
-                    let start = offset + size * index;
-                    unsafe {
-                        device.descriptor_buffer_loader.get_descriptor(
-                            &descriptor_info,
-                            &mut descriptor_data[start..start + size],
-                        );
-                    }
-                }
-            }
-            Binding::StorageImage(views) => {
-                let size = device
-                    .descriptor_buffer_properties
-                    .storage_image_descriptor_size;
-                for (index, view) in views.iter().copied().enumerate() {
-                    let descriptor_image_info =
-                        vk::DescriptorImageInfo::builder()
-                            .image_view(**view)
-                            .build();
-                    let descriptor_info = vk::DescriptorGetInfoEXT::builder()
-                        .ty(vk::DescriptorType::STORAGE_IMAGE)
-                        .data(vk::DescriptorDataEXT {
-                            p_storage_image: &descriptor_image_info as *const _,
-                        });
-                    let start = offset + size * index;
-                    unsafe {
-                        device.descriptor_buffer_loader.get_descriptor(
-                            &descriptor_info,
-                            &mut descriptor_data[start..start + size],
-                        );
-                    }
-                }
-            }
-            Binding::SampledImage(views) => {
-                let size = device
-                    .descriptor_buffer_properties
-                    .sampled_image_descriptor_size;
-                for (index, view) in views.iter().copied().enumerate() {
-                    let descriptor_image_info =
-                        vk::DescriptorImageInfo::builder()
-                            .image_view(**view)
-                            .build();
-                    let descriptor_info = vk::DescriptorGetInfoEXT::builder()
-                        .ty(vk::DescriptorType::SAMPLED_IMAGE)
-                        .data(vk::DescriptorDataEXT {
-                            p_sampled_image: &descriptor_image_info as *const _,
-                        });
-                    let start = offset + size * index;
-                    unsafe {
-                        device.descriptor_buffer_loader.get_descriptor(
-                            &descriptor_info,
-                            &mut descriptor_data[start..start + size],
-                        );
-                    }
-                }
-            }
         }
     }
 
-    descriptor_data
+    fn next_offset(&mut self) -> usize {
+        let offset = self.offset(self.bound);
+        self.bound += 1;
+        offset
+    }
+
+    fn write_descriptor(
+        &mut self,
+        start: usize,
+        size: usize,
+        descriptor_info: &vk::DescriptorGetInfoEXT,
+    ) {
+        unsafe {
+            self.device.descriptor_buffer_loader.get_descriptor(
+                descriptor_info,
+                &mut self.data[start..start + size],
+            );
+        }
+        debug_assert!(!self.data[start..start + size]
+            .iter()
+            .all(|byte| *byte == 0));
+    }
+
+    pub fn storage_buffers(
+        &mut self,
+        buffers: impl IntoIterator<Item = &'a Buffer>,
+    ) -> &mut Self {
+        let size = self
+            .device
+            .descriptor_buffer_properties
+            .storage_buffer_descriptor_size;
+        let offset = self.next_offset();
+        for (index, buffer) in buffers.into_iter().enumerate() {
+            let descriptor_address_info =
+                vk::DescriptorAddressInfoEXT::builder()
+                    .address(buffer.device_address(self.device))
+                    .range(buffer.size)
+                    .build();
+            let descriptor_info = vk::DescriptorGetInfoEXT::builder()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .data(vk::DescriptorDataEXT {
+                    p_storage_buffer: &descriptor_address_info as *const _,
+                });
+            let start = offset + size * index;
+            self.write_descriptor(start, size, &descriptor_info);
+        }
+        self
+    }
+
+    pub fn uniform_buffers(
+        &mut self,
+        buffers: impl IntoIterator<Item = &'a Buffer>,
+    ) -> &mut Self {
+        let size = self
+            .device
+            .descriptor_buffer_properties
+            .uniform_buffer_descriptor_size;
+        let offset = self.next_offset();
+        for (index, buffer) in buffers.into_iter().enumerate() {
+            let descriptor_address_info =
+                vk::DescriptorAddressInfoEXT::builder()
+                    .address(buffer.device_address(self.device))
+                    .range(buffer.size)
+                    .build();
+            let descriptor_info = vk::DescriptorGetInfoEXT::builder()
+                .ty(vk::DescriptorType::UNIFORM_BUFFER)
+                .data(vk::DescriptorDataEXT {
+                    p_uniform_buffer: &descriptor_address_info as *const _,
+                });
+            let start = offset + size * index;
+            self.write_descriptor(start, size, &descriptor_info);
+        }
+        self
+    }
+
+    pub fn storage_images(
+        &mut self,
+        views: impl IntoIterator<Item = &'a ImageView>,
+    ) -> &mut Self {
+        let size = self
+            .device
+            .descriptor_buffer_properties
+            .storage_image_descriptor_size;
+        let offset = self.next_offset();
+        for (index, view) in views.into_iter().enumerate() {
+            let descriptor_image_info =
+                vk::DescriptorImageInfo::builder().image_view(**view).build();
+            let descriptor_info = vk::DescriptorGetInfoEXT::builder()
+                .ty(vk::DescriptorType::STORAGE_IMAGE)
+                .data(vk::DescriptorDataEXT {
+                    p_storage_image: &descriptor_image_info as *const _,
+                });
+            let start = offset + size * index;
+            self.write_descriptor(start, size, &descriptor_info);
+        }
+        self
+    }
+
+    pub fn sampled_images(
+        &mut self,
+        views: impl IntoIterator<Item = &'a ImageView>,
+    ) -> &mut Self {
+        let size = self
+            .device
+            .descriptor_buffer_properties
+            .sampled_image_descriptor_size;
+        let offset = self.next_offset();
+        for (index, view) in views.into_iter().enumerate() {
+            let descriptor_image_info =
+                vk::DescriptorImageInfo::builder().image_view(**view).build();
+            let descriptor_info = vk::DescriptorGetInfoEXT::builder()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .data(vk::DescriptorDataEXT {
+                    p_sampled_image: &descriptor_image_info as *const _,
+                });
+            let start = offset + size * index;
+            self.write_descriptor(start, size, &descriptor_info);
+        }
+        self
+    }
+
+    pub fn storage_buffer(&mut self, buffer: &'a Buffer) -> &mut Self {
+        self.storage_buffers([buffer])
+    }
+
+    pub fn uniform_buffer(&mut self, buffer: &'a Buffer) -> &mut Self {
+        self.uniform_buffers([buffer])
+    }
+
+    pub fn storage_image(&mut self, view: &'a ImageView) -> &mut Self {
+        self.storage_images([view])
+    }
+
+    pub fn sampled_image(&mut self, view: &'a ImageView) -> &mut Self {
+        self.sampled_images([view])
+    }
+
+    pub fn finish(&mut self) -> Vec<u8> {
+        self.bound = 0;
+        mem::take(&mut self.data)
+    }
 }

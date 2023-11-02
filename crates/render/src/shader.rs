@@ -55,20 +55,17 @@ fn create_pipeline_layout(
     layout: &PipelineLayout,
 ) -> Result<(vk::PipelineLayout, descriptor::Layout)> {
     let descriptor_layout = descriptor::Layout::new(device, layout.bindings)?;
-
     let mut layout_info = vk::PipelineLayoutCreateInfo::builder()
         .set_layouts(slice::from_ref(descriptor_layout.deref()));
     if let Some(push_constant) = &layout.push_constant {
         layout_info =
             layout_info.push_constant_ranges(slice::from_ref(push_constant));
     }
-
     let pipeline_layout = unsafe {
         device
             .create_pipeline_layout(&layout_info, None)
             .wrap_err("failed to create pipeline layout")?
     };
-
     Ok((pipeline_layout, descriptor_layout))
 }
 
@@ -81,17 +78,6 @@ fn create_shader_info(
         .module(**shader)
         .name(&entry_point)
         .build()
-}
-
-pub(crate) enum PipelineStage<'a> {
-    Compute { shader: &'a Shader },
-    Graphics {},
-}
-
-pub(crate) struct PipelineRequest<'a> {
-    pub stage: PipelineStage<'a>,
-    pub bindings: &'a [descriptor::LayoutBinding],
-    pub push_constant_range: Option<vk::PushConstantRange>,
 }
 
 pub(crate) struct Pipeline {
@@ -118,7 +104,6 @@ impl Pipeline {
         let (pipeline_layout, descriptor_layout) =
             create_pipeline_layout(device, layout)?;
         let entry_point = CString::new("main").unwrap();
-        let shader_info = create_shader_info(shader, &entry_point);
         let pipeline_info = vk::ComputePipelineCreateInfo::builder()
             .flags(vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT)
             .stage(create_shader_info(shader, &entry_point))
@@ -200,6 +185,7 @@ impl Pipeline {
             .depth_stencil_state(&depth_stencil_info)
             .color_blend_state(&color_blend_state)
             .dynamic_state(&dynamic_state)
+            .stages(&shader_infos)
             .push_next(&mut rendering_info);
         let pipeline = unsafe {
             *device
