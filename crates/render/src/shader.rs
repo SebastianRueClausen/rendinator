@@ -2,7 +2,7 @@ use std::ffi::CString;
 use std::ops::Deref;
 use std::slice;
 
-use ash::vk;
+use ash::vk::{self};
 use eyre::{Context, Result};
 
 use crate::descriptor;
@@ -45,28 +45,34 @@ impl Shader {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct PipelineLayout<'a> {
-    pub bindings: &'a [descriptor::LayoutBinding],
+    pub descriptors: &'a [&'a descriptor::DescriptorLayout],
     pub push_constant: Option<vk::PushConstantRange>,
 }
 
 fn create_pipeline_layout(
     device: &Device,
     layout: &PipelineLayout,
-) -> Result<(vk::PipelineLayout, descriptor::Layout)> {
-    let descriptor_layout = descriptor::Layout::new(device, layout.bindings)?;
-    let mut layout_info = vk::PipelineLayoutCreateInfo::builder()
-        .set_layouts(slice::from_ref(descriptor_layout.deref()));
-    if let Some(push_constant) = &layout.push_constant {
-        layout_info =
-            layout_info.push_constant_ranges(slice::from_ref(push_constant));
-    }
+) -> Result<(vk::PipelineLayout, vk::ShaderStageFlags)> {
+    let set_layouts: Vec<vk::DescriptorSetLayout> =
+        layout.descriptors.iter().map(|layout| ***layout).collect();
+    let mut layout_info =
+        vk::PipelineLayoutCreateInfo::builder().set_layouts(&set_layouts);
+    let push_constant_stages =
+        if let Some(push_constant) = &layout.push_constant {
+            layout_info = layout_info
+                .push_constant_ranges(slice::from_ref(push_constant));
+            push_constant.stage_flags
+        } else {
+            vk::ShaderStageFlags::default()
+        };
     let pipeline_layout = unsafe {
         device
             .create_pipeline_layout(&layout_info, None)
             .wrap_err("failed to create pipeline layout")?
     };
-    Ok((pipeline_layout, descriptor_layout))
+    Ok((pipeline_layout, push_constant_stages))
 }
 
 fn create_shader_info(
@@ -82,8 +88,8 @@ fn create_shader_info(
 
 pub(crate) struct Pipeline {
     pipeline: vk::Pipeline,
-    pub pipeline_layout: vk::PipelineLayout,
-    pub descriptor_layout: descriptor::Layout,
+    pub layout: vk::PipelineLayout,
+    pub push_constant_stages: vk::ShaderStageFlags,
     pub bind_point: vk::PipelineBindPoint,
 }
 
@@ -101,7 +107,7 @@ impl Pipeline {
         shader: &Shader,
         layout: &PipelineLayout,
     ) -> Result<Self> {
-        let (pipeline_layout, descriptor_layout) =
+        let (pipeline_layout, push_constant_stages) =
             create_pipeline_layout(device, layout)?;
         let entry_point = CString::new("main").unwrap();
         let pipeline_info = vk::ComputePipelineCreateInfo::builder()
@@ -123,8 +129,8 @@ impl Pipeline {
         Ok(Self {
             bind_point: vk::PipelineBindPoint::COMPUTE,
             pipeline,
-            pipeline_layout,
-            descriptor_layout,
+            push_constant_stages,
+            layout: pipeline_layout,
         })
     }
 
@@ -132,10 +138,10 @@ impl Pipeline {
         device: &Device,
         layout: &PipelineLayout,
         color_formats: &[vk::Format],
-        depth_format: vk::Format,
+        depth_format: Option<vk::Format>,
         shaders: impl IntoIterator<Item = &'a Shader>,
     ) -> Result<Self> {
-        let (pipeline_layout, descriptor_layout) =
+        let (pipeline_layout, push_constant_stages) =
             create_pipeline_layout(device, layout)?;
         let entry_point = CString::new("main").unwrap();
         let shader_infos: Vec<_> = shaders
@@ -143,8 +149,8 @@ impl Pipeline {
             .map(|shader| create_shader_info(shader, &entry_point))
             .collect();
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
+            .depth_attachment_format(depth_format.unwrap_or_default())
             .color_attachment_formats(color_formats)
-            .depth_attachment_format(depth_format)
             .build();
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let input_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
@@ -176,6 +182,7 @@ impl Pipeline {
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
             .dynamic_states(&dynamic_states);
         let pipeline_info = vk::GraphicsPipelineCreateInfo::builder()
+            .flags(vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT)
             .layout(pipeline_layout)
             .vertex_input_state(&vertex_input)
             .input_assembly_state(&input_info)
@@ -201,17 +208,16 @@ impl Pipeline {
         };
         Ok(Self {
             bind_point: vk::PipelineBindPoint::GRAPHICS,
+            push_constant_stages,
+            layout: pipeline_layout,
             pipeline,
-            pipeline_layout,
-            descriptor_layout,
         })
     }
 
     pub fn destroy(&self, device: &Device) {
         unsafe {
             device.destroy_pipeline(self.pipeline, None);
-            device.destroy_pipeline_layout(self.pipeline_layout, None);
-            self.descriptor_layout.destroy(device);
+            device.destroy_pipeline_layout(self.layout, None);
         }
     }
 }

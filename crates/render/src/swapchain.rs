@@ -15,10 +15,8 @@ pub(crate) struct Swapchain {
     swapchain_loader: khr::Swapchain,
     surface: vk::SurfaceKHR,
     swapchain: vk::SwapchainKHR,
-    #[allow(dead_code)]
-    format: vk::Format,
+    pub format: vk::Format,
     pub extent: vk::Extent2D,
-    pub image_count: u32,
 }
 
 impl Swapchain {
@@ -83,15 +81,15 @@ impl Swapchain {
                 Ok(Image {
                     layout: vk::ImageLayout::UNDEFINED.into(),
                     aspect: vk::ImageAspectFlags::COLOR,
+                    views: vec![view],
                     extent: extent.into(),
                     swapchain: true,
-                    views: vec![view],
+                    format,
                     image,
                 })
             })
             .collect::<Result<_>>()?;
         let swapchain = Self {
-            image_count: images.len() as u32,
             surface_loader,
             surface,
             swapchain_loader,

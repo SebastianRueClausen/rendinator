@@ -51,6 +51,7 @@ impl Device {
         let mut features_1_2 = vk::PhysicalDeviceVulkan12Features::builder()
             .buffer_device_address(true)
             .descriptor_binding_variable_descriptor_count(true)
+            .runtime_descriptor_array(true)
             .draw_indirect_count(true)
             .storage_buffer8_bit_access(true)
             .shader_float16(true)

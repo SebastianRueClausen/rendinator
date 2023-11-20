@@ -1,5 +1,5 @@
 use raw_window_handle::HasRawWindowHandle;
-use render::Renderer;
+use render::{FrameRequest, GuiRequest, Renderer};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
@@ -14,6 +14,8 @@ fn main() {
 
     let scene = asset::Scene::default();
     let mut renderer = Some(create_renderer(&window, &scene));
+
+    let gui_ctx = egui::Context::default();
 
     event_loop
         .run(move |event, elwt| match event {
@@ -33,8 +35,25 @@ fn main() {
                 }
             }
             Event::AboutToWait => {
-                if let Some(renderer) = &renderer {
-                    renderer.render_frame().expect("failed to render frame");
+                let input = egui::RawInput::default();
+                let output = gui_ctx.run(input, |ctx| {
+                    egui::Window::new("window").show(&ctx, |ui| {
+                        ui.label("Hello world!");
+                    });
+                });
+
+                println!("{}", gui_ctx.pixels_per_point());
+
+                if let Some(renderer) = &mut renderer {
+                    renderer
+                        .render_frame(&FrameRequest {
+                            gui: GuiRequest {
+                                textures_delta: &output.textures_delta,
+                                primitives: &gui_ctx.tessellate(output.shapes),
+                                pixels_per_point: gui_ctx.pixels_per_point(),
+                            },
+                        })
+                        .expect("failed to render frame");
                 }
                 window.request_redraw();
             }
@@ -42,6 +61,8 @@ fn main() {
         })
         .unwrap();
 }
+
+fn gui(ctx: &egui::Context) {}
 
 fn create_renderer(
     window: &winit::window::Window,

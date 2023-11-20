@@ -5,8 +5,10 @@ use std::slice;
 use ash::vk;
 use eyre::{Context, Result};
 
+use crate::descriptor::{Descriptor, DescriptorBuffer};
 use crate::device::Device;
-use crate::resources::Image;
+use crate::resources::{Buffer, Image, ImageView};
+use crate::shader::Pipeline;
 use crate::sync::Sync;
 
 pub(crate) struct CommandBuffer<'a> {
@@ -39,36 +41,122 @@ impl<'a> CommandBuffer<'a> {
         }
     }
 
-    pub fn begin(&self, device: &Device) -> Result<()> {
+    pub fn begin(&mut self, device: &Device) -> Result<&mut Self> {
         let begin_info = vk::CommandBufferBeginInfo::builder();
         unsafe {
             device
                 .begin_command_buffer(self.buffer, &begin_info)
-                .wrap_err("failed to begin command buffer")
+                .wrap_err("failed to begin command buffer")?;
         }
+        Ok(self)
     }
 
-    pub fn end(&mut self, device: &Device) -> Result<()> {
+    pub fn end(&mut self, device: &Device) -> Result<&mut Self> {
         for (image, layout) in self.image_layouts.drain() {
             image.set_layout(layout);
         }
-
         unsafe {
             device
                 .end_command_buffer(self.buffer)
-                .wrap_err("failed to end command buffer")
+                .wrap_err("failed to end command buffer")?;
         }
+        Ok(self)
     }
 
-    pub fn dispatch(&self, device: &Device, x: u32, y: u32, z: u32) {
+    pub fn bind_pipeline(
+        &mut self,
+        device: &Device,
+        pipeline: &Pipeline,
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_bind_pipeline(**self, pipeline.bind_point, **pipeline);
+        }
+        self
+    }
+
+    pub fn bind_descriptor(
+        &mut self,
+        device: &Device,
+        pipeline: &Pipeline,
+        descriptor: &Descriptor,
+    ) -> &mut Self {
+        unsafe {
+            device.descriptor_buffer_loader.cmd_set_descriptor_buffer_offsets(
+                **self,
+                pipeline.bind_point,
+                pipeline.layout,
+                0,
+                &[0],
+                &[descriptor.buffer_offset],
+            );
+        }
+        self
+    }
+
+    pub fn bind_descriptor_buffer<'b>(
+        &mut self,
+        device: &Device,
+        buffer: &DescriptorBuffer,
+    ) -> &mut Self {
+        let binding_info = vk::DescriptorBufferBindingInfoEXT::builder()
+            .address(buffer.buffer.device_address(device))
+            .usage(
+                vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT
+                    | vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT,
+            )
+            .build();
+        unsafe {
+            device.descriptor_buffer_loader.cmd_bind_descriptor_buffers(
+                **self,
+                slice::from_ref(&binding_info),
+            );
+        }
+        self
+    }
+
+    pub fn dispatch(
+        &mut self,
+        device: &Device,
+        x: u32,
+        y: u32,
+        z: u32,
+    ) -> &mut Self {
         unsafe { device.cmd_dispatch(self.buffer, x, y, z) }
+        self
+    }
+
+    pub fn image_layout(&self, image: &Image) -> vk::ImageLayout {
+        self.image_layouts.get(image).copied().unwrap_or_else(|| image.layout())
+    }
+
+    pub fn ensure_image_layouts(
+        &mut self,
+        device: &Device,
+        layout: ImageLayouts,
+        images: impl IntoIterator<Item = &'a Image>,
+    ) -> &mut Self {
+        let barriers: Vec<_> = images
+            .into_iter()
+            .filter_map(|image| {
+                (self.image_layout(image) != layout.layout).then(|| {
+                    ImageBarrier {
+                        image,
+                        new_layout: layout.layout,
+                        src: layout.src,
+                        dst: layout.dst,
+                    }
+                })
+            })
+            .collect();
+        self.pipeline_barriers(device, &barriers);
+        self
     }
 
     pub fn pipeline_barriers(
         &mut self,
         device: &Device,
         image_barriers: &[ImageBarrier<'a>],
-    ) {
+    ) -> &mut Self {
         let image_barriers: Vec<_> = image_barriers
             .iter()
             .map(|barrier| {
@@ -86,10 +174,10 @@ impl<'a> CommandBuffer<'a> {
                     .layer_count(1)
                     .build();
                 vk::ImageMemoryBarrier2::builder()
-                    .src_access_mask(barrier.src_access)
-                    .dst_access_mask(barrier.dst_access)
-                    .src_stage_mask(barrier.src_stage)
-                    .dst_stage_mask(barrier.dst_stage)
+                    .src_access_mask(barrier.src.access)
+                    .dst_access_mask(barrier.dst.access)
+                    .src_stage_mask(barrier.src.stage)
+                    .dst_stage_mask(barrier.dst.stage)
                     .old_layout(old_layout)
                     .new_layout(barrier.new_layout)
                     .image(**barrier.image)
@@ -99,17 +187,256 @@ impl<'a> CommandBuffer<'a> {
             .collect();
         let dependency_info = vk::DependencyInfo::builder()
             .image_memory_barriers(&image_barriers);
-        unsafe { device.cmd_pipeline_barrier2(self.buffer, &dependency_info) }
+        unsafe {
+            device.cmd_pipeline_barrier2(self.buffer, &dependency_info);
+        }
+        self
     }
+
+    pub fn push_constants(
+        &mut self,
+        device: &Device,
+        pipeline: &Pipeline,
+        bytes: &[u8],
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_push_constants(
+                self.buffer,
+                pipeline.layout,
+                pipeline.push_constant_stages,
+                0,
+                bytes,
+            )
+        }
+        self
+    }
+
+    pub fn bind_index_buffer(
+        &mut self,
+        device: &Device,
+        buffer: &Buffer,
+    ) -> &mut Self {
+        let format = vk::IndexType::UINT32;
+        unsafe {
+            device.cmd_bind_index_buffer(self.buffer, **buffer, 0, format);
+        }
+        self
+    }
+
+    pub fn draw_indexed(
+        &mut self,
+        device: &Device,
+        draw: &DrawIndexed,
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_draw_indexed(
+                self.buffer,
+                draw.index_count,
+                draw.instance_count,
+                draw.first_index,
+                draw.vertex_offset,
+                draw.first_instance,
+            );
+        }
+        self
+    }
+
+    pub fn begin_rendering(
+        &mut self,
+        device: &Device,
+        begin: &BeginRendering,
+    ) -> &mut Self {
+        let color_attachments: Vec<_> = begin
+            .color_attachments
+            .iter()
+            .map(|attachment| {
+                let mut attachment_info =
+                    vk::RenderingAttachmentInfo::builder()
+                        .image_view(**attachment.view)
+                        .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
+                        .store_op(vk::AttachmentStoreOp::STORE)
+                        .load_op(attachment.load.load_op())
+                        .build();
+                if let Load::Clear(clear_value) = attachment.load {
+                    attachment_info.clear_value = clear_value;
+                }
+                attachment_info
+            })
+            .collect();
+        let mut rendering_info = vk::RenderingInfo::builder()
+            .color_attachments(&color_attachments)
+            .layer_count(1)
+            .render_area(vk::Rect2D {
+                offset: vk::Offset2D::default(),
+                extent: begin.extent,
+            });
+        #[allow(unused_assignments)]
+        let mut depth_attachment = vk::RenderingAttachmentInfo::default();
+        if let Some(attachment) = &begin.depth_attachment {
+            depth_attachment = vk::RenderingAttachmentInfo::builder()
+                .image_view(**attachment.view)
+                .image_layout(vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL)
+                .store_op(vk::AttachmentStoreOp::STORE)
+                .load_op(attachment.load.load_op())
+                .build();
+            if let Load::Clear(clear_value) = attachment.load {
+                depth_attachment.clear_value = clear_value;
+            }
+            rendering_info = rendering_info.depth_attachment(&depth_attachment)
+        }
+        unsafe {
+            device.cmd_begin_rendering(self.buffer, &rendering_info);
+        }
+        self
+    }
+
+    pub fn end_rendering(&mut self, device: &Device) -> &mut Self {
+        unsafe {
+            device.cmd_end_rendering(self.buffer);
+        }
+        self
+    }
+
+    pub fn set_viewport(
+        &mut self,
+        device: &Device,
+        viewports: &[vk::Viewport],
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_set_viewport(self.buffer, 0, viewports);
+        }
+        self
+    }
+
+    pub fn set_scissor(
+        &mut self,
+        device: &Device,
+        scissors: &[vk::Rect2D],
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_set_scissor(self.buffer, 0, scissors);
+        }
+        self
+    }
+
+    pub fn blit_image(
+        &mut self,
+        device: &Device,
+        blit: &ImageBlit,
+    ) -> &mut Self {
+        let region = vk::ImageBlit2::builder()
+            .src_offsets(blit.src_offsets)
+            .dst_offsets(blit.dst_offsets)
+            .src_subresource(
+                vk::ImageSubresourceLayers::builder()
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .mip_level(blit.src_mip_level)
+                    .aspect_mask(blit.src.aspect)
+                    .build(),
+            )
+            .dst_subresource(
+                vk::ImageSubresourceLayers::builder()
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .mip_level(blit.dst_mip_level)
+                    .aspect_mask(blit.dst.aspect)
+                    .build(),
+            );
+        let blit_info = vk::BlitImageInfo2::builder()
+            .src_image(**blit.src)
+            .dst_image(**blit.dst)
+            .src_image_layout(vk::ImageLayout::TRANSFER_SRC_OPTIMAL)
+            .dst_image_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .filter(blit.filter)
+            .regions(slice::from_ref(&region));
+        unsafe {
+            device.cmd_blit_image2(self.buffer, &blit_info);
+        }
+        self
+    }
+}
+
+pub(crate) enum Load {
+    Clear(vk::ClearValue),
+    Load,
+}
+
+impl Load {
+    fn load_op(&self) -> vk::AttachmentLoadOp {
+        match self {
+            Load::Clear(_) => vk::AttachmentLoadOp::CLEAR,
+            Load::Load => vk::AttachmentLoadOp::LOAD,
+        }
+    }
+}
+
+pub(crate) struct ImageBlit<'a> {
+    pub src: &'a Image,
+    pub dst: &'a Image,
+    pub src_offsets: [vk::Offset3D; 2],
+    pub dst_offsets: [vk::Offset3D; 2],
+    pub src_mip_level: u32,
+    pub dst_mip_level: u32,
+    pub filter: vk::Filter,
+}
+
+pub(crate) struct Attachment<'a> {
+    pub view: &'a ImageView,
+    pub load: Load,
+}
+
+pub(crate) struct BeginRendering<'a> {
+    pub color_attachments: &'a [Attachment<'a>],
+    pub depth_attachment: Option<Attachment<'a>>,
+    pub extent: vk::Extent2D,
+}
+
+pub(crate) struct DrawIndexed {
+    pub index_count: u32,
+    pub instance_count: u32,
+    pub first_index: u32,
+    pub first_instance: u32,
+    pub vertex_offset: i32,
 }
 
 pub(crate) struct ImageBarrier<'a> {
     pub image: &'a Image,
     pub new_layout: vk::ImageLayout,
-    pub src_stage: vk::PipelineStageFlags2,
-    pub dst_stage: vk::PipelineStageFlags2,
-    pub src_access: vk::AccessFlags2,
-    pub dst_access: vk::AccessFlags2,
+    pub src: Access,
+    pub dst: Access,
+}
+
+pub(crate) struct ImageLayouts {
+    pub layout: vk::ImageLayout,
+    pub src: Access,
+    pub dst: Access,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Access {
+    pub stage: vk::PipelineStageFlags2,
+    pub access: vk::AccessFlags2,
+}
+
+impl Access {
+    pub const TRANSFER_DST: Self = Self {
+        stage: vk::PipelineStageFlags2::TRANSFER,
+        access: vk::AccessFlags2::TRANSFER_WRITE,
+    };
+
+    pub const NONE: Self = Self {
+        stage: vk::PipelineStageFlags2::NONE,
+        access: vk::AccessFlags2::NONE,
+    };
+
+    pub const ALL: Self = Self {
+        stage: vk::PipelineStageFlags2::ALL_COMMANDS,
+        access: vk::AccessFlags2::from_raw(
+            vk::AccessFlags2::MEMORY_READ.as_raw()
+                | vk::AccessFlags2::MEMORY_WRITE.as_raw(),
+        ),
+    };
 }
 
 pub(crate) fn quickie<'a, F, R>(device: &Device, f: F) -> Result<R>
@@ -126,20 +453,20 @@ where
     Ok(result)
 }
 
-pub(crate) fn frame<'a, F>(
+pub(crate) fn frame<'a, F, R>(
     device: &Device,
     sync: &Sync,
     f: F,
-) -> Result<CommandBuffer<'a>>
+) -> Result<(CommandBuffer<'a>, R)>
 where
-    F: FnOnce(&mut CommandBuffer<'a>) -> Result<()>,
+    F: FnOnce(&mut CommandBuffer<'a>) -> Result<R>,
 {
     let mut buffer = CommandBuffer::new(device)?;
     buffer.begin(device)?;
-    f(&mut buffer)?;
+    let ret = f(&mut buffer)?;
     buffer.end(device)?;
     submit(device, &[sync.acquire], &[sync.release], [&buffer])?;
-    Ok(buffer)
+    Ok((buffer, ret))
 }
 
 fn submit<'a>(

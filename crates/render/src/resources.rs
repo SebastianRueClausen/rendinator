@@ -12,8 +12,9 @@ use crate::device::Device;
 pub(crate) enum BufferKind {
     Index,
     Storage,
+    Uniform,
     Scratch,
-    Descriptor { sampler: bool },
+    Descriptor,
 }
 
 impl BufferKind {
@@ -23,11 +24,10 @@ impl BufferKind {
             | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
         let specific_flags = match self {
             BufferKind::Storage => vk::BufferUsageFlags::STORAGE_BUFFER,
-            BufferKind::Descriptor { sampler: true } => {
+            BufferKind::Uniform => vk::BufferUsageFlags::UNIFORM_BUFFER,
+            BufferKind::Descriptor => {
                 vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT
-            }
-            BufferKind::Descriptor { sampler: false } => {
-                vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT
+                    | vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT
             }
             BufferKind::Index => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
@@ -154,18 +154,18 @@ impl ImageView {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ImageRequest<'a> {
+pub(crate) struct ImageRequest {
     pub extent: vk::Extent3D,
     pub format: vk::Format,
     pub mip_level_count: u32,
     pub usage: vk::ImageUsageFlags,
-    pub views: &'a [ImageViewRequest],
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct Image {
     pub image: vk::Image,
     pub extent: vk::Extent3D,
+    pub format: vk::Format,
     pub aspect: vk::ImageAspectFlags,
     pub views: Vec<ImageView>,
     pub swapchain: bool,
@@ -196,6 +196,7 @@ impl hash::Hash for Image {
 
 impl Image {
     pub fn new(device: &Device, request: &ImageRequest) -> Result<Self> {
+        let layout = vk::ImageLayout::UNDEFINED;
         let image_info = vk::ImageCreateInfo::builder()
             .format(request.format)
             .extent(request.extent)
@@ -204,29 +205,42 @@ impl Image {
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
             .usage(request.usage)
-            .initial_layout(vk::ImageLayout::UNDEFINED);
+            .image_type(vk::ImageType::TYPE_2D)
+            .initial_layout(layout);
         let image = unsafe {
             device
                 .create_image(&image_info, None)
                 .wrap_err("failed creating image")?
         };
-        let views = request
-            .views
-            .iter()
-            .copied()
-            .map(|view_request| {
-                ImageView::new(device, image, request.format, view_request)
-            })
-            .collect::<Result<_>>()?;
         let aspect = format_aspect(request.format);
         Ok(Self {
-            layout: vk::ImageLayout::UNDEFINED.into(),
+            layout: Cell::new(layout),
             extent: request.extent,
+            format: request.format,
             swapchain: false,
+            views: Vec::default(),
             aspect,
             image,
-            views,
         })
+    }
+
+    pub fn spanning_offsets(&self) -> [vk::Offset3D; 2] {
+        let max = vk::Offset3D {
+            x: self.extent.width as i32,
+            y: self.extent.height as i32,
+            z: 1,
+        };
+        [vk::Offset3D::default(), max]
+    }
+
+    pub fn add_view(
+        &mut self,
+        device: &Device,
+        request: ImageViewRequest,
+    ) -> Result<()> {
+        let view = ImageView::new(device, self.image, self.format, request)?;
+        self.views.push(view);
+        Ok(())
     }
 
     pub fn view(&self, request: &ImageViewRequest) -> &ImageView {
@@ -263,6 +277,24 @@ pub(crate) fn mip_level_extent(
         width: extent.width >> level,
         height: extent.height >> level,
         depth: extent.depth,
+    }
+}
+
+pub(crate) fn mip_level_offset(
+    offset: vk::Offset3D,
+    level: u32,
+) -> vk::Offset3D {
+    vk::Offset3D { x: offset.x >> level, y: offset.y >> level, z: offset.z }
+}
+
+pub(crate) fn extent_rest(
+    extent: vk::Extent3D,
+    offset: vk::Offset3D,
+) -> vk::Extent3D {
+    vk::Extent3D {
+        width: extent.width - offset.x as u32,
+        height: extent.height - offset.y as u32,
+        depth: extent.depth - offset.z as u32,
     }
 }
 
@@ -418,6 +450,26 @@ pub(crate) fn buffer_memory(
     Ok(buffer_memory)
 }
 
+pub(crate) fn image_memory(
+    device: &Device,
+    image: &Image,
+    memory_flags: vk::MemoryPropertyFlags,
+) -> Result<Memory> {
+    let memory_reqs = unsafe { device.get_image_memory_requirements(**image) };
+    let image_memory = Memory::allocate(
+        device,
+        memory_reqs.size,
+        memory_flags,
+        memory_reqs.memory_type_bits,
+    )?;
+    bind_image_memory(
+        device,
+        &image_memory,
+        &[ImageRange { image, offset: 0 }],
+    )?;
+    Ok(image_memory)
+}
+
 pub(crate) struct Scratch {
     buffer: Buffer,
     memory: Memory,
@@ -483,7 +535,7 @@ pub(crate) fn upload_buffer_data(
 
 pub(crate) struct ImageWrite<'a> {
     pub image: &'a Image,
-    pub extent: vk::Extent3D,
+    pub offset: vk::Offset3D,
     pub mips: &'a [Box<[u8]>],
 }
 
@@ -508,32 +560,42 @@ pub(crate) fn upload_image_data(
     image_writes
         .iter()
         .flat_map(|write| {
-            write.mips.iter().enumerate().map(|(level, data)| {
-                let extent = mip_level_extent(write.extent, level as u32);
-                (write.image, extent, data, level as u32)
+            let base_extent = write.image.extent;
+            let base_offset = write.offset;
+            write.mips.iter().enumerate().map(move |(level, data)| {
+                let level = level as u32;
+                let offset = mip_level_offset(base_offset, level);
+                let extent =
+                    extent_rest(mip_level_extent(base_extent, level), offset);
+                (write.image, extent, offset, data, level)
             })
         })
-        .fold(0, |offset, (image, extent, data, level)| unsafe {
-            let subresource = vk::ImageSubresourceLayers::builder()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .base_array_layer(0)
-                .mip_level(level)
-                .build();
-            let image_copy = vk::BufferImageCopy::builder()
-                .buffer_offset(offset)
-                .image_extent(extent)
-                .buffer_image_height(extent.height)
-                .buffer_row_length(extent.width)
-                .image_subresource(subresource);
-            device.cmd_copy_buffer_to_image(
-                *command_buffer.deref(),
-                *scratch.buffer,
-                *image.deref(),
-                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                &[*image_copy],
-            );
-            offset + data.len() as u64
-        });
+        .fold(
+            0,
+            |buffer_offset, (image, extent, offset, data, level)| unsafe {
+                let subresource = vk::ImageSubresourceLayers::builder()
+                    .aspect_mask(vk::ImageAspectFlags::COLOR)
+                    .base_array_layer(0)
+                    .layer_count(1)
+                    .mip_level(level)
+                    .build();
+                let image_copy = vk::BufferImageCopy::builder()
+                    .buffer_offset(buffer_offset)
+                    .image_extent(extent)
+                    .image_offset(offset)
+                    .buffer_image_height(extent.height)
+                    .buffer_row_length(extent.width)
+                    .image_subresource(subresource);
+                device.cmd_copy_buffer_to_image(
+                    *command_buffer.deref(),
+                    *scratch.buffer,
+                    *image.deref(),
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    &[*image_copy],
+                );
+                buffer_offset + data.len() as u64
+            },
+        );
     Ok(scratch)
 }
 
@@ -566,26 +628,28 @@ impl<'a> Allocator<'a> {
         offset
     }
 
-    pub fn alloc_buffer(&mut self, buffer: &'a Buffer) {
+    pub fn alloc_buffer(&mut self, buffer: &'a Buffer) -> &mut Self {
         let reqs = unsafe {
             self.device.get_buffer_memory_requirements(*buffer.deref())
         };
         let offset = self.allocate_range(reqs.alignment, reqs.size);
         self.memory_type_bits &= reqs.memory_type_bits;
         self.buffer_ranges.push(BufferRange { buffer, offset });
+        self
     }
 
-    pub fn alloc_image(&mut self, image: &'a Image) {
+    pub fn alloc_image(&mut self, image: &'a Image) -> &mut Self {
         let reqs = unsafe {
             self.device.get_image_memory_requirements(*image.deref())
         };
         let offset = self.allocate_range(reqs.alignment, reqs.size);
         self.memory_type_bits &= reqs.memory_type_bits;
         self.image_ranges.push(ImageRange { image, offset });
+        self
     }
 
     pub fn finish(
-        self,
+        &mut self,
         memory_flags: vk::MemoryPropertyFlags,
     ) -> Result<Memory> {
         let memory = Memory::allocate(
@@ -596,9 +660,58 @@ impl<'a> Allocator<'a> {
         )?;
         bind_buffer_memory(self.device, &memory, &self.buffer_ranges)?;
         bind_image_memory(self.device, &memory, &self.image_ranges)?;
+        self.buffer_ranges.clear();
+        self.image_ranges.clear();
         Ok(memory)
     }
 }
 
-/*
-*/
+pub(crate) struct SamplerRequest {
+    pub filter: vk::Filter,
+    pub max_anisotropy: Option<f32>,
+}
+
+pub(crate) struct Sampler {
+    sampler: vk::Sampler,
+}
+
+impl Deref for Sampler {
+    type Target = vk::Sampler;
+
+    fn deref(&self) -> &Self::Target {
+        &self.sampler
+    }
+}
+
+impl Sampler {
+    pub fn new(device: &Device, request: &SamplerRequest) -> Result<Self> {
+        let create_info = vk::SamplerCreateInfo::builder()
+            .mag_filter(request.filter)
+            .min_filter(request.filter)
+            .address_mode_u(vk::SamplerAddressMode::REPEAT)
+            .address_mode_v(vk::SamplerAddressMode::REPEAT)
+            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .max_anisotropy(request.max_anisotropy.unwrap_or_default())
+            .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
+            .compare_op(vk::CompareOp::ALWAYS)
+            .mipmap_mode(vk::SamplerMipmapMode::LINEAR)
+            .unnormalized_coordinates(false)
+            .anisotropy_enable(request.max_anisotropy.is_some())
+            .compare_enable(false)
+            .mip_lod_bias(0.0)
+            .min_lod(0.0)
+            .max_lod(vk::LOD_CLAMP_NONE);
+        let sampler = unsafe {
+            device
+                .create_sampler(&create_info, None)
+                .wrap_err("failed to create sampler")?
+        };
+        Ok(Self { sampler })
+    }
+
+    pub fn destroy(&self, device: &Device) {
+        unsafe {
+            device.destroy_sampler(self.sampler, None);
+        }
+    }
+}

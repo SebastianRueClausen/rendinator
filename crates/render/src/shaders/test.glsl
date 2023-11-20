@@ -3,9 +3,6 @@
 layout(local_size_x = 32, local_size_y = 32, local_size_z = 1) in;
 
 layout (binding = 0) uniform writeonly image2D surface;
-layout (binding = 1) buffer Data {
-    uint data[];
-};
 
 void main() {
     uvec2 pos = gl_GlobalInvocationID.xy;

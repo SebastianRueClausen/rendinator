@@ -1,4 +1,4 @@
-use std::mem;
+use std::iter;
 use std::ops::Deref;
 
 use ash::vk;
@@ -7,7 +7,7 @@ use eyre::{Context, Result};
 use crate::device::Device;
 use crate::resources::{
     buffer_memory, Buffer, BufferKind, BufferRequest, BufferWrite, ImageView,
-    Memory,
+    Memory, Sampler,
 };
 use crate::{command, resources};
 
@@ -17,11 +17,36 @@ pub(crate) struct LayoutBinding {
     pub count: u32,
 }
 
-pub(crate) struct Layout {
+#[derive(Default)]
+pub(crate) struct DescriptorLayoutBuilder {
+    bindings: Vec<LayoutBinding>,
+}
+
+impl DescriptorLayoutBuilder {
+    pub fn binding(&mut self, ty: vk::DescriptorType) -> &mut Self {
+        self.bindings.push(LayoutBinding { count: 1, ty });
+        self
+    }
+
+    pub fn array_binding(
+        &mut self,
+        ty: vk::DescriptorType,
+        count: u32,
+    ) -> &mut Self {
+        self.bindings.push(LayoutBinding { count, ty });
+        self
+    }
+
+    pub fn build(&mut self, device: &Device) -> Result<DescriptorLayout> {
+        DescriptorLayout::new(device, &self.bindings)
+    }
+}
+
+pub(crate) struct DescriptorLayout {
     layout: vk::DescriptorSetLayout,
 }
 
-impl Deref for Layout {
+impl Deref for DescriptorLayout {
     type Target = vk::DescriptorSetLayout;
 
     fn deref(&self) -> &Self::Target {
@@ -29,7 +54,7 @@ impl Deref for Layout {
     }
 }
 
-impl Layout {
+impl DescriptorLayout {
     pub fn new(device: &Device, bindings: &[LayoutBinding]) -> Result<Self> {
         let flags: Vec<_> = bindings
             .iter()
@@ -83,19 +108,18 @@ impl Layout {
     }
 }
 
-pub(crate) struct DescriptorBuffer {
+pub(super) struct DescriptorBuffer {
     pub buffer: Buffer,
     pub memory: Memory,
-    pub address: vk::DeviceAddress,
 }
 
 impl DescriptorBuffer {
-    pub fn new(device: &Device, data: &[u8]) -> Result<Self> {
+    pub fn new(device: &Device, data: &DescriptorData) -> Result<Self> {
         let buffer = Buffer::new(
             device,
             &BufferRequest {
-                kind: BufferKind::Descriptor { sampler: false },
-                size: data.len() as vk::DeviceSize,
+                kind: BufferKind::Descriptor,
+                size: data.data.len() as vk::DeviceSize,
             },
         )?;
         let memory = buffer_memory(
@@ -104,12 +128,11 @@ impl DescriptorBuffer {
             vk::MemoryPropertyFlags::DEVICE_LOCAL,
         )?;
         let scratch = command::quickie(device, |command_buffer| {
-            let write = [BufferWrite { buffer: &buffer, data }];
+            let write = [BufferWrite { buffer: &buffer, data: &data.data }];
             resources::upload_buffer_data(device, command_buffer, &write)
         })?;
         scratch.destroy(device);
-        let address = buffer.device_address(device);
-        Ok(Self { buffer, memory, address })
+        Ok(Self { buffer, memory })
     }
 
     pub fn destroy(&self, device: &Device) {
@@ -118,20 +141,28 @@ impl DescriptorBuffer {
     }
 }
 
-pub(crate) struct Builder<'a> {
-    layout: &'a Layout,
+pub(crate) struct DescriptorBuilder<'a> {
+    layout: &'a DescriptorLayout,
     device: &'a Device,
+    data: &'a mut DescriptorData,
+    /// The base offset into `data``.
+    data_start: usize,
+    /// The number of bindings bound.
     bound: usize,
-    data: Vec<u8>,
 }
 
-impl<'a> Builder<'a> {
-    pub fn new(device: &'a Device, layout: &'a Layout) -> Self {
-        let size = layout.size(device) as usize;
-        Self { data: vec![0; size], bound: 0, layout, device }
+impl<'a> DescriptorBuilder<'a> {
+    pub fn new(
+        device: &'a Device,
+        layout: &'a DescriptorLayout,
+        data: &'a mut DescriptorData,
+    ) -> Self {
+        let data_start = data.reserve_for_layout(device, layout);
+        Self { bound: 0, layout, device, data, data_start }
     }
 
-    fn offset(&self, location: usize) -> usize {
+    /// Returns the byte offset into the set of the binding at `location`.
+    fn set_offset(&self, location: usize) -> usize {
         unsafe {
             let offset = self
                 .device
@@ -144,10 +175,10 @@ impl<'a> Builder<'a> {
         }
     }
 
-    fn next_offset(&mut self) -> usize {
-        let offset = self.offset(self.bound);
+    fn next_binding(&mut self) -> usize {
+        let set_offset = self.set_offset(self.bound);
         self.bound += 1;
-        offset
+        self.data_start + set_offset
     }
 
     fn write_descriptor(
@@ -156,13 +187,13 @@ impl<'a> Builder<'a> {
         size: usize,
         descriptor_info: &vk::DescriptorGetInfoEXT,
     ) {
+        let data = &mut self.data.data[start..start + size];
         unsafe {
-            self.device.descriptor_buffer_loader.get_descriptor(
-                descriptor_info,
-                &mut self.data[start..start + size],
-            );
+            self.device
+                .descriptor_buffer_loader
+                .get_descriptor(descriptor_info, data);
         }
-        debug_assert!(!self.data[start..start + size]
+        debug_assert!(!self.data.data[start..start + size]
             .iter()
             .all(|byte| *byte == 0));
     }
@@ -175,7 +206,7 @@ impl<'a> Builder<'a> {
             .device
             .descriptor_buffer_properties
             .storage_buffer_descriptor_size;
-        let offset = self.next_offset();
+        let offset = self.next_binding();
         for (index, buffer) in buffers.into_iter().enumerate() {
             let descriptor_address_info =
                 vk::DescriptorAddressInfoEXT::builder()
@@ -201,7 +232,7 @@ impl<'a> Builder<'a> {
             .device
             .descriptor_buffer_properties
             .uniform_buffer_descriptor_size;
-        let offset = self.next_offset();
+        let offset = self.next_binding();
         for (index, buffer) in buffers.into_iter().enumerate() {
             let descriptor_address_info =
                 vk::DescriptorAddressInfoEXT::builder()
@@ -227,7 +258,7 @@ impl<'a> Builder<'a> {
             .device
             .descriptor_buffer_properties
             .storage_image_descriptor_size;
-        let offset = self.next_offset();
+        let offset = self.next_binding();
         for (index, view) in views.into_iter().enumerate() {
             let descriptor_image_info =
                 vk::DescriptorImageInfo::builder().image_view(**view).build();
@@ -242,22 +273,26 @@ impl<'a> Builder<'a> {
         self
     }
 
-    pub fn sampled_images(
+    pub fn combined_image_samplers(
         &mut self,
+        sampler: &Sampler,
         views: impl IntoIterator<Item = &'a ImageView>,
     ) -> &mut Self {
         let size = self
             .device
             .descriptor_buffer_properties
-            .sampled_image_descriptor_size;
-        let offset = self.next_offset();
+            .combined_image_sampler_descriptor_size;
+        let offset = self.next_binding();
         for (index, view) in views.into_iter().enumerate() {
-            let descriptor_image_info =
-                vk::DescriptorImageInfo::builder().image_view(**view).build();
+            let descriptor_image_info = vk::DescriptorImageInfo::builder()
+                .sampler(**sampler)
+                .image_view(**view)
+                .build();
             let descriptor_info = vk::DescriptorGetInfoEXT::builder()
-                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .data(vk::DescriptorDataEXT {
-                    p_sampled_image: &descriptor_image_info as *const _,
+                    p_combined_image_sampler: &descriptor_image_info
+                        as *const _,
                 });
             let start = offset + size * index;
             self.write_descriptor(start, size, &descriptor_info);
@@ -277,12 +312,48 @@ impl<'a> Builder<'a> {
         self.storage_images([view])
     }
 
-    pub fn sampled_image(&mut self, view: &'a ImageView) -> &mut Self {
-        self.sampled_images([view])
+    pub fn combined_image_sampler(
+        &mut self,
+        sampler: &Sampler,
+        view: &'a ImageView,
+    ) -> &mut Self {
+        self.combined_image_samplers(sampler, [view])
     }
 
-    pub fn finish(&mut self) -> Vec<u8> {
-        self.bound = 0;
-        mem::take(&mut self.data)
+    pub fn set(&mut self) -> Descriptor {
+        Descriptor { buffer_offset: self.data_start as u64 }
     }
+}
+
+#[derive(Debug)]
+pub(crate) struct DescriptorData {
+    alignment: usize,
+    data: Vec<u8>,
+}
+
+impl DescriptorData {
+    pub fn new(device: &Device) -> Self {
+        let alignment = device
+            .descriptor_buffer_properties
+            .descriptor_buffer_offset_alignment;
+        Self { data: Vec::default(), alignment: alignment as usize }
+    }
+
+    /// Reserve space for layout.
+    /// Returns the offset where the layout should begin.
+    fn reserve_for_layout(
+        &mut self,
+        device: &Device,
+        layout: &DescriptorLayout,
+    ) -> usize {
+        let start = self.data.len();
+        let alignment_offset = start.next_multiple_of(self.alignment) - start;
+        let size = layout.size(device) as usize;
+        self.data.extend(iter::repeat(0).take(size + alignment_offset));
+        start + alignment_offset
+    }
+}
+
+pub(crate) struct Descriptor {
+    pub buffer_offset: vk::DeviceSize,
 }
