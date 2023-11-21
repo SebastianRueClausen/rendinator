@@ -471,12 +471,12 @@ pub(crate) fn image_memory(
 }
 
 pub(crate) struct Scratch {
-    buffer: Buffer,
-    memory: Memory,
+    pub buffer: Buffer,
+    pub memory: Memory,
 }
 
 impl Scratch {
-    fn new(device: &Device, size: vk::DeviceSize) -> Result<Self> {
+    pub(crate) fn new(device: &Device, size: vk::DeviceSize) -> Result<Self> {
         let buffer = Buffer::new(
             device,
             &BufferRequest { size, kind: BufferKind::Scratch },
@@ -522,9 +522,9 @@ pub(crate) fn upload_buffer_data(
                 .dst_offset(0)
                 .size(byte_count);
             device.cmd_copy_buffer(
-                *command_buffer.deref(),
+                **command_buffer,
                 *scratch.buffer,
-                *write.buffer.deref(),
+                **write.buffer,
                 &[*buffer_copy],
             );
         }
@@ -669,6 +669,7 @@ impl<'a> Allocator<'a> {
 pub(crate) struct SamplerRequest {
     pub filter: vk::Filter,
     pub max_anisotropy: Option<f32>,
+    pub address_mode: vk::SamplerAddressMode,
 }
 
 pub(crate) struct Sampler {
@@ -688,9 +689,9 @@ impl Sampler {
         let create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(request.filter)
             .min_filter(request.filter)
-            .address_mode_u(vk::SamplerAddressMode::REPEAT)
-            .address_mode_v(vk::SamplerAddressMode::REPEAT)
-            .address_mode_w(vk::SamplerAddressMode::REPEAT)
+            .address_mode_u(request.address_mode)
+            .address_mode_v(request.address_mode)
+            .address_mode_w(request.address_mode)
             .max_anisotropy(request.max_anisotropy.unwrap_or_default())
             .border_color(vk::BorderColor::INT_OPAQUE_BLACK)
             .compare_op(vk::CompareOp::ALWAYS)

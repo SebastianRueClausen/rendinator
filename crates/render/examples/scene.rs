@@ -9,13 +9,11 @@ fn main() {
     event_loop.set_control_flow(ControlFlow::Poll);
 
     let window = Window::new(&event_loop).unwrap();
-    // window.set_cursor_grab(CursorGrabMode::Confined).unwrap();
-    window.set_cursor_visible(false);
 
     let scene = asset::Scene::default();
     let mut renderer = Some(create_renderer(&window, &scene));
 
-    let gui_ctx = egui::Context::default();
+    let mut gui_ctx = egui::Context::default();
 
     event_loop
         .run(move |event, elwt| match event {
@@ -27,6 +25,7 @@ fn main() {
             Event::WindowEvent {
                 event: WindowEvent::Resized(size), ..
             } => {
+                gui_ctx = egui::Context::default();
                 if size.width == 0 && size.height == 0 {
                     renderer.take();
                 } else {
@@ -42,15 +41,13 @@ fn main() {
                     });
                 });
 
-                println!("{}", gui_ctx.pixels_per_point());
-
                 if let Some(renderer) = &mut renderer {
                     renderer
                         .render_frame(&FrameRequest {
                             gui: GuiRequest {
                                 textures_delta: &output.textures_delta,
                                 primitives: &gui_ctx.tessellate(output.shapes),
-                                pixels_per_point: gui_ctx.pixels_per_point(),
+                                pixels_per_point: 1.0,
                             },
                         })
                         .expect("failed to render frame");

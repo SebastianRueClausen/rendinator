@@ -5,8 +5,8 @@
 #include "../constants.glsl"
 
 struct Vertex {
-    vec2 position;
-    vec2 texcoord;
+    float x, y;
+    float u, v;
     uint color;
 };
 
@@ -39,8 +39,8 @@ vec4 unpack_color(uint color) {
 
 vec4 translate_position(vec2 position) {
     return vec4(
-        2.0 * position.x / screen_size_in_points.x - 1.0,
-        2.0 * position.y / screen_size_in_points.y - 1.0,
+        2.0 * (position.x / screen_size_in_points.x) - 1.0,
+        2.0 * (position.y / screen_size_in_points.y) - 1.0,
         0.0,
         1.0
     );
@@ -49,6 +49,6 @@ vec4 translate_position(vec2 position) {
 void main() {
     Vertex vertex = vertices[gl_VertexIndex];
     color = unpack_color(vertex.color);
-    texcoord = vertex.texcoord;
-    gl_Position = translate_position(vertex.position);
+    texcoord = vec2(vertex.u, vertex.v);
+    gl_Position = translate_position(vec2(vertex.x, vertex.y));
 }

@@ -1,10 +1,7 @@
-use ash::vk::{self, ImageBlit};
+use ash::vk::{self};
 use command::ImageBarrier;
 use constants::Constants;
-use descriptor::{
-    Descriptor, DescriptorBuffer, DescriptorBuilder, DescriptorData,
-    DescriptorLayout, DescriptorLayoutBuilder,
-};
+use descriptor::{Descriptor, DescriptorBuffer, DescriptorData};
 use device::Device;
 use eyre::Result;
 #[cfg(feature = "gui")]
@@ -13,9 +10,8 @@ use gui::Gui;
 pub use gui::GuiRequest;
 use instance::Instance;
 use raw_window_handle::RawWindowHandle;
-use resources::{Image, ImageViewRequest};
+use resources::Image;
 use scene::Scene;
-use shader::{Pipeline, PipelineLayout, Shader, ShaderRequest};
 use swapchain::Swapchain;
 use sync::Sync;
 
@@ -58,8 +54,6 @@ pub struct Renderer {
     swapchain: Swapchain,
     sync: Sync,
     swapchain_images: Vec<Image>,
-    test_descriptor_layout: DescriptorLayout,
-    test_pipeline: Pipeline,
     scene: Scene,
     constants: Constants,
     #[cfg(feature = "gui")]
@@ -76,8 +70,6 @@ impl Renderer {
         let (swapchain, swapchain_images) =
             Swapchain::new(&instance, &device, request.window, extent)?;
         let scene = request.scene;
-        let (test_descriptor_layout, test_pipeline) =
-            create_test_pipeline(&device)?;
         let scene = Scene::new(&device, scene)?;
         #[cfg(feature = "gui")]
         let gui = Gui::new(&device, &swapchain)?;
@@ -89,8 +81,6 @@ impl Renderer {
             sync,
             swapchain_images,
             constants,
-            test_pipeline,
-            test_descriptor_layout,
             scene,
             gui,
         })
@@ -99,12 +89,6 @@ impl Renderer {
     fn create_descriptors(&self) -> Result<(Descriptors, DescriptorBuffer)> {
         let mut descriptor_data = DescriptorData::new(&self.device);
         let passes = Descriptors {
-            test: create_test_passes(
-                &self.device,
-                &self.swapchain_images,
-                &self.test_descriptor_layout,
-                &mut descriptor_data,
-            )?,
             #[cfg(feature = "gui")]
             gui: gui::create_descriptor(
                 &self.device,
@@ -217,15 +201,6 @@ impl Renderer {
                     );
                 }
 
-                /*
-                debug::display_texture(
-                    &self.device,
-                    command_buffer,
-                    swapchain_image,
-                    &self.gui.textures[0].image,
-                );
-                */
-
                 command_buffer.pipeline_barriers(
                     &self.device,
                     &[ImageBarrier {
@@ -264,8 +239,6 @@ impl Drop for Renderer {
         if self.device.wait_until_idle().is_err() {
             return;
         }
-        self.test_descriptor_layout.destroy(&self.device);
-        self.test_pipeline.destroy(&self.device);
         for image in &self.swapchain_images {
             image.destroy(&self.device);
         }
@@ -289,50 +262,7 @@ bitflags::bitflags! {
     }
 }
 
-fn create_test_pipeline(
-    device: &Device,
-) -> Result<(DescriptorLayout, Pipeline)> {
-    let shader = Shader::new(
-        device,
-        &ShaderRequest {
-            stage: vk::ShaderStageFlags::COMPUTE,
-            source: vk_shader_macros::include_glsl!(
-                "src/shaders/test.glsl",
-                kind: comp,
-            ),
-        },
-    )?;
-    let descriptor_layout = DescriptorLayoutBuilder::default()
-        .binding(vk::DescriptorType::STORAGE_IMAGE)
-        .build(device)?;
-    let pipeline_layout = PipelineLayout {
-        descriptors: &[&descriptor_layout],
-        push_constant: None,
-    };
-    let pipeline = Pipeline::compute(device, &shader, &pipeline_layout)?;
-    shader.destroy(device);
-    Ok((descriptor_layout, pipeline))
-}
-
-fn create_test_passes(
-    device: &Device,
-    swapchain_images: &[Image],
-    layout: &DescriptorLayout,
-    data: &mut DescriptorData,
-) -> Result<Vec<Descriptor>> {
-    swapchain_images
-        .iter()
-        .map(|image| {
-            let set = DescriptorBuilder::new(device, layout, data)
-                .storage_image(image.view(&ImageViewRequest::BASE))
-                .set();
-            Ok(set)
-        })
-        .collect()
-}
-
 struct Descriptors {
-    test: Vec<Descriptor>,
     #[cfg(feature = "gui")]
     gui: Descriptor,
 }

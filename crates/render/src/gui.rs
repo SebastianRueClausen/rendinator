@@ -35,8 +35,8 @@ pub(super) struct Texture {
 }
 
 pub(super) struct Gui {
-    vertices: Buffer,
-    indices: Buffer,
+    pub vertices: Buffer,
+    pub indices: Buffer,
     memory: Memory,
     pipeline: Pipeline,
     descriptor_layout: DescriptorLayout,
@@ -63,6 +63,7 @@ impl Gui {
             &SamplerRequest {
                 filter: vk::Filter::LINEAR,
                 max_anisotropy: None,
+                address_mode: vk::SamplerAddressMode::CLAMP_TO_EDGE,
             },
         )?;
         Ok(Self {
@@ -107,9 +108,8 @@ impl Gui {
                     .flat_map(|pixel| pixel.to_array())
                     .collect(),
             };
-            let offset = if let Some(pos) = delta.pos {
-                let [x, y] = pos.map(|v| v as i32);
-                vk::Offset3D { x, y, z: 0 }
+            let offset = if let Some([x, y]) = delta.pos {
+                vk::Offset3D { x: x as i32, y: y as i32, z: 0 }
             } else {
                 self.textures.push(create_texture(
                     device,
@@ -327,7 +327,7 @@ fn scissor_rect(
 }
 
 #[repr(C)]
-#[derive(Clone, Copy, bytemuck::NoUninit)]
+#[derive(Debug, Clone, Copy, bytemuck::NoUninit)]
 struct DrawConstants {
     screen_size_in_points: Vec2,
     texture_index: u32,
@@ -431,7 +431,9 @@ pub(super) fn render(
                 depth_attachment: None,
                 color_attachments: &[Attachment {
                     view: swapchain_image.view(&ImageViewRequest::BASE),
-                    load: Load::Load,
+                    load: Load::Clear(vk::ClearValue {
+                        color: vk::ClearColorValue { float32: [0.0; 4] },
+                    }),
                 }],
                 extent,
             },
@@ -441,6 +443,7 @@ pub(super) fn render(
             screen_size_in_points: update.screen_size_in_points,
             texture_index: draw.texture_index,
         };
+
         command_buffer
             .set_scissor(device, &[draw.scissor_rect])
             .push_constants(

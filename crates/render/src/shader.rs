@@ -161,19 +161,22 @@ impl Pipeline {
         let rasterization_info =
             vk::PipelineRasterizationStateCreateInfo::builder()
                 .line_width(1.0)
-                .front_face(vk::FrontFace::CLOCKWISE)
-                .cull_mode(vk::CullModeFlags::BACK);
+                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
+                .cull_mode(vk::CullModeFlags::NONE);
         let multisampled_info =
             vk::PipelineMultisampleStateCreateInfo::builder()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let depth_stencil_info =
             vk::PipelineDepthStencilStateCreateInfo::builder()
-                .depth_compare_op(vk::CompareOp::GREATER)
-                .depth_test_enable(true)
-                .depth_write_enable(true);
+                .depth_compare_op(vk::CompareOp::ALWAYS)
+                .depth_test_enable(false)
+                .depth_write_enable(false);
         let color_attachment_state =
             vk::PipelineColorBlendAttachmentState::builder()
-                .color_write_mask(vk::ColorComponentFlags::RGBA);
+                .color_write_mask(vk::ColorComponentFlags::RGBA)
+                .blend_enable(true)
+                .src_color_blend_factor(vk::BlendFactor::ONE)
+                .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA);
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::builder()
                 .attachments(slice::from_ref(&color_attachment_state));
