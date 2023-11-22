@@ -13,6 +13,7 @@ pub(super) fn download_buffer(
 ) -> Result<Vec<u8>> {
     let scratch = Scratch::new(device, buffer.size)?;
     let byte_count = buffer.size as usize;
+
     command::quickie(device, |command_buffer| {
         let region = vk::BufferCopy::builder()
             .size(buffer.size)
@@ -29,11 +30,14 @@ pub(super) fn download_buffer(
         }
         Ok(())
     })?;
-    let mut bytes = vec![0x0u8; byte_count];
-    let ptr = scratch.memory.map(device)?;
-    unsafe { bytes.as_mut_ptr().copy_from_nonoverlapping(ptr, byte_count) }
+
+    let bytes = unsafe {
+        slice::from_raw_parts(scratch.memory.map(device)?, byte_count).to_vec()
+    };
+
     scratch.memory.unmap(device);
     scratch.destroy(device);
+
     Ok(bytes)
 }
 
@@ -45,6 +49,7 @@ pub(super) fn display_texture<'a>(
 ) {
     let swapchain_layout = command_buffer.image_layout(swapchain_image);
     let image_layout = command_buffer.image_layout(image);
+
     command_buffer
         .pipeline_barriers(
             device,

@@ -3,7 +3,7 @@ use std::slice;
 use ash::extensions::khr;
 use ash::vk;
 use eyre::{Context, Result};
-use raw_window_handle::RawWindowHandle;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
 use crate::device::Device;
 use crate::instance::Instance;
@@ -24,9 +24,11 @@ impl Swapchain {
         instance: &Instance,
         device: &Device,
         window: RawWindowHandle,
+        display: RawDisplayHandle,
         extent: vk::Extent2D,
     ) -> Result<(Self, Vec<Image>)> {
-        let (surface_loader, surface) = create_surface(instance, window)?;
+        let (surface_loader, surface) =
+            create_surface(instance, window, display)?;
         let surface_capabilities = unsafe {
             surface_loader.get_physical_device_surface_capabilities(
                 device.physical_device,
@@ -154,59 +156,42 @@ impl Swapchain {
 pub fn create_surface(
     instance: &Instance,
     window: RawWindowHandle,
+    display: RawDisplayHandle,
 ) -> Result<(khr::Surface, vk::SurfaceKHR)> {
     let loader = khr::Surface::new(&instance.entry, instance);
-    let surface = match window {
-        #[cfg(target_os = "windows")]
-        RawWindowHandle::Win32(handle) => {
-            let info = vk::Win32SurfaceCreateInfoKHR::default()
+    let surface = match (display, window) {
+        (RawDisplayHandle::Windows(_), RawWindowHandle::Win32(handle)) => {
+            let info = vk::Win32SurfaceCreateInfoKHR::builder()
                 .hinstance(handle.hinstance)
                 .hwnd(handle.hwnd);
             let loader =
-                khr::Win32Surface::new(&instance.entry, &instance.handle);
+                khr::Win32Surface::new(&instance.entry, &instance.instance);
             unsafe { loader.create_win32_surface(&info, None) }
         }
-        #[cfg(target_os = "linux")]
-        RawWindowHandle::Wayland(handle) => {
+        (
+            RawDisplayHandle::Wayland(display),
+            RawWindowHandle::Wayland(window),
+        ) => {
             let info = vk::WaylandSurfaceCreateInfoKHR::builder()
-                .display(handle.display)
-                .surface(handle.surface);
+                .display(display.display)
+                .surface(window.surface);
             let loader = khr::WaylandSurface::new(&instance.entry, instance);
             unsafe { loader.create_wayland_surface(&info, None) }
         }
-        #[cfg(target_os = "linux")]
-        RawWindowHandle::Xlib(handle) => {
+        (RawDisplayHandle::Xlib(display), RawWindowHandle::Xlib(window)) => {
             let info = vk::XlibSurfaceCreateInfoKHR::builder()
-                .dpy(handle.display as *mut _)
-                .window(handle.window);
+                .dpy(display.display.cast())
+                .window(window.window);
             let loader = khr::XlibSurface::new(&instance.entry, instance);
             unsafe { loader.create_xlib_surface(&info, None) }
         }
-        #[cfg(target_os = "linux")]
-        RawWindowHandle::Xcb(handle) => {
+        (RawDisplayHandle::Xcb(display), RawWindowHandle::Xcb(window)) => {
             let info = vk::XcbSurfaceCreateInfoKHR::builder()
-                .connection(handle.connection)
-                .window(handle.window);
+                .connection(display.connection)
+                .window(window.window);
             let loader = khr::XcbSurface::new(&instance.entry, instance);
             unsafe { loader.create_xcb_surface(&info, None) }
         }
-        #[cfg(target_os = "macos")]
-        RawWindowHandle::AppKit(handle) => unsafe {
-            use raw_window_metal::{appkit, Layer};
-            let layer = appkit::metal_layer_from_handle(handle);
-            let layer = match layer {
-                Layer::Existing(layer) | Layer::Allocated(layer) => {
-                    layer as *mut _
-                }
-                Layer::None => {
-                    return Err(anyhow!("failed to load metal layer"));
-                }
-            };
-            let info = vk::MetalSurfaceCreateInfoEXT::builder().layer(&*layer);
-            let loader =
-                ext::MetalSurface::new(&instance.entry, &instance.handle);
-            loader.create_metal_surface(&info, None)
-        },
         _ => {
             return Err(eyre::eyre!("unsupported platform"));
         }

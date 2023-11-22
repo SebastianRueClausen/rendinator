@@ -9,7 +9,7 @@ edition = "2021"
 ash = "0.37.3"
 glam = "0.24.2"
 eyre = "0.6.8"
-raw-window-handle = "^0.4.2"
+raw-window-handle = "0.5.2"
 asset = { path = "../asset" }
 bytemuck = "1.14.0"
 vk-shader-macros = "0.2.9"
@@ -20,7 +20,8 @@ egui = { version = "0.23.0", optional = true }
 epaint = { version = "0.23.0", optional = true, features = ["bytemuck"] }
 
 [dev-dependencies]
-winit = { version = "0.29.3", features = ["rwh_04"] }
+winit = { version = "0.28", features = [] }
+egui-winit = "0.23.0"
 egui = { version = "0.23.0" }
 epaint = { version = "0.23.0", features = ["bytemuck"] }
 

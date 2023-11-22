@@ -1,26 +1,33 @@
-use raw_window_handle::HasRawWindowHandle;
+use raw_window_handle::HasRawDisplayHandle;
 use render::{FrameRequest, GuiRequest, Renderer};
 use winit::event::{Event, WindowEvent};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
 fn main() {
-    let event_loop = EventLoop::new().unwrap();
-    event_loop.set_control_flow(ControlFlow::Poll);
-
+    let event_loop = EventLoop::new();
     let window = Window::new(&event_loop).unwrap();
 
     let scene = asset::Scene::default();
     let mut renderer = Some(create_renderer(&window, &scene));
 
     let mut gui_ctx = egui::Context::default();
+    let mut gui_state = egui_winit::State::new(&window);
 
-    event_loop
-        .run(move |event, elwt| match event {
+    event_loop.run(move |event, _, ctrl| {
+        ctrl.set_poll();
+
+        if let Event::WindowEvent { event, .. } = &event {
+            if gui_state.on_event(&gui_ctx, event).consumed {
+                return;
+            }
+        }
+
+        match event {
             Event::WindowEvent {
                 event: WindowEvent::CloseRequested, ..
             } => {
-                elwt.exit();
+                *ctrl = ControlFlow::Exit;
             }
             Event::WindowEvent {
                 event: WindowEvent::Resized(size), ..
@@ -33,8 +40,8 @@ fn main() {
                     renderer = Some(create_renderer(&window, &scene));
                 }
             }
-            Event::AboutToWait => {
-                let input = egui::RawInput::default();
+            Event::MainEventsCleared => {
+                let input = gui_state.take_egui_input(&window);
                 let output = gui_ctx.run(input, |ctx| {
                     egui::Window::new("window").show(&ctx, |ui| {
                         ui.label("Hello world!");
@@ -52,21 +59,22 @@ fn main() {
                         })
                         .expect("failed to render frame");
                 }
+
                 window.request_redraw();
             }
             _ => (),
-        })
-        .unwrap();
+        }
+    });
 }
-
-fn gui(ctx: &egui::Context) {}
 
 fn create_renderer(
     window: &winit::window::Window,
     scene: &asset::Scene,
 ) -> Renderer {
+    use raw_window_handle::HasRawWindowHandle;
     Renderer::new(render::RendererRequest {
         window: window.raw_window_handle(),
+        display: window.raw_display_handle(),
         width: window.inner_size().width,
         height: window.inner_size().height,
         validate: true,

@@ -9,7 +9,7 @@ use gui::Gui;
 #[cfg(feature = "gui")]
 pub use gui::GuiRequest;
 use instance::Instance;
-use raw_window_handle::RawWindowHandle;
+use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use resources::Image;
 use scene::Scene;
 use swapchain::Swapchain;
@@ -34,6 +34,7 @@ mod gui;
 
 pub struct RendererRequest<'a> {
     pub window: RawWindowHandle,
+    pub display: RawDisplayHandle,
     pub width: u32,
     pub height: u32,
     pub validate: bool,
@@ -67,8 +68,13 @@ impl Renderer {
         let sync = Sync::new(&device)?;
         let extent =
             vk::Extent2D { width: request.width, height: request.height };
-        let (swapchain, swapchain_images) =
-            Swapchain::new(&instance, &device, request.window, extent)?;
+        let (swapchain, swapchain_images) = Swapchain::new(
+            &instance,
+            &device,
+            request.window,
+            request.display,
+            extent,
+        )?;
         let scene = request.scene;
         let scene = Scene::new(&device, scene)?;
         #[cfg(feature = "gui")]
