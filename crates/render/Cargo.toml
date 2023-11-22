@@ -24,6 +24,7 @@ winit = { version = "0.28", features = [] }
 egui-winit = "0.23.0"
 egui = { version = "0.23.0" }
 epaint = { version = "0.23.0", features = ["bytemuck"] }
+asset_import = { path = "../asset_import" }
 
 [[example]]
 name = "scene"

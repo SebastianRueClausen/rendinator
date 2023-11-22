@@ -22,9 +22,9 @@ use crate::shader::{Pipeline, PipelineLayout, Shader, ShaderRequest};
 use crate::swapchain::Swapchain;
 use crate::{Descriptors, Update};
 
-pub struct GuiRequest<'a> {
-    pub primitives: &'a [egui::ClippedPrimitive],
-    pub textures_delta: &'a egui::TexturesDelta,
+pub struct GuiRequest {
+    pub primitives: Vec<egui::ClippedPrimitive>,
+    pub textures_delta: egui::TexturesDelta,
     pub pixels_per_point: f32,
 }
 
@@ -130,7 +130,7 @@ impl Gui {
         }
 
         // Update buffers.
-        for primitive in request.primitives {
+        for primitive in &request.primitives {
             let scissor_rect = scissor_rect(
                 &primitive.clip_rect,
                 request.pixels_per_point,
@@ -173,6 +173,9 @@ impl Gui {
                 index_buffer_size.next_multiple_of(INITIAL_INDEX_BUFFER_SIZE);
             let vertex_buffer_size =
                 vertex_buffer_size.next_multiple_of(INITIAL_VERTEX_BUFFER_SIZE);
+            self.indices.destroy(device);
+            self.vertices.destroy(device);
+            self.memory.free(device);
             (self.indices, self.vertices, self.memory) =
                 create_buffers(device, index_buffer_size, vertex_buffer_size)?;
         }
@@ -466,6 +469,6 @@ pub(super) fn render(
 }
 
 const INITIAL_VERTEX_BUFFER_SIZE: vk::DeviceSize =
-    1024 * mem::size_of::<epaint::Vertex>() as vk::DeviceSize;
+    10 * 1024 * mem::size_of::<epaint::Vertex>() as vk::DeviceSize;
 const INITIAL_INDEX_BUFFER_SIZE: vk::DeviceSize =
-    1024 * 3 * mem::size_of::<u32>() as vk::DeviceSize;
+    30 * 1024 * mem::size_of::<u32>() as vk::DeviceSize;

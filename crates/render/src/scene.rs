@@ -3,7 +3,7 @@ use std::mem;
 use ash::vk;
 use eyre::Result;
 
-use crate::command;
+use crate::command::{self, Access, ImageLayouts};
 use crate::device::Device;
 use crate::resources::{
     self, Allocator, Buffer, BufferKind, BufferRequest, BufferWrite, Image,
@@ -26,45 +26,52 @@ impl Scene {
         let indices = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(&scene.indices) as vk::DeviceSize,
+                size: mem::size_of_val(scene.indices.as_slice())
+                    as vk::DeviceSize,
                 kind: BufferKind::Index,
             },
         )?;
         let vertices = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(&scene.vertices) as vk::DeviceSize,
+                size: mem::size_of_val(scene.vertices.as_slice())
+                    as vk::DeviceSize,
                 kind: BufferKind::Storage,
             },
         )?;
         let meshlets = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(&scene.meshlets) as vk::DeviceSize,
+                size: mem::size_of_val(scene.meshlets.as_slice())
+                    as vk::DeviceSize,
                 kind: BufferKind::Storage,
             },
         )?;
         let meshlet_data = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(&scene.meshlet_data) as vk::DeviceSize,
+                size: mem::size_of_val(scene.meshlet_data.as_slice())
+                    as vk::DeviceSize,
                 kind: BufferKind::Storage,
             },
         )?;
         let meshes = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(&scene.meshes) as vk::DeviceSize,
+                size: mem::size_of_val(scene.meshes.as_slice())
+                    as vk::DeviceSize,
                 kind: BufferKind::Storage,
             },
         )?;
         let materials = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(&scene.materials) as vk::DeviceSize,
+                size: mem::size_of_val(scene.materials.as_slice())
+                    as vk::DeviceSize,
                 kind: BufferKind::Storage,
             },
         )?;
+
         let mut textures: Vec<_> = scene
             .textures
             .iter()
@@ -148,6 +155,15 @@ impl Scene {
         ];
 
         let scratch = command::quickie(device, |command_buffer| {
+            command_buffer.ensure_image_layouts(
+                device,
+                ImageLayouts {
+                    layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    src: Access::NONE,
+                    dst: Access::ALL,
+                },
+                textures.iter().map(|texture| texture),
+            );
             let buffer_scratch = resources::upload_buffer_data(
                 device,
                 &command_buffer,

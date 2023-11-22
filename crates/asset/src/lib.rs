@@ -1,13 +1,13 @@
 pub mod normal;
 
-use eyre::{Context, Result};
-use std::{fs, path::Path};
+use std::fs;
+use std::path::Path;
 
+use eyre::{Context, Result};
 use glam::{Mat4, Quat, Vec2, Vec3, Vec4};
 pub use meshopt::utilities;
-use serde::{Deserialize, Serialize};
-
 use normal::TangentFrame;
+use serde::{Deserialize, Serialize};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -18,10 +18,7 @@ pub struct DirectionalLight {
 
 impl Default for DirectionalLight {
     fn default() -> Self {
-        Self {
-            direction: Vec4::new(0.0, 1.0, 0.0, 1.0),
-            irradiance: Vec4::ONE,
-        }
+        Self { direction: Vec4::new(0.0, 1.0, 0.0, 1.0), irradiance: Vec4::ONE }
     }
 }
 
@@ -37,7 +34,8 @@ pub struct Transform {
 
 impl From<Mat4> for Transform {
     fn from(matrix: Mat4) -> Self {
-        let (scale, rotation, translation) = matrix.to_scale_rotation_translation();
+        let (scale, rotation, translation) =
+            matrix.to_scale_rotation_translation();
         Self {
             scale: scale.extend(1.0),
             translation: translation.extend(1.0),
@@ -71,10 +69,7 @@ impl BoundingSphere {
         let transform: Mat4 = transform.into();
         let center = (transform * self.center.extend(1.0)).truncate();
 
-        Self {
-            radius: scale * self.radius,
-            center,
-        }
+        Self { radius: scale * self.radius, center }
     }
 }
 
@@ -173,7 +168,8 @@ pub struct Position {
 
 impl Position {
     fn new(position: Vec3, bounding_sphere: &BoundingSphere) -> Self {
-        let position = (position - bounding_sphere.center) / bounding_sphere.radius;
+        let position =
+            (position - bounding_sphere.center) / bounding_sphere.radius;
         let encoded = position
             .to_array()
             .map(|value| utilities::quantize_snorm(value, 16) as i16);
@@ -202,21 +198,13 @@ impl Vertex {
         material: u32,
     ) -> Self {
         let tangent_frame = TangentFrame::new(normal, tangent);
-
         debug_assert!({
             let (decoded_normal, _) = tangent_frame.into_normal_tangent();
             decoded_normal.abs_diff_eq(normal, 0.1)
         });
-
         let texcoord = texcoord.to_array().map(utilities::quantize_half);
         let position = Position::new(position, bounding_sphere);
-
-        Self {
-            material: material as u16,
-            tangent_frame,
-            position,
-            texcoord,
-        }
+        Self { material: material as u16, tangent_frame, position, texcoord }
     }
 }
 
@@ -240,26 +228,34 @@ impl Scene {
     pub fn add_texture(&mut self, texture: Texture) -> u32 {
         let index = self.textures.len();
         self.textures.push(texture);
-
         index as u32
     }
 
     pub fn add_material(&mut self, material: Material) -> u32 {
         let index = self.materials.len();
         self.materials.push(material);
-
         index as u32
     }
 
     pub fn add_mesh(&mut self, mesh: Mesh) -> u32 {
         let index = self.meshes.len();
         self.meshes.push(mesh);
-
         index as u32
     }
 
+    pub fn deserialize(path: &Path) -> Result<Self> {
+        let bytes = fs::read(path).wrap_err_with(|| {
+            format!("failed to load scene file from {path:?}")
+        })?;
+        bincode::deserialize(&bytes).wrap_err_with(|| {
+            format!("failed to deserislize scene file from {path:?}")
+        })
+    }
+
     pub fn serialize(&self, path: &Path) -> Result<()> {
-        let bytes = bincode::serialize(&self).wrap_err("failed to serialize scene")?;
-        fs::write(path, &bytes).wrap_err_with(|| format!("failed to write to {path:?}"))
+        let bytes =
+            bincode::serialize(&self).wrap_err("failed to serialize scene")?;
+        fs::write(path, &bytes)
+            .wrap_err_with(|| format!("failed to write to {path:?}"))
     }
 }

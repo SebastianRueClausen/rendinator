@@ -167,6 +167,7 @@ pub(crate) struct Image {
     pub extent: vk::Extent3D,
     pub format: vk::Format,
     pub aspect: vk::ImageAspectFlags,
+    pub mip_level_count: u32,
     pub views: Vec<ImageView>,
     pub swapchain: bool,
     pub layout: Cell<vk::ImageLayout>,
@@ -217,6 +218,7 @@ impl Image {
             layout: Cell::new(layout),
             extent: request.extent,
             format: request.format,
+            mip_level_count: request.mip_level_count,
             swapchain: false,
             views: Vec::default(),
             aspect,
@@ -544,9 +546,15 @@ pub(crate) fn upload_image_data(
     command_buffer: &CommandBuffer,
     image_writes: &[ImageWrite],
 ) -> Result<Scratch> {
+    const CHUNK_ALIGNMENT: usize = 16;
     let scratch_size = image_writes
         .iter()
-        .flat_map(|write| write.mips.iter().map(|mip| mip.len() as u64))
+        .flat_map(|write| {
+            write
+                .mips
+                .iter()
+                .map(|mip| mip.len().next_multiple_of(CHUNK_ALIGNMENT) as u64)
+        })
         .sum();
     let scratch = Scratch::new(device, scratch_size)?;
     image_writes.iter().flat_map(|write| write.mips.iter()).fold(
@@ -593,7 +601,8 @@ pub(crate) fn upload_image_data(
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[*image_copy],
                 );
-                buffer_offset + data.len() as u64
+                buffer_offset
+                    + data.len().next_multiple_of(CHUNK_ALIGNMENT) as u64
             },
         );
     Ok(scratch)

@@ -1,18 +1,18 @@
+use std::io::Cursor;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::{fs, io, mem};
+
+use asset::{
+    BoundingSphere, Instance, Lod, Material, Mesh, Meshlet, Model, Scene,
+    Texture, TextureKind, Transform, Vertex,
+};
 use eyre::{Result, WrapErr};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use gltf::Gltf;
 use image::GenericImageView;
-use std::io::Cursor;
-use std::path::{Path, PathBuf};
 
-use std::{fs, io, mem};
-
-use asset::{
-    BoundingSphere, Instance, Lod, Material, Mesh, Meshlet, Model, Scene, Texture, TextureKind,
-    Transform, Vertex,
-};
-
-use crate::normals;
+use crate::{normals, Progress, Stage};
 
 #[derive(Default)]
 struct FallbackTextures {
@@ -24,25 +24,32 @@ struct FallbackTextures {
 
 impl FallbackTextures {
     fn insert_fallback(scene: &mut Scene, specs: &TextureSpecs) -> u32 {
-        let mip: Vec<_> = specs.fallback.iter().copied().cycle().take(16).collect();
-        let mip = compress_bytes(specs.kind, 2, 2, &mip).into_boxed_slice();
-
+        let mip: Vec<_> =
+            specs.fallback.iter().copied().cycle().take(16 * 4).collect();
+        let mip = compress_bytes(specs.kind, 4, 4, &mip).into_boxed_slice();
         scene.add_texture(Texture {
             kind: specs.kind,
-            width: 2,
-            height: 2,
+            width: 4,
+            height: 4,
             mips: vec![mip],
         })
     }
 
-    fn fallback_texture(&mut self, scene: &mut Scene, kind: TextureKind) -> u32 {
+    fn fallback_texture(
+        &mut self,
+        scene: &mut Scene,
+        kind: TextureKind,
+    ) -> u32 {
         let (field, specs) = match kind {
             TextureKind::Albedo => (&mut self.albedo, &ALBEDO_TEXTURE_SPECS),
             TextureKind::Normal => (&mut self.normal, &NORMAL_TEXTURE_SPECS),
-            TextureKind::Specular => (&mut self.specular, &SPECULAR_TEXTURE_SPECS),
-            TextureKind::Emissive => (&mut self.emissive, &EMISSIVE_TEXTURE_SPECS),
+            TextureKind::Specular => {
+                (&mut self.specular, &SPECULAR_TEXTURE_SPECS)
+            }
+            TextureKind::Emissive => {
+                (&mut self.emissive, &EMISSIVE_TEXTURE_SPECS)
+            }
         };
-
         *field.get_or_insert_with(|| Self::insert_fallback(scene, specs))
     }
 
@@ -50,8 +57,10 @@ impl FallbackTextures {
         Material {
             albedo_texture: self.fallback_texture(scene, TextureKind::Albedo),
             normal_texture: self.fallback_texture(scene, TextureKind::Normal),
-            specular_texture: self.fallback_texture(scene, TextureKind::Specular),
-            emissive_texture: self.fallback_texture(scene, TextureKind::Emissive),
+            specular_texture: self
+                .fallback_texture(scene, TextureKind::Specular),
+            emissive_texture: self
+                .fallback_texture(scene, TextureKind::Emissive),
             base_color: DEFAULT_COLOR,
             emissive: DEFAULT_EMISSIVE,
             metallic: DEFAULT_METALLIC,
@@ -66,64 +75,88 @@ pub struct Importer {
     gltf: Gltf,
     buffer_data: Vec<Box<[u8]>>,
     parent_path: PathBuf,
+    progress: Option<Arc<Mutex<Progress>>>,
+    work_amount: f32,
 }
 
 impl Importer {
-    pub fn new(path: &Path) -> Result<Self> {
+    pub fn new(
+        path: &Path,
+        progress: Option<Arc<Mutex<Progress>>>,
+    ) -> Result<Self> {
         let file = fs::File::open(path)?;
         let gltf = Gltf::from_reader(io::BufReader::new(file))?;
         let parent_path = path
             .parent()
             .ok_or_else(|| eyre::eyre!("path has no parent directory"))?
             .to_owned();
-
         let buffer_data: Result<Vec<_>, _> = gltf
             .buffers()
             .map(|buffer| match buffer.source() {
                 gltf::buffer::Source::Bin => gltf
                     .blob
                     .as_ref()
-                    .ok_or_else(|| eyre::eyre!("failed to load inline binary data"))
+                    .ok_or_else(|| {
+                        eyre::eyre!("failed to load inline binary data")
+                    })
                     .cloned()
                     .map(Vec::into_boxed_slice),
                 gltf::buffer::Source::Uri(uri) => {
                     let binary_path: PathBuf =
-                        [parent_path.as_path(), Path::new(uri)].iter().collect();
+                        [parent_path.as_path(), Path::new(uri)]
+                            .iter()
+                            .collect();
                     fs::read(&binary_path)
                         .wrap_err_with(|| {
-                            eyre::eyre!("failed to load binary data from {binary_path:?}")
+                            eyre::eyre!(
+                                "failed to load binary data from \
+                                 {binary_path:?}"
+                            )
                         })
                         .map(Vec::into_boxed_slice)
                 }
             })
             .collect();
-
+        let work_amount =
+            gltf.meshes().len() as f32 + gltf.materials().len() as f32;
         Ok(Self {
             buffer_data: buffer_data?,
             parent_path,
             gltf,
+            progress,
+            work_amount,
         })
     }
 
-    fn image(&self, source: gltf::image::Source) -> Result<image::DynamicImage> {
+    fn image(
+        &self,
+        source: gltf::image::Source,
+    ) -> Result<image::DynamicImage> {
         match source {
             gltf::image::Source::View { view, mime_type } => {
                 let format = match mime_type {
                     "image/png" => image::ImageFormat::Png,
                     "image/jpeg" => image::ImageFormat::Jpeg,
-                    _ => return Err(eyre::eyre!("invalid image type, must be png or jpg")),
+                    _ => {
+                        return Err(eyre::eyre!(
+                            "invalid image type, must be png or jpg"
+                        ))
+                    }
                 };
-
                 let input = self.buffer_data(&view, None, 0);
                 let cursor = io::Cursor::new(&input);
-                image::load(cursor, format).wrap_err("failed to load inline image")
+                image::load(cursor, format)
+                    .wrap_err("failed to load inline image")
             }
             gltf::image::Source::Uri { uri, .. } => {
                 let uri = Path::new(uri);
-                let path: PathBuf = [self.parent_path.as_path(), Path::new(uri)]
-                    .iter()
-                    .collect();
-                image::open(&path).wrap_err_with(|| format!("failed to load image from {uri:?}"))
+                let path: PathBuf =
+                    [self.parent_path.as_path(), Path::new(uri)]
+                        .iter()
+                        .collect();
+                image::open(&path).wrap_err_with(|| {
+                    format!("failed to load image from {uri:?}")
+                })
             }
         }
     }
@@ -152,9 +185,12 @@ impl Importer {
         material: gltf::Material,
     ) -> Result<Material> {
         let albedo_texture = {
-            if let Some(accessor) = material.pbr_metallic_roughness().base_color_texture() {
+            if let Some(accessor) =
+                material.pbr_metallic_roughness().base_color_texture()
+            {
                 let image = self.image(accessor.texture().source().source())?;
-                let texture = create_texture(image, &ALBEDO_TEXTURE_SPECS, true, |_| ());
+                let texture =
+                    create_texture(image, &ALBEDO_TEXTURE_SPECS, true, |_| ());
                 scene.add_texture(texture)
             } else {
                 fallback_textures.fallback_texture(scene, TextureKind::Albedo)
@@ -164,7 +200,12 @@ impl Importer {
         let emissive_texture = {
             if let Some(accessor) = material.emissive_texture() {
                 let image = self.image(accessor.texture().source().source())?;
-                let texture = create_texture(image, &EMISSIVE_TEXTURE_SPECS, true, |_| ());
+                let texture = create_texture(
+                    image,
+                    &EMISSIVE_TEXTURE_SPECS,
+                    true,
+                    |_| (),
+                );
                 scene.add_texture(texture)
             } else {
                 fallback_textures.fallback_texture(scene, TextureKind::Emissive)
@@ -174,19 +215,26 @@ impl Importer {
         let normal_texture = {
             if let Some(accessor) = material.normal_texture() {
                 let image = self.image(accessor.texture().source().source())?;
-                let texture = create_texture(image, &NORMAL_TEXTURE_SPECS, true, |pixel| {
-                    let normal = Vec3 {
-                        x: (pixel[0] as f32) / 255.0,
-                        y: (pixel[1] as f32) / 255.0,
-                        z: (pixel[2] as f32) / 255.0,
-                    };
+                let texture = create_texture(
+                    image,
+                    &NORMAL_TEXTURE_SPECS,
+                    true,
+                    |pixel| {
+                        let normal = Vec3 {
+                            x: (pixel[0] as f32) / 255.0,
+                            y: (pixel[1] as f32) / 255.0,
+                            z: (pixel[2] as f32) / 255.0,
+                        };
 
-                    let normal = normal * 2.0 - 1.0;
-                    let uv = asset::normal::encode_octahedron(normal);
+                        let normal = normal * 2.0 - 1.0;
+                        let uv = asset::normal::encode_octahedron(normal);
 
-                    pixel[0] = asset::utilities::quantize_unorm(uv.x, 8) as u8;
-                    pixel[1] = asset::utilities::quantize_unorm(uv.y, 8) as u8;
-                });
+                        pixel[0] =
+                            asset::utilities::quantize_unorm(uv.x, 8) as u8;
+                        pixel[1] =
+                            asset::utilities::quantize_unorm(uv.y, 8) as u8;
+                    },
+                );
 
                 scene.add_texture(texture)
             } else {
@@ -195,15 +243,19 @@ impl Importer {
         };
 
         let specular_texture = {
-            let accessor = material
-                .pbr_metallic_roughness()
-                .metallic_roughness_texture();
+            let accessor =
+                material.pbr_metallic_roughness().metallic_roughness_texture();
             if let Some(accessor) = accessor {
                 let image = self.image(accessor.texture().source().source())?;
-                let texture = create_texture(image, &SPECULAR_TEXTURE_SPECS, true, |rgba| {
-                    // Change metallic channel to red.
-                    rgba[0] = rgba[2];
-                });
+                let texture = create_texture(
+                    image,
+                    &SPECULAR_TEXTURE_SPECS,
+                    true,
+                    |rgba| {
+                        // Change metallic channel to red.
+                        rgba[0] = rgba[2];
+                    },
+                );
                 scene.add_texture(texture)
             } else {
                 fallback_textures.fallback_texture(scene, TextureKind::Specular)
@@ -214,7 +266,10 @@ impl Importer {
             metallic: material.pbr_metallic_roughness().metallic_factor(),
             roughness: material.pbr_metallic_roughness().roughness_factor(),
             ior: material.ior().unwrap_or(DEFAULT_IOR),
-            base_color: material.pbr_metallic_roughness().base_color_factor().into(),
+            base_color: material
+                .pbr_metallic_roughness()
+                .base_color_factor()
+                .into(),
             emissive: Vec3::from_array(material.emissive_factor()).extend(1.0)
                 * material.emissive_strength().unwrap_or(1.0),
             albedo_texture,
@@ -227,17 +282,13 @@ impl Importer {
 
     fn load_indices(&self, primitive: &gltf::Primitive) -> Result<Vec<u32>> {
         use gltf::accessor::{DataType, Dimensions};
-
         let accessor = primitive
             .indices()
             .ok_or_else(|| eyre::eyre!("primitive doesn't have indices"))?;
-
         if accessor.dimensions() != Dimensions::Scalar {
             return Err(eyre::eyre!("index attribute must be scalar",));
         }
-
         let index_data = self.accessor_data(&accessor);
-
         let indices = match accessor.data_type() {
             DataType::U32 => index_data
                 .chunks(4)
@@ -251,7 +302,6 @@ impl Importer {
                 return Err(eyre::eyre!("invalid index type {ty:?}"));
             }
         };
-
         Ok(indices)
     }
 
@@ -263,7 +313,6 @@ impl Importer {
         mesh: gltf::Mesh,
     ) -> Result<Model> {
         use gltf::accessor::{DataType, Dimensions};
-
         let meshes: Result<Vec<_>> = mesh
             .primitives()
             .map(|primitive| {
@@ -272,7 +321,8 @@ impl Importer {
                     .index()
                     .map(|material| material as u32)
                     .unwrap_or_else(|| {
-                        let material = fallback_textures.fallback_material(scene);
+                        let material =
+                            fallback_textures.fallback_material(scene);
                         scene.add_material(material)
                     });
 
@@ -280,7 +330,9 @@ impl Importer {
 
                 let position_accessor = primitive
                     .get(&gltf::Semantic::Positions)
-                    .ok_or_else(|| eyre::eyre!("primitive doesn't have vertex positions"))?;
+                    .ok_or_else(|| {
+                        eyre::eyre!("primitive doesn't have vertex positions")
+                    })?;
 
                 verify_accessor(
                     "positions",
@@ -298,7 +350,12 @@ impl Importer {
                 let normals = match primitive.get(&gltf::Semantic::Normals) {
                     None => normals::generate_normals(&positions, &indices),
                     Some(accessor) => {
-                        verify_accessor("normals", &accessor, DataType::F32, Dimensions::Vec3)?;
+                        verify_accessor(
+                            "normals",
+                            &accessor,
+                            DataType::F32,
+                            Dimensions::Vec3,
+                        )?;
                         self.accessor_data(&accessor)
                             .chunks(mem::size_of::<Vec3>())
                             .map(bytemuck::pod_read_unaligned)
@@ -306,21 +363,34 @@ impl Importer {
                     }
                 };
 
-                let texcoords = match primitive.get(&gltf::Semantic::TexCoords(0)) {
-                    None => vec![Vec2::ZERO; normals.len()],
-                    Some(accessor) => {
-                        verify_accessor("texcoords", &accessor, DataType::F32, Dimensions::Vec2)?;
-                        self.accessor_data(&accessor)
-                            .chunks(mem::size_of::<Vec2>())
-                            .map(bytemuck::pod_read_unaligned)
-                            .collect()
-                    }
-                };
+                let texcoords =
+                    match primitive.get(&gltf::Semantic::TexCoords(0)) {
+                        None => vec![Vec2::ZERO; normals.len()],
+                        Some(accessor) => {
+                            verify_accessor(
+                                "texcoords",
+                                &accessor,
+                                DataType::F32,
+                                Dimensions::Vec2,
+                            )?;
+                            self.accessor_data(&accessor)
+                                .chunks(mem::size_of::<Vec2>())
+                                .map(bytemuck::pod_read_unaligned)
+                                .collect()
+                        }
+                    };
 
                 let tangents = match primitive.get(&gltf::Semantic::Tangents) {
-                    None => normals::generate_tangents(&positions, &texcoords, &normals, &indices)?,
+                    None => normals::generate_tangents(
+                        &positions, &texcoords, &normals, &indices,
+                    )?,
                     Some(accessor) => {
-                        verify_accessor("tangents", &accessor, DataType::F32, Dimensions::Vec4)?;
+                        verify_accessor(
+                            "tangents",
+                            &accessor,
+                            DataType::F32,
+                            Dimensions::Vec4,
+                        )?;
                         self.accessor_data(&accessor)
                             .chunks(mem::size_of::<Vec4>())
                             .map(bytemuck::pod_read_unaligned)
@@ -367,13 +437,19 @@ impl Importer {
 
                     scene.indices.extend_from_slice(&indices);
 
-                    lod.meshlet_count = build_meshlets(scene, &indices, &vertex_adapter) as u32;
+                    lod.meshlet_count =
+                        build_meshlets(scene, &indices, &vertex_adapter) as u32;
                     lod.meshlet_offset = scene.meshlets.len() as u32;
 
                     if lod_count < 8 {
-                        let target_count = (indices.len() as f32 * 0.75).ceil() as usize;
-                        let new_indices =
-                            meshopt::simplify(&indices, &vertex_adapter, target_count, 1e-2);
+                        let target_count =
+                            (indices.len() as f32 * 0.75).ceil() as usize;
+                        let new_indices = meshopt::simplify(
+                            &indices,
+                            &vertex_adapter,
+                            target_count,
+                            1e-2,
+                        );
 
                         if new_indices.len() == indices.len() {
                             break;
@@ -397,31 +473,48 @@ impl Importer {
                 })
             })
             .collect();
-
-        let mesh_indices = meshes?
-            .into_iter()
-            .map(|mesh| scene.add_mesh(mesh))
-            .collect();
-
+        let mesh_indices =
+            meshes?.into_iter().map(|mesh| scene.add_mesh(mesh)).collect();
         Ok(Model { mesh_indices })
+    }
+
+    fn progress_tick(&self) {
+        if let Some(progress) = &self.progress {
+            progress.lock().unwrap().percentage += self.work_amount.recip();
+        }
+    }
+
+    fn progress_stage(&self, stage: Stage) {
+        if let Some(progress) = &self.progress {
+            progress.lock().unwrap().stage = stage;
+        }
     }
 
     pub fn load_scene(self) -> Result<Scene> {
         let mut scene = Scene::default();
         let mut fallback_textures = FallbackTextures::default();
 
-        scene.instances = load_instances(self.gltf.scenes().flat_map(|scene| scene.nodes()));
+        scene.instances =
+            load_instances(self.gltf.scenes().flat_map(|scene| scene.nodes()));
 
+        self.progress_stage(Stage::Textures);
         scene.materials = self
             .gltf
             .materials()
-            .map(|material| self.load_material(&mut scene, &mut fallback_textures, material))
+            .map(|material| {
+                self.progress_tick();
+                self.load_material(&mut scene, &mut fallback_textures, material)
+            })
             .collect::<Result<_>>()?;
 
+        self.progress_stage(Stage::Meshes);
         scene.models = self
             .gltf
             .meshes()
-            .map(|mesh| self.load_model(&mut scene, &mut fallback_textures, mesh))
+            .map(|mesh| {
+                self.progress_tick();
+                self.load_model(&mut scene, &mut fallback_textures, mesh)
+            })
             .collect::<Result<_>>()?;
 
         Ok(scene)
@@ -433,42 +526,44 @@ fn build_meshlets(
     indices: &[u32],
     vertices: &meshopt::VertexDataAdapter,
 ) -> usize {
-    let mut meshlets: Vec<_> =
-        meshopt::clusterize::build_meshlets(indices, vertices.vertex_count, 64, 64)
-            .iter()
-            .map(|meshlet| {
-                let data_offset = scene.meshlet_data.len() as u32;
-
-                let meshlet_vertices = &meshlet.vertices[..meshlet.vertex_count as usize];
-                let meshlet_indices = &meshlet.indices[..meshlet.triangle_count as usize];
-
-                scene.meshlet_data.extend_from_slice(meshlet_vertices);
-
-                for triangle in meshlet_indices {
-                    let [a, b, c] = triangle.map(|i| i as u32);
-                    scene.meshlet_data.push(a << 24 | b << 16 | c << 8);
-                }
-
-                let bounds = meshopt::compute_meshlet_bounds(meshlet, vertices);
-                let bounding_sphere = BoundingSphere {
-                    center: Vec3::from_array(bounds.center),
-                    radius: bounds.radius,
-                };
-
-                Meshlet {
-                    bounding_sphere,
-                    cone_axis: bounds.cone_axis_s8,
-                    cone_cutoff: bounds.cone_cutoff_s8,
-                    vertex_count: meshlet.vertex_count,
-                    triangle_count: meshlet.triangle_count,
-                    data_offset,
-                }
-            })
-            .collect();
-
+    let max_vertices = 64;
+    let max_triangles = 64;
+    let meshlets = meshopt::clusterize::build_meshlets(
+        indices,
+        vertices.vertex_count,
+        max_vertices,
+        max_triangles,
+    );
+    let mut meshlets: Vec<_> = meshlets
+        .iter()
+        .map(|meshlet| {
+            let data_offset = scene.meshlet_data.len() as u32;
+            let meshlet_vertices =
+                &meshlet.vertices[..meshlet.vertex_count as usize];
+            let meshlet_indices =
+                &meshlet.indices[..meshlet.triangle_count as usize];
+            scene.meshlet_data.extend_from_slice(meshlet_vertices);
+            for triangle in meshlet_indices {
+                let [a, b, c] = triangle.map(|i| i as u32);
+                scene.meshlet_data.push(a << 24 | b << 16 | c << 8);
+            }
+            let bounds = meshopt::compute_meshlet_bounds(meshlet, vertices);
+            let bounding_sphere = BoundingSphere {
+                center: Vec3::from_array(bounds.center),
+                radius: bounds.radius,
+            };
+            Meshlet {
+                bounding_sphere,
+                cone_axis: bounds.cone_axis_s8,
+                cone_cutoff: bounds.cone_cutoff_s8,
+                vertex_count: meshlet.vertex_count,
+                triangle_count: meshlet.triangle_count,
+                data_offset,
+            }
+        })
+        .collect();
     let count = meshlets.len();
     scene.meshlets.append(&mut meshlets);
-
     count
 }
 
@@ -479,25 +574,20 @@ fn bounding_sphere(primitive: &gltf::Primitive) -> BoundingSphere {
 
     let center = min + (max - min) * 0.5;
 
-    BoundingSphere {
-        radius: (center - max).length(),
-        center,
-    }
+    BoundingSphere { radius: (center - max).length(), center }
 }
 
-fn load_instances<'a>(nodes: impl Iterator<Item = gltf::Node<'a>>) -> Vec<Instance> {
+fn load_instances<'a>(
+    nodes: impl Iterator<Item = gltf::Node<'a>>,
+) -> Vec<Instance> {
     nodes
         .filter_map(|node| {
             let mesh_index = node.mesh().map(|mesh| mesh.index() as u32);
-            let transform = Transform::from(Mat4::from_cols_array_2d(&node.transform().matrix()));
-
+            let transform = Transform::from(Mat4::from_cols_array_2d(
+                &node.transform().matrix(),
+            ));
             let children = load_instances(node.children());
-
-            Some(Instance {
-                mesh_index,
-                transform,
-                children,
-            })
+            Some(Instance { mesh_index, transform, children })
         })
         .collect()
 }
@@ -515,11 +605,9 @@ fn create_texture(
 ) -> Texture {
     // May be incorrect in very certain situations.
     if image.width() < 2 || image.height() < 2 {
-        image.resize_exact(2, 2, image::imageops::Nearest);
+        image.resize_exact(4, 4, image::imageops::Nearest);
     }
-
     let (width, height) = image.dimensions();
-
     let mip_level_count = if create_mips {
         let extent = u32::max(width, height) as f32;
         let count = extent.log2().floor() as u32;
@@ -527,13 +615,12 @@ fn create_texture(
     } else {
         1
     };
-
     let mips = (0..mip_level_count)
         .map(|level| {
             image = if level == 0 {
                 image.resize_exact(
-                    round_to_block_extent(image.width(), 2),
-                    round_to_block_extent(image.height(), 2),
+                    round_to_block_extent(image.width(), 4),
+                    round_to_block_extent(image.height(), 4),
                     image::imageops::FilterType::Lanczos3,
                 )
             } else {
@@ -543,21 +630,18 @@ fn create_texture(
                     image::imageops::FilterType::Lanczos3,
                 )
             };
-
             let mut mip = image.clone().into_rgba8();
             mip.pixels_mut().for_each(|pixel| encode(&mut pixel.0));
-
-            compress_bytes(specs.kind, mip.width(), mip.height(), &mip.into_raw())
-                .into_boxed_slice()
+            compress_bytes(
+                specs.kind,
+                mip.width(),
+                mip.height(),
+                &mip.into_raw(),
+            )
+            .into_boxed_slice()
         })
         .collect();
-
-    Texture {
-        kind: specs.kind,
-        mips,
-        width,
-        height,
-    }
+    Texture { kind: specs.kind, mips, width, height }
 }
 
 fn round_to_block_extent(extent: u32, block_extent: u32) -> u32 {
@@ -566,25 +650,25 @@ fn round_to_block_extent(extent: u32, block_extent: u32) -> u32 {
     u32::max(rounded, block_extent)
 }
 
-fn compress_bytes(kind: TextureKind, width: u32, height: u32, bytes: &[u8]) -> Vec<u8> {
+fn compress_bytes(
+    kind: TextureKind,
+    width: u32,
+    height: u32,
+    bytes: &[u8],
+) -> Vec<u8> {
     let format = match kind {
         TextureKind::Albedo | TextureKind::Emissive => texpresso::Format::Bc1,
         TextureKind::Normal | TextureKind::Specular => texpresso::Format::Bc5,
     };
-
     let params = texpresso::Params {
         algorithm: texpresso::Algorithm::IterativeClusterFit,
         ..Default::default()
     };
-
     let width = width as usize;
     let height = height as usize;
-
     let size = format.compressed_size(width, height);
-
     let mut output = vec![0x0; size];
     format.compress(bytes, width, height, params, &mut output);
-
     output
 }
 
@@ -601,7 +685,6 @@ fn verify_accessor(
             accessor.data_type(),
         ));
     }
-
     if accessor.dimensions() != dimensions {
         return Err(eyre::eyre!(
             "{name} attribute should have dimensions {:?} but is {:?}",
@@ -609,14 +692,11 @@ fn verify_accessor(
             accessor.dimensions(),
         ));
     }
-
     Ok(())
 }
 
-const ALBEDO_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    kind: TextureKind::Albedo,
-    fallback: [u8::MAX; 4],
-};
+const ALBEDO_TEXTURE_SPECS: TextureSpecs =
+    TextureSpecs { kind: TextureKind::Albedo, fallback: [u8::MAX; 4] };
 
 const NORMAL_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
     kind: TextureKind::Normal,
@@ -624,15 +704,11 @@ const NORMAL_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
     fallback: [128; 4],
 };
 
-const SPECULAR_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    kind: TextureKind::Specular,
-    fallback: [u8::MAX; 4],
-};
+const SPECULAR_TEXTURE_SPECS: TextureSpecs =
+    TextureSpecs { kind: TextureKind::Specular, fallback: [u8::MAX; 4] };
 
-const EMISSIVE_TEXTURE_SPECS: TextureSpecs = TextureSpecs {
-    kind: TextureKind::Emissive,
-    fallback: [u8::MAX; 4],
-};
+const EMISSIVE_TEXTURE_SPECS: TextureSpecs =
+    TextureSpecs { kind: TextureKind::Emissive, fallback: [u8::MAX; 4] };
 
 const DEFAULT_IOR: f32 = 1.4;
 const DEFAULT_METALLIC: f32 = 0.0;

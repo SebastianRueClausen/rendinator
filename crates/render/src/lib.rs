@@ -41,13 +41,10 @@ pub struct RendererRequest<'a> {
     pub scene: &'a asset::Scene,
 }
 
-#[cfg(feature = "gui")]
-pub struct FrameRequest<'a> {
-    pub gui: gui::GuiRequest<'a>,
+pub struct FrameRequest {
+    #[cfg(feature = "gui")]
+    pub gui: gui::GuiRequest,
 }
-
-#[cfg(not(feature = "gui"))]
-pub struct FrameRequest {}
 
 pub struct Renderer {
     instance: Instance,
@@ -230,6 +227,13 @@ impl Renderer {
             scratch.destroy(&self.device);
         }
 
+        Ok(())
+    }
+
+    pub fn change_scene(&mut self, scene: &asset::Scene) -> Result<()> {
+        self.device.wait_until_idle()?;
+        self.scene.destroy(&self.device);
+        self.scene = Scene::new(&self.device, &scene)?;
         Ok(())
     }
 

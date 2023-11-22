@@ -170,7 +170,7 @@ impl<'a> CommandBuffer<'a> {
                     .aspect_mask(barrier.image.aspect)
                     .base_mip_level(0)
                     .base_array_layer(0)
-                    .level_count(1)
+                    .level_count(barrier.image.mip_level_count)
                     .layer_count(1)
                     .build();
                 vk::ImageMemoryBarrier2::builder()

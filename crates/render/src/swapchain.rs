@@ -86,6 +86,7 @@ impl Swapchain {
                     views: vec![view],
                     extent: extent.into(),
                     swapchain: true,
+                    mip_level_count: 1,
                     format,
                     image,
                 })
