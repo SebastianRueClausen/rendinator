@@ -4,7 +4,6 @@
 
 #include "../constants.glsl"
 
-
 layout (location = 0) in vec2 texcoord;
 layout (location = 1) in vec4 color;
 

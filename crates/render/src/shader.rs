@@ -101,6 +101,13 @@ impl Deref for Pipeline {
     }
 }
 
+pub(crate) struct GraphicsPipelineRequest<'a> {
+    pub color_formats: &'a [vk::Format],
+    pub depth_format: Option<vk::Format>,
+    pub shaders: &'a [&'a Shader],
+    pub cull_mode: vk::CullModeFlags,
+}
+
 impl Pipeline {
     pub fn compute(
         device: &Device,
@@ -137,20 +144,19 @@ impl Pipeline {
     pub fn graphics<'a>(
         device: &Device,
         layout: &PipelineLayout,
-        color_formats: &[vk::Format],
-        depth_format: Option<vk::Format>,
-        shaders: impl IntoIterator<Item = &'a Shader>,
+        request: &GraphicsPipelineRequest,
     ) -> Result<Self> {
         let (pipeline_layout, push_constant_stages) =
             create_pipeline_layout(device, layout)?;
         let entry_point = CString::new("main").unwrap();
-        let shader_infos: Vec<_> = shaders
+        let shader_infos: Vec<_> = request
+            .shaders
             .into_iter()
             .map(|shader| create_shader_info(shader, &entry_point))
             .collect();
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
-            .depth_attachment_format(depth_format.unwrap_or_default())
-            .color_attachment_formats(color_formats)
+            .depth_attachment_format(request.depth_format.unwrap_or_default())
+            .color_attachment_formats(request.color_formats)
             .build();
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let input_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
@@ -161,16 +167,16 @@ impl Pipeline {
         let rasterization_info =
             vk::PipelineRasterizationStateCreateInfo::builder()
                 .line_width(1.0)
-                .front_face(vk::FrontFace::COUNTER_CLOCKWISE)
-                .cull_mode(vk::CullModeFlags::NONE);
+                .front_face(vk::FrontFace::CLOCKWISE)
+                .cull_mode(request.cull_mode);
         let multisampled_info =
             vk::PipelineMultisampleStateCreateInfo::builder()
                 .rasterization_samples(vk::SampleCountFlags::TYPE_1);
         let depth_stencil_info =
             vk::PipelineDepthStencilStateCreateInfo::builder()
-                .depth_compare_op(vk::CompareOp::ALWAYS)
-                .depth_test_enable(false)
-                .depth_write_enable(false);
+                .depth_compare_op(vk::CompareOp::GREATER)
+                .depth_test_enable(request.depth_format.is_some())
+                .depth_write_enable(request.depth_format.is_some());
         let color_attachment_state =
             vk::PipelineColorBlendAttachmentState::builder()
                 .color_write_mask(vk::ColorComponentFlags::RGBA)

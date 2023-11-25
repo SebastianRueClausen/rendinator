@@ -1,11 +1,16 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 use std::{mem, thread};
 
+use bit_set::BitSet;
 use eyre::Result;
+use glam::Vec2;
 use raw_window_handle::HasRawDisplayHandle;
-use render::{FrameRequest, GuiRequest, Renderer};
-use winit::event::{Event, WindowEvent};
+use render::{CameraMove, FrameRequest, GuiRequest, Renderer};
+use winit::event::{
+    ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent,
+};
 use winit::event_loop::{ControlFlow, EventLoop};
 use winit::window::Window;
 
@@ -71,6 +76,8 @@ fn main() {
     let mut renderer = Some(create_renderer(&window, &scene));
     let mut gui = Gui::new(&window);
     let mut scene_state = SceneState::default();
+    let mut inputs = Inputs::default();
+    let mut last_update = Instant::now();
 
     event_loop.run(move |event, _, ctrl| {
         ctrl.set_poll();
@@ -96,7 +103,37 @@ fn main() {
                     renderer = Some(create_renderer(&window, &scene));
                 }
             }
+            Event::WindowEvent {
+                event: WindowEvent::CursorMoved { position, .. },
+                ..
+            } => {
+                inputs.mouse_moved(Vec2 {
+                    x: position.x as f32,
+                    y: position.y as f32,
+                });
+            }
+            Event::WindowEvent {
+                event: WindowEvent::KeyboardInput { input, .. },
+                ..
+            } => {
+                let Some(key) = input.virtual_keycode else {
+                    return;
+                };
+                match input.state {
+                    ElementState::Pressed => inputs.key_pressed(key),
+                    ElementState::Released => inputs.key_released(key),
+                }
+            }
+            Event::WindowEvent {
+                event: WindowEvent::ModifiersChanged(modifiers),
+                ..
+            } => {
+                inputs.modifier_change(modifiers);
+            }
             Event::MainEventsCleared => {
+                let dt = last_update.elapsed();
+                last_update = Instant::now();
+
                 scene_state = match mem::take(&mut scene_state) {
                     SceneState::Loading { thread, path, progress } => {
                         if thread.is_finished() {
@@ -121,6 +158,7 @@ fn main() {
                     renderer
                         .render_frame(&FrameRequest {
                             gui: gui.render(&window, &mut scene_state),
+                            camera_move: inputs.camera_move(dt),
                         })
                         .expect("failed to render frame");
                 }
@@ -195,6 +233,72 @@ impl Gui {
 
     fn handle_resize(&mut self) {
         self.context = egui::Context::default();
+    }
+}
+
+#[derive(Default)]
+struct Inputs {
+    keys_pressed: BitSet,
+    modifier_state: ModifiersState,
+    mouse_position: Option<Vec2>,
+    mouse_delta: Option<Vec2>,
+}
+
+impl Inputs {
+    fn mouse_moved(&mut self, to: Vec2) {
+        let position = self.mouse_position.unwrap_or(to);
+        let delta = self.mouse_delta.unwrap_or_default();
+        self.mouse_delta = Some(delta + (position - to));
+        self.mouse_position = Some(to);
+    }
+
+    fn key_pressed(&mut self, key: VirtualKeyCode) {
+        self.keys_pressed.insert(key as usize);
+    }
+
+    fn key_released(&mut self, key: VirtualKeyCode) {
+        self.keys_pressed.remove(key as usize);
+    }
+
+    fn is_key_pressed(&self, key: VirtualKeyCode) -> bool {
+        self.keys_pressed.contains(key as usize)
+    }
+
+    fn mouse_delta(&mut self) -> Vec2 {
+        self.mouse_delta.take().unwrap_or(Vec2::ZERO)
+    }
+
+    fn modifier_change(&mut self, modifier_state: ModifiersState) {
+        self.modifier_state = modifier_state;
+    }
+
+    fn is_shift_pressed(&self) -> bool {
+        self.modifier_state.shift()
+    }
+
+    fn camera_move(&mut self, dt: Duration) -> CameraMove {
+        let mut camera_move = CameraMove::default();
+        let dt = dt.as_secs_f32();
+        let move_speed = 50.0;
+        let mouse_sensitivity = 0.05;
+        if self.is_key_pressed(VirtualKeyCode::W) {
+            camera_move.backward += move_speed * dt;
+        }
+        if self.is_key_pressed(VirtualKeyCode::S) {
+            camera_move.forward += move_speed * dt;
+        }
+        if self.is_key_pressed(VirtualKeyCode::A) {
+            camera_move.left += move_speed * dt;
+        }
+        if self.is_key_pressed(VirtualKeyCode::D) {
+            camera_move.right += move_speed * dt;
+        }
+        let mouse_delta = self.mouse_delta();
+        if self.is_shift_pressed() {
+            camera_move.yaw += mouse_sensitivity * mouse_delta.x;
+            camera_move.pitch += mouse_sensitivity * mouse_delta.y;
+        }
+        camera_move
     }
 }
 

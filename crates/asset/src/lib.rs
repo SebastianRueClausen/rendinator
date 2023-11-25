@@ -68,7 +68,6 @@ impl BoundingSphere {
         let scale = transform.scale.abs().max_element();
         let transform: Mat4 = transform.into();
         let center = (transform * self.center.extend(1.0)).truncate();
-
         Self { radius: scale * self.radius, center }
     }
 }
@@ -122,7 +121,7 @@ pub struct Model {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Instance {
     pub transform: Transform,
-    pub mesh_index: Option<u32>,
+    pub model_index: Option<u32>,
     pub children: Vec<Instance>,
 }
 
@@ -170,6 +169,7 @@ impl Position {
     fn new(position: Vec3, bounding_sphere: &BoundingSphere) -> Self {
         let position =
             (position - bounding_sphere.center) / bounding_sphere.radius;
+        debug_assert!(position.max_element() <= 1.0);
         let encoded = position
             .to_array()
             .map(|value| utilities::quantize_snorm(value, 16) as i16);

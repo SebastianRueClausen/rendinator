@@ -7,6 +7,7 @@ use crate::command::{self, Access, CommandBuffer, ImageBarrier};
 use crate::device::Device;
 use crate::resources::{Buffer, Image, Scratch};
 
+#[allow(dead_code)]
 pub(super) fn download_buffer(
     device: &Device,
     buffer: &Buffer,
@@ -41,6 +42,7 @@ pub(super) fn download_buffer(
     Ok(bytes)
 }
 
+#[allow(dead_code)]
 pub(super) fn display_texture<'a>(
     device: &Device,
     command_buffer: &mut CommandBuffer<'a>,

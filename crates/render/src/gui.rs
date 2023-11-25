@@ -18,7 +18,9 @@ use crate::resources::{
     ImageRequest, ImageViewRequest, ImageWrite, Memory, Sampler,
     SamplerRequest,
 };
-use crate::shader::{Pipeline, PipelineLayout, Shader, ShaderRequest};
+use crate::shader::{
+    GraphicsPipelineRequest, Pipeline, PipelineLayout, Shader, ShaderRequest,
+};
 use crate::swapchain::Swapchain;
 use crate::{Descriptors, Update};
 
@@ -275,9 +277,12 @@ pub(super) fn create_pipeline(
     let pipeline = Pipeline::graphics(
         device,
         &pipeline_layout,
-        &[swapchain.format],
-        None,
-        &shaders,
+        &GraphicsPipelineRequest {
+            color_formats: &[swapchain.format],
+            depth_format: None,
+            shaders: &[&shaders[0], &shaders[1]],
+            cull_mode: vk::CullModeFlags::NONE,
+        },
     )?;
     for shader in shaders {
         shader.destroy(device);
@@ -434,9 +439,7 @@ pub(super) fn render(
                 depth_attachment: None,
                 color_attachments: &[Attachment {
                     view: swapchain_image.view(&ImageViewRequest::BASE),
-                    load: Load::Clear(vk::ClearValue {
-                        color: vk::ClearColorValue { float32: [0.0; 4] },
-                    }),
+                    load: Load::Load,
                 }],
                 extent,
             },

@@ -1,28 +1,54 @@
 use std::mem;
 
-use ash::vk;
+use ash::vk::{self, ImageView};
 use eyre::Result;
+use glam::{Mat4, Vec3};
 
 use crate::command::{self, Access, ImageLayouts};
 use crate::device::Device;
 use crate::resources::{
     self, Allocator, Buffer, BufferKind, BufferRequest, BufferWrite, Image,
-    ImageRequest, ImageViewRequest, ImageWrite, Memory,
+    ImageRequest, ImageViewRequest, ImageWrite, Memory, Sampler,
+    SamplerRequest,
 };
 
 pub(super) struct Scene {
-    indices: Buffer,
-    vertices: Buffer,
-    meshlets: Buffer,
-    meshlet_data: Buffer,
-    materials: Buffer,
-    meshes: Buffer,
-    textures: Vec<Image>,
-    memory: Memory,
+    pub indices: Buffer,
+    pub vertices: Buffer,
+    pub meshlets: Buffer,
+    pub meshlet_data: Buffer,
+    pub materials: Buffer,
+    pub meshes: Buffer,
+    pub instances: Buffer,
+    pub draws: Buffer,
+    pub textures: Vec<Image>,
+    pub texture_sampler: Sampler,
+    pub memory: Memory,
+    pub node_tree: NodeTree,
+    pub draw_count: u32,
 }
 
 impl Scene {
     pub fn new(device: &Device, scene: &asset::Scene) -> Result<Self> {
+        let node_tree = NodeTree::from_instances(scene);
+        let draw_commands = node_tree.draws(&scene);
+        let draw_count = draw_commands.len() as u32;
+
+        let draws = Buffer::new(
+            device,
+            &BufferRequest {
+                size: mem::size_of_val(draw_commands.as_slice()) as u64,
+                kind: BufferKind::Indirect,
+            },
+        )?;
+        let instances = Buffer::new(
+            device,
+            &BufferRequest {
+                size: node_tree.instance_count as u64
+                    * mem::size_of::<Instance>() as u64,
+                kind: BufferKind::Storage,
+            },
+        )?;
         let indices = Buffer::new(
             device,
             &BufferRequest {
@@ -99,6 +125,8 @@ impl Scene {
         }
 
         let memory = allocator
+            .alloc_buffer(&instances)
+            .alloc_buffer(&draws)
             .alloc_buffer(&indices)
             .alloc_buffer(&vertices)
             .alloc_buffer(&meshlets)
@@ -152,6 +180,10 @@ impl Scene {
                 buffer: &materials,
                 data: bytemuck::cast_slice(&scene.materials),
             },
+            BufferWrite {
+                buffer: &draws,
+                data: bytemuck::cast_slice(&draw_commands),
+            },
         ];
 
         let scratch = command::quickie(device, |command_buffer| {
@@ -181,6 +213,15 @@ impl Scene {
             scratch.destroy(device);
         }
 
+        let texture_sampler = Sampler::new(
+            device,
+            &SamplerRequest {
+                filter: vk::Filter::LINEAR,
+                max_anisotropy: Some(device.limits.max_sampler_anisotropy),
+                address_mode: vk::SamplerAddressMode::REPEAT,
+            },
+        )?;
+
         Ok(Self {
             indices,
             vertices,
@@ -189,11 +230,18 @@ impl Scene {
             materials,
             meshes,
             textures,
+            texture_sampler,
             memory,
+            node_tree,
+            instances,
+            draws,
+            draw_count,
         })
     }
 
     pub fn destroy(&self, device: &Device) {
+        self.instances.destroy(device);
+        self.draws.destroy(device);
         self.indices.destroy(device);
         self.vertices.destroy(device);
         self.meshlets.destroy(device);
@@ -203,8 +251,158 @@ impl Scene {
         for texture in &self.textures {
             texture.destroy(device);
         }
+        self.texture_sampler.destroy(device);
         self.memory.free(device);
     }
+
+    pub(super) fn update(&self) -> SceneUpdate {
+        SceneUpdate { instances: self.node_tree.instances() }
+    }
+}
+
+#[repr(C)]
+#[repr(align(16))]
+#[derive(Debug, Clone, Copy, bytemuck::NoUninit)]
+struct Instance {
+    transform: Mat4,
+    normal_transform: Mat4,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Draw {
+    command: vk::DrawIndexedIndirectCommand,
+    center: Vec3,
+    radius: f32,
+}
+
+unsafe impl bytemuck::NoUninit for Draw {}
+
+#[derive(Debug)]
+struct NodeDraw {
+    instance_index: u32,
+    model_index: u32,
+}
+
+#[derive(Debug)]
+pub struct Node {
+    transform: Mat4,
+    parent: Option<u32>,
+    draw: Option<NodeDraw>,
+}
+
+#[derive(Debug, Default)]
+pub struct NodeTree {
+    nodes: Vec<Node>,
+    instance_count: u32,
+}
+
+impl NodeTree {
+    fn from_instances(scene: &asset::Scene) -> Self {
+        scene.instances.iter().fold(Self::default(), |tree, instance| {
+            build_node_tree(instance, &scene.meshes, tree, None)
+        })
+    }
+
+    fn instances(&self) -> Vec<Instance> {
+        let mut global_transforms: Vec<Mat4> =
+            Vec::with_capacity(self.nodes.len());
+        self.nodes
+            .iter()
+            .filter_map(|node| {
+                let transform = if let Some(parent) = node.parent {
+                    global_transforms[parent as usize] * node.transform
+                } else {
+                    node.transform
+                };
+
+                global_transforms.push(transform);
+                node.draw.is_some().then_some(Instance {
+                    normal_transform: transform.inverse().transpose(),
+                    transform,
+                })
+            })
+            .collect()
+    }
+
+    fn draws(&self, scene: &asset::Scene) -> Vec<Draw> {
+        self.nodes.iter().flat_map(|node| node_draws(node, scene)).collect()
+    }
+}
+
+fn node_draws<'a>(
+    node: &'a Node,
+    scene: &'a asset::Scene,
+) -> impl Iterator<Item = Draw> + 'a {
+    node.draw.iter().flat_map(|draw| {
+        model_draws(
+            &scene.models[draw.model_index as usize],
+            scene,
+            draw.instance_index,
+        )
+    })
+}
+
+fn model_draws<'a>(
+    model: &'a asset::Model,
+    scene: &'a asset::Scene,
+    instance_index: u32,
+) -> impl Iterator<Item = Draw> + 'a {
+    model.mesh_indices.iter().map(move |mesh_index| {
+        let mesh = &scene.meshes[*mesh_index as usize];
+        let command = vk::DrawIndexedIndirectCommand::builder()
+            .vertex_offset(mesh.vertex_offset as i32)
+            .first_instance(instance_index)
+            .first_index(mesh.lods[0].index_offset)
+            .index_count(mesh.lods[0].index_count)
+            .instance_count(1)
+            .build();
+        Draw {
+            center: mesh.bounding_sphere.center,
+            radius: mesh.bounding_sphere.radius,
+            // bounding_sphere: mesh.bounding_sphere,
+            command,
+        }
+    })
+}
+
+fn build_node_tree(
+    instance: &asset::Instance,
+    meshes: &[asset::Mesh],
+    mut tree: NodeTree,
+    parent: Option<u32>,
+) -> NodeTree {
+    let transform = instance.transform.into();
+
+    let draw = instance.model_index.map(|model_index| {
+        let draw =
+            NodeDraw { instance_index: tree.instance_count, model_index };
+        tree.instance_count += 1;
+        draw
+    });
+
+    let node_index = tree.nodes.len() as u32;
+    let node = Node { transform, parent, draw };
+
+    tree.nodes.push(node);
+    instance.children.iter().fold(tree, |tree, instance| {
+        build_node_tree(instance, meshes, tree, Some(node_index))
+    })
+}
+
+pub(super) struct SceneUpdate {
+    instances: Vec<Instance>,
+}
+
+pub(super) fn buffer_writes<'a>(
+    scene: &'a Scene,
+    update: &'a SceneUpdate,
+) -> impl Iterator<Item = BufferWrite<'a>> {
+    [BufferWrite {
+        data: bytemuck::cast_slice(&update.instances),
+        buffer: &scene.instances,
+    }]
+    .into_iter()
 }
 
 fn texture_kind_format(kind: asset::TextureKind) -> vk::Format {

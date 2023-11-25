@@ -11,7 +11,7 @@ glam = "0.24.2"
 eyre = "0.6.8"
 raw-window-handle = "0.5.2"
 asset = { path = "../asset" }
-bytemuck = "1.14.0"
+bytemuck = { version = "1.14.0", features = ["derive"] }
 vk-shader-macros = "0.2.9"
 bitflags = "2.4.1"
 slab = "0.4.9"
@@ -24,6 +24,7 @@ winit = { version = "0.28", features = [] }
 egui-winit = "0.23.0"
 egui = { version = "0.23.0" }
 epaint = { version = "0.23.0", features = ["bytemuck"] }
+bit-set = "0.5.3"
 asset_import = { path = "../asset_import" }
 
 [[example]]

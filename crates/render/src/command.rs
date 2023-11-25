@@ -114,6 +114,29 @@ impl<'a> CommandBuffer<'a> {
         self
     }
 
+    pub fn clear_color_image(
+        &mut self,
+        device: &Device,
+        image: &Image,
+    ) -> &mut Self {
+        let range = vk::ImageSubresourceRange::builder()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .base_array_layer(0)
+            .layer_count(1)
+            .base_mip_level(0)
+            .level_count(image.mip_level_count);
+        unsafe {
+            device.cmd_clear_color_image(
+                **self,
+                **image,
+                vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                &vk::ClearColorValue { float32: [0.0; 4] },
+                slice::from_ref(&range),
+            )
+        }
+        self
+    }
+
     pub fn dispatch(
         &mut self,
         device: &Device,
@@ -237,6 +260,22 @@ impl<'a> CommandBuffer<'a> {
                 draw.vertex_offset,
                 draw.first_instance,
             );
+        }
+        self
+    }
+
+    pub fn draw_indexed_indirect(
+        &mut self,
+        device: &Device,
+        buffer: &Buffer,
+        count: u32,
+        stride: u32,
+        offset: u64,
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_draw_indexed_indirect(
+                **self, **buffer, offset, count, stride,
+            )
         }
         self
     }

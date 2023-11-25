@@ -1,0 +1,6 @@
+format_strings = true
+imports_granularity = "Module"
+group_imports = "StdExternalCrate"
+chain_width = 80
+max_width = 80
+use_small_heuristics = "Max"

@@ -17,6 +17,7 @@ pub(crate) struct Device {
     pub descriptor_buffer_loader: ext::DescriptorBuffer,
     pub descriptor_buffer_properties:
         vk::PhysicalDeviceDescriptorBufferPropertiesEXT,
+    pub limits: vk::PhysicalDeviceLimits,
 }
 
 impl Device {
@@ -26,6 +27,9 @@ impl Device {
         let memory_properties = unsafe {
             instance.get_physical_device_memory_properties(physical_device)
         };
+        let properties =
+            unsafe { instance.get_physical_device_properties(physical_device) };
+        let limits = properties.limits;
         let queue_info = vk::DeviceQueueCreateInfo::builder()
             .queue_family_index(queue_family_index)
             .queue_priorities(&[1.0]);
@@ -39,6 +43,7 @@ impl Device {
                 vk::PhysicalDeviceFeatures::builder()
                     .multi_draw_indirect(true)
                     .pipeline_statistics_query(true)
+                    .sampler_anisotropy(true)
                     .shader_int16(true)
                     .shader_int64(true)
                     .build()
@@ -46,6 +51,7 @@ impl Device {
             .build();
         let mut features_1_1 = vk::PhysicalDeviceVulkan11Features::builder()
             .storage_buffer16_bit_access(true)
+            .uniform_and_storage_buffer16_bit_access(true)
             .shader_draw_parameters(true)
             .build();
         let mut features_1_2 = vk::PhysicalDeviceVulkan12Features::builder()
@@ -106,6 +112,7 @@ impl Device {
             queue,
             descriptor_buffer_loader,
             descriptor_buffer_properties,
+            limits,
         })
     }
 

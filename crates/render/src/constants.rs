@@ -1,9 +1,11 @@
 use std::mem;
 
 use ash::vk;
+use asset::DirectionalLight;
 use eyre::Result;
-use glam::UVec2;
+use glam::{Mat4, UVec2, Vec4};
 
+use crate::camera::Camera;
 use crate::device::Device;
 use crate::resources::{
     self, Buffer, BufferKind, BufferRequest, BufferWrite, Memory,
@@ -13,16 +15,36 @@ use crate::swapchain::Swapchain;
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
 pub(crate) struct ConstantData {
+    pub proj: Mat4,
+    pub view: Mat4,
+    pub proj_view: Mat4,
+    pub camera_position: Vec4,
+    pub sun: DirectionalLight,
     pub screen_size: UVec2,
+    pub padding: [u32; 2],
 }
 
 impl ConstantData {
-    pub fn new(swapchain: &Swapchain, _prev: Option<Self>) -> Self {
+    pub fn new(
+        swapchain: &Swapchain,
+        camera: &Camera,
+        _prev: Option<Self>,
+    ) -> Self {
+        let sun = DirectionalLight {
+            direction: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            irradiance: Vec4::ONE * 4.0,
+        };
         Self {
             screen_size: UVec2 {
                 x: swapchain.extent.width,
                 y: swapchain.extent.height,
             },
+            proj: camera.proj,
+            view: camera.view,
+            camera_position: camera.position.extend(0.0),
+            proj_view: camera.proj * camera.view,
+            padding: [0x0; 2],
+            sun,
         }
     }
 }
@@ -34,7 +56,11 @@ pub(crate) struct Constants {
 }
 
 impl Constants {
-    pub fn new(device: &Device, swapchain: &Swapchain) -> Result<Self> {
+    pub fn new(
+        device: &Device,
+        swapchain: &Swapchain,
+        camera: &Camera,
+    ) -> Result<Self> {
         let buffer = Buffer::new(
             device,
             &BufferRequest {
@@ -44,12 +70,12 @@ impl Constants {
         )?;
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         let memory = resources::buffer_memory(device, &buffer, memory_flags)?;
-        let data = ConstantData::new(swapchain, None);
+        let data = ConstantData::new(swapchain, camera, None);
         Ok(Self { buffer, memory, data })
     }
 
-    pub fn update(&mut self, swapchain: &Swapchain) {
-        self.data = ConstantData::new(swapchain, Some(self.data));
+    pub fn update(&mut self, swapchain: &Swapchain, camera: &Camera) {
+        self.data = ConstantData::new(swapchain, camera, Some(self.data));
     }
 
     pub fn buffer_write(&self) -> BufferWrite {

@@ -581,13 +581,13 @@ fn load_instances<'a>(
     nodes: impl Iterator<Item = gltf::Node<'a>>,
 ) -> Vec<Instance> {
     nodes
-        .filter_map(|node| {
-            let mesh_index = node.mesh().map(|mesh| mesh.index() as u32);
+        .map(|node| {
+            let model_index = node.mesh().map(|mesh| mesh.index() as u32);
             let transform = Transform::from(Mat4::from_cols_array_2d(
                 &node.transform().matrix(),
             ));
             let children = load_instances(node.children());
-            Some(Instance { mesh_index, transform, children })
+            Instance { model_index, transform, children }
         })
         .collect()
 }
@@ -604,7 +604,7 @@ fn create_texture(
     mut encode: impl FnMut(&mut [u8]) + Clone + Copy,
 ) -> Texture {
     // May be incorrect in very certain situations.
-    if image.width() < 2 || image.height() < 2 {
+    if image.width() < 4 || image.height() < 4 {
         image.resize_exact(4, 4, image::imageops::Nearest);
     }
     let (width, height) = image.dimensions();

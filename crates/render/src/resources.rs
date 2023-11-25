@@ -15,6 +15,7 @@ pub(crate) enum BufferKind {
     Uniform,
     Scratch,
     Descriptor,
+    Indirect,
 }
 
 impl BufferKind {
@@ -34,6 +35,10 @@ impl BufferKind {
                     | vk::BufferUsageFlags::INDEX_BUFFER
             }
             BufferKind::Scratch => vk::BufferUsageFlags::empty(),
+            BufferKind::Indirect => {
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER
+            }
         };
         specific_flags | base_flags
     }
@@ -251,6 +256,13 @@ impl Image {
         )
     }
 
+    pub fn full_view(&self) -> &ImageView {
+        self.view(&ImageViewRequest {
+            mip_level_count: self.mip_level_count,
+            base_mip_level: 0,
+        })
+    }
+
     pub fn layout(&self) -> vk::ImageLayout {
         self.layout.get()
     }
@@ -393,10 +405,14 @@ pub(crate) fn bind_buffer_memory(
                 .build()
         })
         .collect();
-    unsafe {
-        device
-            .bind_buffer_memory2(&bind_infos)
-            .wrap_err("failed to bind buffer memory")
+    if !bind_infos.is_empty() {
+        unsafe {
+            device
+                .bind_buffer_memory2(&bind_infos)
+                .wrap_err("failed to bind buffer memory")
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -421,13 +437,14 @@ pub(crate) fn bind_image_memory(
                 .build()
         })
         .collect();
-    if bind_infos.is_empty() {
-        return Ok(());
-    }
-    unsafe {
-        device
-            .bind_image_memory2(&bind_infos)
-            .wrap_err("failed to bind image memory")
+    if !bind_infos.is_empty() {
+        unsafe {
+            device
+                .bind_image_memory2(&bind_infos)
+                .wrap_err("failed to bind image memory")
+        }
+    } else {
+        Ok(())
     }
 }
 
@@ -561,7 +578,7 @@ pub(crate) fn upload_image_data(
         scratch.memory.map(device)?,
         |ptr, mip| unsafe {
             ptr.copy_from_nonoverlapping(mip.as_ptr(), mip.len());
-            ptr.add(mip.len())
+            ptr.add(mip.len().next_multiple_of(CHUNK_ALIGNMENT))
         },
     );
     scratch.memory.unmap(device);
