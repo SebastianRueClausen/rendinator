@@ -15,7 +15,7 @@ use instance::Instance;
 use mesh::MeshPhase;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use render_targets::RenderTargets;
-use scene::Scene;
+use scene::{NodeTree, Scene};
 use swapchain::Swapchain;
 use sync::Sync;
 
@@ -31,7 +31,7 @@ mod instance;
 mod mesh;
 mod render_targets;
 mod resources;
-mod scene;
+pub mod scene;
 mod shader;
 mod swapchain;
 mod sync;
@@ -118,7 +118,7 @@ impl Renderer {
                 &self.gui,
                 &self.constants,
                 &mut descriptor_data,
-            )?,
+            ),
             mesh_phase: mesh::create_descriptor(
                 &self.device,
                 &self.mesh_phase,
@@ -285,6 +285,10 @@ impl Renderer {
         }
 
         Ok(())
+    }
+
+    pub fn node_tree_mut(&mut self) -> &mut NodeTree {
+        &mut self.scene.node_tree
     }
 
     pub fn change_scene(&mut self, scene: &asset::Scene) -> Result<()> {

@@ -3,10 +3,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use std::{mem, thread};
 
+use asset_import::Progress;
 use bit_set::BitSet;
 use eyre::Result;
-use glam::Vec2;
+use glam::{Mat4, Quat, Vec2, Vec3};
 use raw_window_handle::HasRawDisplayHandle;
+use render::scene::NodeTree;
 use render::{CameraMove, FrameRequest, GuiRequest, Renderer};
 use winit::event::{
     ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent,
@@ -34,37 +36,45 @@ enum SceneState {
     Loaded {
         path: ScenePath,
     },
+    Error {
+        error: String,
+    },
     Loading {
-        path: ScenePath,
-        progress: Arc<Mutex<asset_import::Progress>>,
         thread: thread::JoinHandle<Result<asset::Scene>>,
+        progress: Arc<Mutex<asset_import::Progress>>,
+        path: ScenePath,
     },
 }
 
 impl SceneState {
     fn start_loading(&mut self, path: ScenePath) {
         let progress = Arc::new(Mutex::new(asset_import::Progress::default()));
-        *self = SceneState::Loading {
-            path: path.clone(),
-            progress: progress.clone(),
-            thread: thread::spawn(move || {
-                if let Ok(scene) = asset::Scene::deserialize(&path.cached) {
-                    Ok(scene)
-                } else {
-                    let scene =
-                        asset_import::load_gltf(&path.gltf, Some(progress))?;
-                    if let Err(error) = scene.serialize(&path.cached) {
-                        eprintln!(
-                            "failed to store cached scene to {:?}: {}",
-                            path.cached, error
-                        );
-                    } else {
-                        println!("cached scene to {:?}", path.cached);
-                    }
-                    Ok(scene)
-                }
-            }),
+        let thread = thread::spawn({
+            let path = path.clone();
+            let progress = progress.clone();
+            move || load_scene(path, progress)
+        });
+        *self = SceneState::Loading { thread, path, progress }
+    }
+}
+
+fn load_scene(
+    path: ScenePath,
+    progress: Arc<Mutex<Progress>>,
+) -> Result<asset::Scene> {
+    if let Ok(scene) = asset::Scene::deserialize(&path.cached) {
+        Ok(scene)
+    } else {
+        let scene = asset_import::load_gltf(&path.gltf, Some(progress))?;
+        if let Err(error) = scene.serialize(&path.cached) {
+            eprintln!(
+                "failed to store cached scene to {:?}: {}",
+                path.cached, error
+            );
+        } else {
+            println!("cached scene to {:?}", path.cached);
         }
+        Ok(scene)
     }
 }
 
@@ -135,30 +145,33 @@ fn main() {
                 last_update = Instant::now();
 
                 scene_state = match mem::take(&mut scene_state) {
-                    SceneState::Loading { thread, path, progress } => {
-                        if thread.is_finished() {
-                            scene = thread
-                                .join()
-                                .unwrap()
-                                .expect("failed to load scene");
-                            if let Some(renderer) = &mut renderer {
-                                renderer
-                                    .change_scene(&scene)
-                                    .expect("failed to set scene");
+                    SceneState::Loading { thread, path, .. }
+                        if thread.is_finished() =>
+                    {
+                        match thread.join().expect("failed to join threads") {
+                            Ok(new) => {
+                                scene = new;
+                                if let Some(renderer) = &mut renderer {
+                                    renderer
+                                        .change_scene(&scene)
+                                        .expect("failed to set scene");
+                                }
+                                SceneState::Loaded { path: path.clone() }
                             }
-                            SceneState::Loaded { path: path.clone() }
-                        } else {
-                            SceneState::Loading { thread, path, progress }
+                            Err(report) => SceneState::Error {
+                                error: report.root_cause().to_string(),
+                            },
                         }
                     }
                     scene_state => scene_state,
                 };
 
                 if let Some(renderer) = &mut renderer {
+                    let gui = gui.render(&window, &mut scene_state, renderer);
                     renderer
                         .render_frame(&FrameRequest {
-                            gui: gui.render(&window, &mut scene_state),
                             camera_move: inputs.camera_move(dt),
+                            gui,
                         })
                         .expect("failed to render frame");
                 }
@@ -169,8 +182,13 @@ fn main() {
     });
 }
 
-struct Gui {
+#[derive(Default)]
+struct GuiState {
     scene_path: String,
+}
+
+struct Gui {
+    state: GuiState,
     context: egui::Context,
     input_state: egui_winit::State,
 }
@@ -180,50 +198,31 @@ impl Gui {
         Self {
             context: egui::Context::default(),
             input_state: egui_winit::State::new(&window),
-            scene_path: String::default(),
+            state: GuiState::default(),
         }
     }
 
     fn render(
         &mut self,
         window: &winit::window::Window,
-        scene_loading: &mut SceneState,
+        scene_state: &mut SceneState,
+        renderer: &mut Renderer,
     ) -> GuiRequest {
         let input = self.input_state.take_egui_input(&window);
         let output = self.context.run(input, |ctx| {
-            egui::Window::new("scene").show(&ctx, |ui| {
-                ui.horizontal(|ui| {
-                    let label = ui.label("scene path");
-                    ui.text_edit_singleline(&mut self.scene_path)
-                        .labelled_by(label.id);
-                    if ui.button("load").clicked() {
-                        scene_loading
-                            .start_loading(ScenePath::new(&self.scene_path));
-                    }
-                });
-                match scene_loading {
-                    SceneState::Empty => ui.label("no scene loaded"),
-                    SceneState::Loaded { path } => {
-                        ui.label(format!("'{:?}' is loaded", path.gltf))
-                    }
-                    SceneState::Loading { progress, .. } => {
-                        let progress = *progress.lock().unwrap();
-                        let progress_bar =
-                            egui::ProgressBar::new(progress.percentage)
-                                .show_percentage()
-                                .animate(true);
-                        ui.add(progress_bar).on_hover_text(format!(
-                            "loading {:?}",
-                            progress.stage,
-                        ))
-                    }
-                }
-            });
+            scene_window(
+                ctx,
+                &mut self.state,
+                scene_state,
+                renderer.node_tree_mut(),
+            );
         });
+        let primitives = self.context.tessellate(output.shapes);
+        let pixels_per_point = self.context.pixels_per_point();
         GuiRequest {
-            primitives: self.context.tessellate(output.shapes),
             textures_delta: output.textures_delta,
-            pixels_per_point: self.context.pixels_per_point(),
+            pixels_per_point,
+            primitives,
         }
     }
 
@@ -234,6 +233,132 @@ impl Gui {
     fn handle_resize(&mut self) {
         self.context = egui::Context::default();
     }
+}
+
+fn scene_window(
+    context: &egui::Context,
+    state: &mut GuiState,
+    scene_state: &mut SceneState,
+    tree: &mut NodeTree,
+) {
+    egui::Window::new("scene").scroll2([false, true]).resizable(true).show(
+        &context,
+        |ui| {
+            ui.horizontal(|ui| {
+                let label = ui.label("scene path");
+                ui.text_edit_singleline(&mut state.scene_path)
+                    .labelled_by(label.id);
+                if ui.button("load").clicked() {
+                    scene_state
+                        .start_loading(ScenePath::new(&state.scene_path));
+                }
+            });
+
+            ui.add_space(15.0);
+
+            match scene_state {
+                SceneState::Empty => {
+                    ui.label("no scene loaded");
+                }
+                SceneState::Loaded { path } => {
+                    ui.label(format!("'{:?}' is loaded", path.gltf));
+                }
+                SceneState::Error { error } => {
+                    ui.label(format!("failed to load scene: {error}"));
+                }
+                SceneState::Loading { progress, .. } => {
+                    let progress = *progress.lock().unwrap();
+                    let progress_bar =
+                        egui::ProgressBar::new(progress.percentage)
+                            .show_percentage()
+                            .animate(true);
+                    ui.add(progress_bar)
+                        .on_hover_text(
+                            format!("loading {:?}", progress.stage,),
+                        );
+                }
+            }
+
+            ui.add_space(15.0);
+
+            let mut index = 0;
+            while let Some(next) = scene_tree(ui, tree, index) {
+                index = next;
+            }
+        },
+    );
+}
+
+fn scene_tree(
+    ui: &mut egui::Ui,
+    tree: &mut NodeTree,
+    index: usize,
+) -> Option<usize> {
+    if let Some(node) = tree.nodes_mut().get_mut(index) {
+        let mut transform = node.transform;
+        ui.collapsing(format!("node {index}"), |ui| {
+            transform = transform_edit(ui, transform);
+
+            let mut child_index = index + 1;
+            while tree
+                .nodes_mut()
+                .get_mut(child_index)
+                .map(|child| child.parent())
+                .flatten()
+                .is_some_and(|parent| parent == index)
+            {
+                let Some(next) = scene_tree(ui, tree, child_index) else {
+                    return ();
+                };
+
+                assert_ne!(next, child_index);
+                child_index = next;
+            }
+        });
+
+        let node = &mut tree.nodes_mut()[index];
+        node.transform = transform;
+
+        Some(node.sub_tree_end())
+    } else {
+        None
+    }
+}
+
+fn transform_edit(ui: &mut egui::Ui, transform: Mat4) -> Mat4 {
+    let (mut scale, mut rotation, mut translation) =
+        transform.to_scale_rotation_translation();
+    egui::Grid::new("transform").show(ui, |ui| {
+        ui.label("rotation");
+        let euler = glam::EulerRot::XYZ;
+        let (mut x, mut y, mut z) = rotation.to_euler(euler);
+        ui.drag_angle_tau(&mut x);
+        ui.drag_angle_tau(&mut y);
+        ui.drag_angle_tau(&mut z);
+        let [x, y, z] = [x, y, z].map(|a| a % std::f32::consts::TAU);
+        rotation = Quat::from_euler(euler, x, y, z);
+        ui.end_row();
+
+        ui.label("translation");
+        ui.add(egui::DragValue::new(&mut translation.x));
+        ui.add(egui::DragValue::new(&mut translation.y));
+        ui.add(egui::DragValue::new(&mut translation.z));
+        ui.end_row();
+
+        ui.label("scale");
+        ui.add(egui::DragValue::new(&mut scale.x));
+        ui.add(egui::DragValue::new(&mut scale.y));
+        ui.add(egui::DragValue::new(&mut scale.z));
+        scale = Vec3::from_array(scale.to_array().map(|a| {
+            if a == 0.0 {
+                a + f32::EPSILON
+            } else {
+                a
+            }
+        }));
+        ui.end_row();
+    });
+    Mat4::from_scale_rotation_translation(scale, rotation, translation)
 }
 
 #[derive(Default)]

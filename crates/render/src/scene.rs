@@ -1,6 +1,7 @@
-use std::mem;
+use std::{mem, ops};
 
-use ash::vk::{self, ImageView};
+use ash::vk::{self};
+use asset::BoundingSphere;
 use eyre::Result;
 use glam::{Mat4, Vec3};
 
@@ -150,6 +151,7 @@ impl Scene {
             .zip(scene.textures.iter())
             .map(|(image, texture)| ImageWrite {
                 offset: vk::Offset3D::default(),
+                extent: image.extent,
                 mips: &texture.mips,
                 image,
             })
@@ -286,9 +288,22 @@ struct NodeDraw {
 
 #[derive(Debug)]
 pub struct Node {
-    transform: Mat4,
+    pub transform: Mat4,
     parent: Option<u32>,
+    sub_tree_end: u32,
     draw: Option<NodeDraw>,
+}
+
+impl Node {
+    // Returns the index of the parent node, `None` if it's a root node.
+    pub fn parent(&self) -> Option<usize> {
+        self.parent.map(|parent| parent as usize)
+    }
+
+    // Returns the index of the next node not in this nodes subgraph.
+    pub fn sub_tree_end(&self) -> usize {
+        self.sub_tree_end as usize
+    }
 }
 
 #[derive(Debug, Default)]
@@ -302,6 +317,10 @@ impl NodeTree {
         scene.instances.iter().fold(Self::default(), |tree, instance| {
             build_node_tree(instance, &scene.meshes, tree, None)
         })
+    }
+
+    pub fn nodes_mut(&mut self) -> &mut [Node] {
+        &mut self.nodes
     }
 
     fn instances(&self) -> Vec<Instance> {
@@ -357,12 +376,8 @@ fn model_draws<'a>(
             .index_count(mesh.lods[0].index_count)
             .instance_count(1)
             .build();
-        Draw {
-            center: mesh.bounding_sphere.center,
-            radius: mesh.bounding_sphere.radius,
-            // bounding_sphere: mesh.bounding_sphere,
-            command,
-        }
+        let BoundingSphere { center, radius } = mesh.bounding_sphere;
+        Draw { center, radius, command }
     })
 }
 
@@ -373,7 +388,6 @@ fn build_node_tree(
     parent: Option<u32>,
 ) -> NodeTree {
     let transform = instance.transform.into();
-
     let draw = instance.model_index.map(|model_index| {
         let draw =
             NodeDraw { instance_index: tree.instance_count, model_index };
@@ -382,12 +396,16 @@ fn build_node_tree(
     });
 
     let node_index = tree.nodes.len() as u32;
-    let node = Node { transform, parent, draw };
-
+    let node = Node { transform, parent, draw, sub_tree_end: node_index + 1 };
     tree.nodes.push(node);
-    instance.children.iter().fold(tree, |tree, instance| {
+
+    let mut tree = instance.children.iter().fold(tree, |tree, instance| {
         build_node_tree(instance, meshes, tree, Some(node_index))
-    })
+    });
+
+    let subtree_end = tree.nodes.len() as u32;
+    tree.nodes[node_index as usize].sub_tree_end = subtree_end;
+    tree
 }
 
 pub(super) struct SceneUpdate {

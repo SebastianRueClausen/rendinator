@@ -301,17 +301,6 @@ pub(crate) fn mip_level_offset(
     vk::Offset3D { x: offset.x >> level, y: offset.y >> level, z: offset.z }
 }
 
-pub(crate) fn extent_rest(
-    extent: vk::Extent3D,
-    offset: vk::Offset3D,
-) -> vk::Extent3D {
-    vk::Extent3D {
-        width: extent.width - offset.x as u32,
-        height: extent.height - offset.y as u32,
-        depth: extent.depth - offset.z as u32,
-    }
-}
-
 fn memory_type_index(
     device: &Device,
     memory_type_bits: u32,
@@ -555,6 +544,7 @@ pub(crate) fn upload_buffer_data(
 pub(crate) struct ImageWrite<'a> {
     pub image: &'a Image,
     pub offset: vk::Offset3D,
+    pub extent: vk::Extent3D,
     pub mips: &'a [Box<[u8]>],
 }
 
@@ -585,13 +575,10 @@ pub(crate) fn upload_image_data(
     image_writes
         .iter()
         .flat_map(|write| {
-            let base_extent = write.image.extent;
-            let base_offset = write.offset;
             write.mips.iter().enumerate().map(move |(level, data)| {
                 let level = level as u32;
-                let offset = mip_level_offset(base_offset, level);
-                let extent =
-                    extent_rest(mip_level_extent(base_extent, level), offset);
+                let offset = mip_level_offset(write.offset, level);
+                let extent = mip_level_extent(write.extent, level);
                 (write.image, extent, offset, data, level)
             })
         })

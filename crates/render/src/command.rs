@@ -81,13 +81,15 @@ impl<'a> CommandBuffer<'a> {
         descriptor: &Descriptor,
     ) -> &mut Self {
         unsafe {
+            let Pipeline { bind_point, layout, .. } = pipeline;
+            let offsets = [descriptor.buffer_offset];
             device.descriptor_buffer_loader.cmd_set_descriptor_buffer_offsets(
                 **self,
-                pipeline.bind_point,
-                pipeline.layout,
+                *bind_point,
+                *layout,
                 0,
                 &[0],
-                &[descriptor.buffer_offset],
+                &offsets,
             );
         }
         self

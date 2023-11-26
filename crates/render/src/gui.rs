@@ -101,32 +101,36 @@ impl Gui {
         }
 
         for (id, delta) in &request.textures_delta.set {
-            let bytes = match &delta.image {
+            let (bytes, width, height) = match &delta.image {
                 egui::ImageData::Color(image) => {
-                    bytemuck::cast_slice::<_, u8>(&image.pixels).to_vec()
+                    let bytes =
+                        bytemuck::cast_slice::<_, u8>(&image.pixels).to_vec();
+                    (bytes, image.width() as u32, image.height() as u32)
                 }
-                egui::ImageData::Font(image) => image
-                    .srgba_pixels(None)
-                    .flat_map(|pixel| pixel.to_array())
-                    .collect(),
+                egui::ImageData::Font(image) => {
+                    let bytes = image
+                        .srgba_pixels(None)
+                        .flat_map(|pixel| pixel.to_array())
+                        .collect();
+                    (bytes, image.width() as u32, image.height() as u32)
+                }
             };
             let offset = if let Some([x, y]) = delta.pos {
                 vk::Offset3D { x: x as i32, y: y as i32, z: 0 }
             } else {
-                self.textures.push(create_texture(
-                    device,
-                    *id,
-                    vk::Extent3D {
-                        width: delta.image.width() as u32,
-                        height: delta.image.height() as u32,
-                        depth: 1,
-                    },
-                )?);
+                let extent = vk::Extent3D { width, height, depth: 1 };
+                self.textures.push(create_texture(device, *id, extent)?);
                 vk::Offset3D::default()
+            };
+            let extent = vk::Extent3D {
+                width: width as u32,
+                height: height as u32,
+                depth: 1,
             };
             update.texture_updates.push(TextureUpdate {
                 bytes: bytes.into_boxed_slice(),
                 index: self.texture_index(*id),
+                extent,
                 offset,
             });
         }
@@ -346,6 +350,7 @@ struct TextureUpdate {
     index: usize,
     bytes: Box<[u8]>,
     offset: vk::Offset3D,
+    extent: vk::Extent3D,
 }
 
 #[derive(Default, Debug)]
@@ -371,10 +376,11 @@ pub(super) fn image_writes<'a>(
     gui: &'a Gui,
     update: &'a GuiUpdate,
 ) -> impl Iterator<Item = ImageWrite<'a>> {
-    update.texture_updates.iter().map(|update| ImageWrite {
-        mips: slice::from_ref(&update.bytes),
-        offset: update.offset,
-        image: &gui.textures[update.index].image,
+    update.texture_updates.iter().map(|update| {
+        let TextureUpdate { bytes, extent, offset, index } = update;
+        let mips = slice::from_ref(bytes);
+        let image = &gui.textures[*index].image;
+        ImageWrite { mips, image, extent: *extent, offset: *offset }
     })
 }
 
@@ -394,17 +400,16 @@ pub(super) fn create_descriptor(
     gui: &Gui,
     constants: &Constants,
     data: &mut DescriptorData,
-) -> Result<Descriptor> {
+) -> Descriptor {
     let textures = gui
         .textures
         .iter()
         .map(|texture| texture.image.view(&ImageViewRequest::BASE));
-    let set = DescriptorBuilder::new(device, &gui.descriptor_layout, data)
+    DescriptorBuilder::new(device, &gui.descriptor_layout, data)
         .uniform_buffer(&constants.buffer)
         .storage_buffer(&gui.vertices)
         .combined_image_samplers(&gui.sampler, textures)
-        .set();
-    Ok(set)
+        .set()
 }
 
 pub(super) fn render(
