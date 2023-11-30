@@ -1,4 +1,4 @@
-use std::{mem, ops};
+use std::mem;
 
 use ash::vk::{self};
 use asset::BoundingSphere;
@@ -22,23 +22,40 @@ pub(super) struct Scene {
     pub meshes: Buffer,
     pub instances: Buffer,
     pub draws: Buffer,
+    pub draw_commands: Buffer,
+    pub draw_count: Buffer,
     pub textures: Vec<Image>,
     pub texture_sampler: Sampler,
     pub memory: Memory,
     pub node_tree: NodeTree,
-    pub draw_count: u32,
+    pub total_draw_count: u32,
 }
 
 impl Scene {
     pub fn new(device: &Device, scene: &asset::Scene) -> Result<Self> {
         let node_tree = NodeTree::from_instances(scene);
-        let draw_commands = node_tree.draws(&scene);
-        let draw_count = draw_commands.len() as u32;
+        let tree_draws = node_tree.draws(&scene);
+        let total_draw_count = tree_draws.len() as u32;
 
         let draws = Buffer::new(
             device,
             &BufferRequest {
-                size: mem::size_of_val(draw_commands.as_slice()) as u64,
+                size: mem::size_of_val(tree_draws.as_slice()) as u64,
+                kind: BufferKind::Indirect,
+            },
+        )?;
+        let draw_commands = Buffer::new(
+            device,
+            &BufferRequest {
+                size: mem::size_of::<DrawCommand>() as u64
+                    * total_draw_count as u64,
+                kind: BufferKind::Indirect,
+            },
+        )?;
+        let draw_count = Buffer::new(
+            device,
+            &BufferRequest {
+                size: mem::size_of::<u32>() as u64,
                 kind: BufferKind::Indirect,
             },
         )?;
@@ -128,6 +145,8 @@ impl Scene {
         let memory = allocator
             .alloc_buffer(&instances)
             .alloc_buffer(&draws)
+            .alloc_buffer(&draw_commands)
+            .alloc_buffer(&draw_count)
             .alloc_buffer(&indices)
             .alloc_buffer(&vertices)
             .alloc_buffer(&meshlets)
@@ -184,7 +203,7 @@ impl Scene {
             },
             BufferWrite {
                 buffer: &draws,
-                data: bytemuck::cast_slice(&draw_commands),
+                data: bytemuck::cast_slice(&tree_draws),
             },
         ];
 
@@ -221,6 +240,7 @@ impl Scene {
                 filter: vk::Filter::LINEAR,
                 max_anisotropy: Some(device.limits.max_sampler_anisotropy),
                 address_mode: vk::SamplerAddressMode::REPEAT,
+                ..Default::default()
             },
         )?;
 
@@ -237,13 +257,17 @@ impl Scene {
             node_tree,
             instances,
             draws,
+            draw_commands,
             draw_count,
+            total_draw_count,
         })
     }
 
     pub fn destroy(&self, device: &Device) {
         self.instances.destroy(device);
         self.draws.destroy(device);
+        self.draw_commands.destroy(device);
+        self.draw_count.destroy(device);
         self.indices.destroy(device);
         self.vertices.destroy(device);
         self.meshlets.destroy(device);
@@ -273,6 +297,16 @@ struct Instance {
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Draw {
+    center: Vec3,
+    radius: f32,
+    mesh_index: u32,
+    instance_index: u32,
+    visible: u32,
+}
+
+#[repr(C)]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct DrawCommand {
     command: vk::DrawIndexedIndirectCommand,
     center: Vec3,
     radius: f32,
@@ -367,17 +401,10 @@ fn model_draws<'a>(
     scene: &'a asset::Scene,
     instance_index: u32,
 ) -> impl Iterator<Item = Draw> + 'a {
-    model.mesh_indices.iter().map(move |mesh_index| {
-        let mesh = &scene.meshes[*mesh_index as usize];
-        let command = vk::DrawIndexedIndirectCommand::builder()
-            .vertex_offset(mesh.vertex_offset as i32)
-            .first_instance(instance_index)
-            .first_index(mesh.lods[0].index_offset)
-            .index_count(mesh.lods[0].index_count)
-            .instance_count(1)
-            .build();
+    model.mesh_indices.iter().copied().map(move |mesh_index| {
+        let mesh = &scene.meshes[mesh_index as usize];
         let BoundingSphere { center, radius } = mesh.bounding_sphere;
-        Draw { center, radius, command }
+        Draw { center, radius, mesh_index, instance_index, visible: 1 }
     })
 }
 

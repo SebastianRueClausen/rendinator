@@ -1,7 +1,7 @@
 use ash::vk::{self};
 use camera::Camera;
 pub use camera::CameraMove;
-use command::ImageBarrier;
+use command::{ImageBarrier, MipLevels};
 use constants::Constants;
 use descriptor::{Descriptor, DescriptorBuffer, DescriptorData};
 use device::Device;
@@ -126,6 +126,19 @@ impl Renderer {
                 &self.scene,
                 &mut descriptor_data,
             ),
+            depth_reduce: mesh::create_depth_reduce_descriptors(
+                &self.device,
+                &self.mesh_phase,
+                &self.render_targets,
+                &mut descriptor_data,
+            ),
+            cull: mesh::create_cull_descriptor(
+                &self.device,
+                &self.mesh_phase,
+                &self.constants,
+                &self.scene,
+                &mut descriptor_data,
+            ),
         };
         let descriptor_buffer =
             DescriptorBuffer::new(&self.device, &descriptor_data)?;
@@ -195,36 +208,6 @@ impl Renderer {
                     &image_writes,
                 )?;
 
-                let swapchain_access = Access {
-                    stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                    access: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                };
-                let depth_access = Access {
-                    stage: vk::PipelineStageFlags2::EARLY_FRAGMENT_TESTS,
-                    access: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE
-                        | vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_READ,
-                };
-
-                command_buffer.pipeline_barriers(
-                    &self.device,
-                    &[
-                        ImageBarrier {
-                            image: swapchain_image,
-                            new_layout:
-                                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                            src: Access::NONE,
-                            dst: swapchain_access,
-                        },
-                        ImageBarrier {
-                            image: &self.render_targets.depth,
-                            new_layout:
-                                vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-                            src: Access::NONE,
-                            dst: depth_access,
-                        },
-                    ],
-                );
-
                 command_buffer
                     .bind_descriptor_buffer(&self.device, &descriptor_buffer);
 
@@ -266,9 +249,11 @@ impl Renderer {
                     &[ImageBarrier {
                         image: swapchain_image,
                         new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
+                        mip_levels: MipLevels::All,
                         src: Access::ALL,
                         dst: Access::NONE,
                     }],
+                    &[],
                 );
 
                 Ok([buffer_scratch, image_scratch])
@@ -340,4 +325,6 @@ struct Descriptors {
     #[cfg(feature = "gui")]
     gui: Descriptor,
     mesh_phase: Descriptor,
+    depth_reduce: Vec<Descriptor>,
+    cull: Descriptor,
 }

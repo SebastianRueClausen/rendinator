@@ -21,8 +21,8 @@ layout (binding = 3) buffer Instances {
     Instance instances[];
 };
 
-layout (binding = 4) buffer Draws {
-    Draw draws[];
+layout (binding = 4) buffer DrawCommands {
+    DrawCommand draw_commands[];
 };
 
 layout (binding = 5) buffer Materials {
@@ -41,7 +41,7 @@ layout (location = 5) out flat uint material;
 void main() {
     Vertex vertex = vertices[gl_VertexIndex];
     Instance instance = instances[gl_InstanceIndex];
-    Draw draw = draws[gl_DrawIDARB];
+    DrawCommand draw = draw_commands[gl_DrawIDARB];
 
     BoundingSphere bounding_sphere;
     bounding_sphere.center = vec3(draw.x, draw.y, draw.z);

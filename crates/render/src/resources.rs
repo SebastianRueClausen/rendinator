@@ -231,10 +231,11 @@ impl Image {
         })
     }
 
-    pub fn spanning_offsets(&self) -> [vk::Offset3D; 2] {
+    pub fn spanning_offsets(&self, mip_level: u32) -> [vk::Offset3D; 2] {
+        let extent = mip_level_extent(self.extent, mip_level);
         let max = vk::Offset3D {
-            x: self.extent.width as i32,
-            y: self.extent.height as i32,
+            x: extent.width as i32,
+            y: extent.height as i32,
             z: 1,
         };
         [vk::Offset3D::default(), max]
@@ -679,10 +680,12 @@ impl<'a> Allocator<'a> {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct SamplerRequest {
     pub filter: vk::Filter,
     pub max_anisotropy: Option<f32>,
     pub address_mode: vk::SamplerAddressMode,
+    pub reduction_mode: Option<vk::SamplerReductionMode>,
 }
 
 pub(crate) struct Sampler {
@@ -699,7 +702,7 @@ impl Deref for Sampler {
 
 impl Sampler {
     pub fn new(device: &Device, request: &SamplerRequest) -> Result<Self> {
-        let create_info = vk::SamplerCreateInfo::builder()
+        let mut create_info = vk::SamplerCreateInfo::builder()
             .mag_filter(request.filter)
             .min_filter(request.filter)
             .address_mode_u(request.address_mode)
@@ -715,6 +718,11 @@ impl Sampler {
             .mip_lod_bias(0.0)
             .min_lod(0.0)
             .max_lod(vk::LOD_CLAMP_NONE);
+        let mut reduction_info = vk::SamplerReductionModeCreateInfo::default();
+        if let Some(reduction_mode) = request.reduction_mode {
+            reduction_info.reduction_mode = reduction_mode;
+            create_info = create_info.push_next(&mut reduction_info);
+        }
         let sampler = unsafe {
             device
                 .create_sampler(&create_info, None)

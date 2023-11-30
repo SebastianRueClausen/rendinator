@@ -165,6 +165,7 @@ impl<'a> CommandBuffer<'a> {
             .filter_map(|image| {
                 (self.image_layout(image) != layout.layout).then(|| {
                     ImageBarrier {
+                        mip_levels: MipLevels::All,
                         image,
                         new_layout: layout.layout,
                         src: layout.src,
@@ -173,7 +174,7 @@ impl<'a> CommandBuffer<'a> {
                 })
             })
             .collect();
-        self.pipeline_barriers(device, &barriers);
+        self.pipeline_barriers(device, &barriers, &[]);
         self
     }
 
@@ -181,6 +182,7 @@ impl<'a> CommandBuffer<'a> {
         &mut self,
         device: &Device,
         image_barriers: &[ImageBarrier<'a>],
+        buffer_barriers: &[BufferBarrier],
     ) -> &mut Self {
         let image_barriers: Vec<_> = image_barriers
             .iter()
@@ -191,11 +193,15 @@ impl<'a> CommandBuffer<'a> {
                     .copied()
                     .unwrap_or(barrier.image.layout());
                 self.image_layouts.insert(barrier.image, barrier.new_layout);
+                let (base_mip, mip_count) = match barrier.mip_levels {
+                    MipLevels::All => (0, barrier.image.mip_level_count),
+                    MipLevels::Levels { base, count } => (base, count),
+                };
                 let subresource_range = vk::ImageSubresourceRange::builder()
                     .aspect_mask(barrier.image.aspect)
-                    .base_mip_level(0)
+                    .base_mip_level(base_mip)
+                    .level_count(mip_count)
                     .base_array_layer(0)
-                    .level_count(barrier.image.mip_level_count)
                     .layer_count(1)
                     .build();
                 vk::ImageMemoryBarrier2::builder()
@@ -210,10 +216,37 @@ impl<'a> CommandBuffer<'a> {
                     .build()
             })
             .collect();
+        let buffer_barriers: Vec<_> = buffer_barriers
+            .iter()
+            .map(|barrier| {
+                vk::BufferMemoryBarrier2::builder()
+                    .src_access_mask(barrier.src.access)
+                    .dst_access_mask(barrier.dst.access)
+                    .src_stage_mask(barrier.src.stage)
+                    .dst_stage_mask(barrier.dst.stage)
+                    .buffer(**barrier.buffer)
+                    .offset(0)
+                    .size(vk::WHOLE_SIZE)
+                    .build()
+            })
+            .collect();
         let dependency_info = vk::DependencyInfo::builder()
-            .image_memory_barriers(&image_barriers);
+            .image_memory_barriers(&image_barriers)
+            .buffer_memory_barriers(&buffer_barriers);
         unsafe {
             device.cmd_pipeline_barrier2(self.buffer, &dependency_info);
+        }
+        self
+    }
+
+    pub fn fill_buffer(
+        &mut self,
+        device: &Device,
+        buffer: &Buffer,
+        value: u32,
+    ) -> &mut Self {
+        unsafe {
+            device.cmd_fill_buffer(**self, **buffer, 0, buffer.size, value);
         }
         self
     }
@@ -277,6 +310,30 @@ impl<'a> CommandBuffer<'a> {
         unsafe {
             device.cmd_draw_indexed_indirect(
                 **self, **buffer, offset, count, stride,
+            )
+        }
+        self
+    }
+
+    pub fn draw_indexed_indirect_count(
+        &mut self,
+        device: &Device,
+        buffer: &Buffer,
+        count_buffer: &Buffer,
+        max_count: u32,
+        stride: u32,
+        offset: u64,
+    ) -> &mut Self {
+        unsafe {
+            let count_offset = 0;
+            device.cmd_draw_indexed_indirect_count(
+                **self,
+                **buffer,
+                offset,
+                **count_buffer,
+                count_offset,
+                max_count,
+                stride,
             )
         }
         self
@@ -441,9 +498,26 @@ pub(crate) struct DrawIndexed {
     pub vertex_offset: i32,
 }
 
+#[derive(Default)]
+pub(crate) enum MipLevels {
+    #[default]
+    All,
+    Levels {
+        base: u32,
+        count: u32,
+    },
+}
+
 pub(crate) struct ImageBarrier<'a> {
     pub image: &'a Image,
     pub new_layout: vk::ImageLayout,
+    pub mip_levels: MipLevels,
+    pub src: Access,
+    pub dst: Access,
+}
+
+pub(crate) struct BufferBarrier<'a> {
+    pub buffer: &'a Buffer,
     pub src: Access,
     pub dst: Access,
 }
@@ -460,10 +534,48 @@ pub(crate) struct Access {
     pub access: vk::AccessFlags2,
 }
 
+impl std::ops::BitOr for Access {
+    type Output = Self;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        Self { stage: self.stage | rhs.stage, access: self.access | rhs.access }
+    }
+}
+
 impl Access {
     pub const TRANSFER_DST: Self = Self {
         stage: vk::PipelineStageFlags2::TRANSFER,
         access: vk::AccessFlags2::TRANSFER_WRITE,
+    };
+
+    pub const COMPUTE_WRITE: Self = Self {
+        stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        access: vk::AccessFlags2::SHADER_STORAGE_WRITE,
+    };
+
+    pub const COMPUTE_READ: Self = Self {
+        stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        access: vk::AccessFlags2::SHADER_STORAGE_READ,
+    };
+
+    pub const INDIRECT_READ: Self = Self {
+        stage: vk::PipelineStageFlags2::DRAW_INDIRECT,
+        access: vk::AccessFlags2::INDIRECT_COMMAND_READ,
+    };
+
+    pub const DEPTH_BUFFER_RENDER: Access = Access {
+        stage: vk::PipelineStageFlags2::LATE_FRAGMENT_TESTS,
+        access: vk::AccessFlags2::DEPTH_STENCIL_ATTACHMENT_WRITE,
+    };
+
+    pub const COLOR_BUFFER_RENDER: Access = Access {
+        stage: vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+        access: vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+    };
+
+    pub const DEPTH_BUFFER_READ: Access = Access {
+        stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
+        access: vk::AccessFlags2::SHADER_SAMPLED_READ,
     };
 
     pub const NONE: Self = Self {

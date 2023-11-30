@@ -10,7 +10,6 @@ use asset::{
 use eyre::{Result, WrapErr};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use gltf::Gltf;
-use image::GenericImageView;
 
 use crate::{normals, Progress, Stage};
 
@@ -603,35 +602,39 @@ fn create_texture(
     create_mips: bool,
     mut encode: impl FnMut(&mut [u8]) + Clone + Copy,
 ) -> Texture {
-    // May be incorrect in very certain situations.
-    if image.width() < 4 || image.height() < 4 {
-        image.resize_exact(4, 4, image::imageops::Nearest);
-    }
-    let (width, height) = image.dimensions();
+    let width = image.width().next_multiple_of(4);
+    let height = image.height().next_multiple_of(4);
+
     let mip_level_count = if create_mips {
-        let extent = u32::max(width, height) as f32;
+        let extent = u32::min(width, height) as f32;
         let count = extent.log2().floor() as u32;
         count.saturating_sub(2) + 1
     } else {
         1
     };
+
+    let min_width = width >> (mip_level_count - 1);
+    let min_height = width >> (mip_level_count - 1);
+    assert!(
+        min_width >= 4 && min_height >= 4,
+        "smallest mip is too small: {min_width} x {min_height}",
+    );
+
+    let filter = image::imageops::FilterType::Lanczos3;
+
     let mips = (0..mip_level_count)
         .map(|level| {
             image = if level == 0 {
-                image.resize_exact(
-                    round_to_block_extent(image.width(), 4),
-                    round_to_block_extent(image.height(), 4),
-                    image::imageops::FilterType::Lanczos3,
-                )
+                image.resize_exact(width, height, filter)
             } else {
-                image.resize_exact(
-                    round_to_block_extent(image.width() / 2, 2),
-                    round_to_block_extent(image.height() / 2, 2),
-                    image::imageops::FilterType::Lanczos3,
-                )
+                let width = (image.width() / 2).next_multiple_of(4);
+                let height = (image.height() / 2).next_multiple_of(4);
+                image.resize_exact(width, height, filter)
             };
+
             let mut mip = image.clone().into_rgba8();
             mip.pixels_mut().for_each(|pixel| encode(&mut pixel.0));
+
             compress_bytes(
                 specs.kind,
                 mip.width(),
@@ -642,12 +645,6 @@ fn create_texture(
         })
         .collect();
     Texture { kind: specs.kind, mips, width, height }
-}
-
-fn round_to_block_extent(extent: u32, block_extent: u32) -> u32 {
-    let quarter = (extent + block_extent - 1) / block_extent;
-    let rounded = quarter * block_extent;
-    u32::max(rounded, block_extent)
 }
 
 fn compress_bytes(
@@ -661,11 +658,10 @@ fn compress_bytes(
         TextureKind::Normal | TextureKind::Specular => texpresso::Format::Bc5,
     };
     let params = texpresso::Params {
-        algorithm: texpresso::Algorithm::IterativeClusterFit,
+        algorithm: texpresso::Algorithm::ClusterFit,
         ..Default::default()
     };
-    let width = width as usize;
-    let height = height as usize;
+    let (width, height) = (width as usize, height as usize);
     let size = format.compressed_size(width, height);
     let mut output = vec![0x0; size];
     format.compress(bytes, width, height, params, &mut output);

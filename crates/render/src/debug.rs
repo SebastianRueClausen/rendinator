@@ -3,7 +3,7 @@ use std::slice;
 use ash::vk;
 use eyre::Result;
 
-use crate::command::{self, Access, CommandBuffer, ImageBarrier};
+use crate::command::{self, Access, CommandBuffer, ImageBarrier, MipLevels};
 use crate::device::Device;
 use crate::resources::{Buffer, Image, Scratch};
 
@@ -48,6 +48,7 @@ pub(super) fn display_texture<'a>(
     command_buffer: &mut CommandBuffer<'a>,
     swapchain_image: &'a Image,
     image: &'a Image,
+    mip_level: u32,
 ) {
     let swapchain_layout = command_buffer.image_layout(swapchain_image);
     let image_layout = command_buffer.image_layout(image);
@@ -59,25 +60,28 @@ pub(super) fn display_texture<'a>(
                 ImageBarrier {
                     image: swapchain_image,
                     new_layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    mip_levels: MipLevels::All,
                     src: Access::ALL,
                     dst: Access::ALL,
                 },
                 ImageBarrier {
                     image,
                     new_layout: vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                    mip_levels: MipLevels::Levels { base: mip_level, count: 1 },
                     src: Access::ALL,
                     dst: Access::ALL,
                 },
             ],
+            &[],
         )
         .blit_image(
             device,
             &command::ImageBlit {
                 src: image,
                 dst: swapchain_image,
-                src_offsets: image.spanning_offsets(),
-                dst_offsets: swapchain_image.spanning_offsets(),
-                src_mip_level: 0,
+                src_offsets: image.spanning_offsets(mip_level),
+                dst_offsets: swapchain_image.spanning_offsets(0),
+                src_mip_level: mip_level,
                 dst_mip_level: 0,
                 filter: vk::Filter::LINEAR,
             },
@@ -88,15 +92,18 @@ pub(super) fn display_texture<'a>(
                 ImageBarrier {
                     image: swapchain_image,
                     new_layout: swapchain_layout,
+                    mip_levels: MipLevels::All,
                     src: Access::ALL,
                     dst: Access::ALL,
                 },
                 ImageBarrier {
                     image: image,
                     new_layout: image_layout,
+                    mip_levels: MipLevels::Levels { base: mip_level, count: 1 },
                     src: Access::ALL,
                     dst: Access::ALL,
                 },
             ],
+            &[],
         );
 }

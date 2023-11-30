@@ -78,8 +78,10 @@ fn create_pipeline_layout(
 fn create_shader_info(
     shader: &Shader,
     entry_point: &CString,
+    specialization_info: &vk::SpecializationInfo,
 ) -> vk::PipelineShaderStageCreateInfo {
     vk::PipelineShaderStageCreateInfo::builder()
+        .specialization_info(specialization_info)
         .stage(shader.stage)
         .module(**shader)
         .name(&entry_point)
@@ -101,25 +103,57 @@ impl Deref for Pipeline {
     }
 }
 
+#[derive(Default)]
+pub(crate) struct Specializations {
+    entries: Vec<vk::SpecializationMapEntry>,
+    data: Vec<u8>,
+}
+
+impl Specializations {
+    pub fn entry(mut self, data: &[u8]) -> Self {
+        let entry = vk::SpecializationMapEntry::builder()
+            .constant_id(self.entries.len() as u32)
+            .offset(self.data.len() as u32)
+            .size(data.len())
+            .build();
+        self.entries.push(entry);
+        self.data.extend_from_slice(data);
+        self
+    }
+}
+
+pub(crate) struct ShaderStage<'a> {
+    pub specializations: &'a Specializations,
+    pub shader: &'a Shader,
+}
+
 pub(crate) struct GraphicsPipelineRequest<'a> {
     pub color_formats: &'a [vk::Format],
     pub depth_format: Option<vk::Format>,
-    pub shaders: &'a [&'a Shader],
+    pub shaders: &'a [ShaderStage<'a>],
     pub cull_mode: vk::CullModeFlags,
 }
 
 impl Pipeline {
     pub fn compute(
         device: &Device,
-        shader: &Shader,
         layout: &PipelineLayout,
+        shader: ShaderStage,
     ) -> Result<Self> {
         let (pipeline_layout, push_constant_stages) =
             create_pipeline_layout(device, layout)?;
         let entry_point = CString::new("main").unwrap();
+        let specialization_info = vk::SpecializationInfo::builder()
+            .data(&shader.specializations.data)
+            .map_entries(&shader.specializations.entries)
+            .build();
         let pipeline_info = vk::ComputePipelineCreateInfo::builder()
             .flags(vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT)
-            .stage(create_shader_info(shader, &entry_point))
+            .stage(create_shader_info(
+                shader.shader,
+                &entry_point,
+                &specialization_info,
+            ))
             .layout(pipeline_layout);
         let pipeline = unsafe {
             *device
@@ -149,10 +183,23 @@ impl Pipeline {
         let (pipeline_layout, push_constant_stages) =
             create_pipeline_layout(device, layout)?;
         let entry_point = CString::new("main").unwrap();
+        let specialization_infos: Vec<_> = request
+            .shaders
+            .iter()
+            .map(|shader| {
+                vk::SpecializationInfo::builder()
+                    .data(&shader.specializations.data)
+                    .map_entries(&shader.specializations.entries)
+                    .build()
+            })
+            .collect();
         let shader_infos: Vec<_> = request
             .shaders
             .into_iter()
-            .map(|shader| create_shader_info(shader, &entry_point))
+            .zip(specialization_infos.iter())
+            .map(|(shader, specialization)| {
+                create_shader_info(shader.shader, &entry_point, specialization)
+            })
             .collect();
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .depth_attachment_format(request.depth_format.unwrap_or_default())

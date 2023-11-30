@@ -19,9 +19,11 @@ pub(crate) struct ConstantData {
     pub view: Mat4,
     pub proj_view: Mat4,
     pub camera_position: Vec4,
+    pub frustrum_planes: [Vec4; 6],
     pub sun: DirectionalLight,
     pub screen_size: UVec2,
-    pub padding: [u32; 2],
+    pub z_near: f32,
+    pub z_far: f32,
 }
 
 impl ConstantData {
@@ -32,7 +34,7 @@ impl ConstantData {
     ) -> Self {
         let sun = DirectionalLight {
             direction: Vec4::new(0.0, 1.0, 0.0, 0.0),
-            irradiance: Vec4::ONE * 4.0,
+            irradiance: Vec4::splat(6.0),
         };
         Self {
             screen_size: UVec2 {
@@ -41,9 +43,11 @@ impl ConstantData {
             },
             proj: camera.proj,
             view: camera.view,
+            frustrum_planes: camera.frustrum_planes(),
             camera_position: camera.position.extend(0.0),
             proj_view: camera.proj * camera.view,
-            padding: [0x0; 2],
+            z_near: camera.z_near,
+            z_far: camera.z_far,
             sun,
         }
     }

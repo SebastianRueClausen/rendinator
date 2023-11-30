@@ -100,7 +100,6 @@ pub struct Lod {
 unsafe impl bytemuck::NoUninit for Lod {}
 
 #[repr(C)]
-#[repr(align(16))]
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 pub struct Mesh {
     pub bounding_sphere: BoundingSphere,

@@ -9,8 +9,7 @@ use crate::command::{
 };
 use crate::constants::Constants;
 use crate::descriptor::{
-    Descriptor, DescriptorBuilder, DescriptorData, DescriptorLayout,
-    DescriptorLayoutBuilder,
+    Descriptor, DescriptorData, DescriptorLayout, DescriptorLayoutBuilder,
 };
 use crate::device::Device;
 use crate::resources::{
@@ -20,6 +19,7 @@ use crate::resources::{
 };
 use crate::shader::{
     GraphicsPipelineRequest, Pipeline, PipelineLayout, Shader, ShaderRequest,
+    ShaderStage, Specializations,
 };
 use crate::swapchain::Swapchain;
 use crate::{Descriptors, Update};
@@ -64,8 +64,8 @@ impl Gui {
             device,
             &SamplerRequest {
                 filter: vk::Filter::LINEAR,
-                max_anisotropy: None,
                 address_mode: vk::SamplerAddressMode::CLAMP_TO_EDGE,
+                ..Default::default()
             },
         )?;
         Ok(Self {
@@ -278,14 +278,24 @@ pub(super) fn create_pipeline(
             offset: 0,
         }),
     };
+    let specializations = Specializations::default();
     let pipeline = Pipeline::graphics(
         device,
         &pipeline_layout,
         &GraphicsPipelineRequest {
             color_formats: &[swapchain.format],
             depth_format: None,
-            shaders: &[&shaders[0], &shaders[1]],
             cull_mode: vk::CullModeFlags::NONE,
+            shaders: &[
+                ShaderStage {
+                    shader: &shaders[0],
+                    specializations: &specializations,
+                },
+                ShaderStage {
+                    shader: &shaders[1],
+                    specializations: &specializations,
+                },
+            ],
         },
     )?;
     for shader in shaders {
@@ -405,11 +415,11 @@ pub(super) fn create_descriptor(
         .textures
         .iter()
         .map(|texture| texture.image.view(&ImageViewRequest::BASE));
-    DescriptorBuilder::new(device, &gui.descriptor_layout, data)
+    data.builder(device, &gui.descriptor_layout)
         .uniform_buffer(&constants.buffer)
         .storage_buffer(&gui.vertices)
         .combined_image_samplers(&gui.sampler, textures)
-        .set()
+        .build()
 }
 
 pub(super) fn render(

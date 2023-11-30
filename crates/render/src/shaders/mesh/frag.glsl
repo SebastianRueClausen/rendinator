@@ -6,6 +6,7 @@
 #include "../util.glsl"
 #include "../brdf.glsl"
 #include "../constants.glsl"
+#include "../tonemap.glsl"
 
 layout (binding = 0) uniform ConstantData {
     Constants constants;
@@ -85,7 +86,7 @@ void main() {
         * light.normal_dot_light
         * constants.sun.irradiance.xyz;
 
-    vec3 ambient = shade.albedo * 0.4;
+    vec3 ambient = shade.albedo * 0.2;
 
-    result = vec4(radiance + ambient + emissive, 1.0);
+    result = vec4(pow(neutral_tonemap(radiance + ambient + emissive), vec3(1.0 / 2.2)), 1.0);
 }

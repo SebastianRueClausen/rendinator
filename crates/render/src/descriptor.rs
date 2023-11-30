@@ -320,7 +320,7 @@ impl<'a> DescriptorBuilder<'a> {
         self.combined_image_samplers(sampler, [view])
     }
 
-    pub fn set(&mut self) -> Descriptor {
+    pub fn build(&mut self) -> Descriptor {
         Descriptor { buffer_offset: self.data_start as u64 }
     }
 }
@@ -337,6 +337,14 @@ impl DescriptorData {
             .descriptor_buffer_properties
             .descriptor_buffer_offset_alignment;
         Self { data: Vec::default(), alignment: alignment as usize }
+    }
+
+    pub fn builder<'a>(
+        &'a mut self,
+        device: &'a Device,
+        layout: &'a DescriptorLayout,
+    ) -> DescriptorBuilder<'a> {
+        DescriptorBuilder::new(device, layout, self)
     }
 
     /// Reserve space for layout.

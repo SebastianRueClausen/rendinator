@@ -87,7 +87,8 @@ struct Lod {
 };
 
 struct Mesh {
-    BoundingSphere bounding_sphere;
+    float x, y, z;
+    float radius;
     uint vertex_offset;
     uint vertex_count;
     uint material;
@@ -114,6 +115,14 @@ struct Instance {
 };
 
 struct Draw {
+    float x, y, z;
+    float radius;
+    uint mesh_index;
+    uint instance_index;
+    uint visible;
+};
+
+struct DrawCommand {
     DrawIndexedIndirectCommand command;
     float x, y, z;
     float radius;
