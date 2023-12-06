@@ -7,7 +7,7 @@ use eyre::{Context, Result};
 use crate::device::Device;
 use crate::resources::{
     buffer_memory, Buffer, BufferKind, BufferRequest, BufferWrite, ImageView,
-    Memory, Sampler,
+    Memory, Sampler, Tlas,
 };
 use crate::{command, resources};
 
@@ -297,6 +297,21 @@ impl<'a> DescriptorBuilder<'a> {
             let start = offset + size * index;
             self.write_descriptor(start, size, &descriptor_info);
         }
+        self
+    }
+
+    pub fn tlas(&mut self, tlas: &Tlas) -> &mut Self {
+        let descriptor_info = vk::DescriptorGetInfoEXT::builder()
+            .ty(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .data(vk::DescriptorDataEXT {
+                acceleration_structure: tlas.device_address(self.device),
+            });
+        let size = self
+            .device
+            .descriptor_buffer_properties
+            .acceleration_structure_descriptor_size;
+        let offset = self.next_binding();
+        self.write_descriptor(offset, size, &descriptor_info);
         self
     }
 

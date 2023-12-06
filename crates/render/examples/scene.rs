@@ -329,6 +329,8 @@ fn transform_edit(ui: &mut egui::Ui, transform: Mat4) -> Mat4 {
     let (mut scale, mut rotation, mut translation) =
         transform.to_scale_rotation_translation();
     egui::Grid::new("transform").show(ui, |ui| {
+        // FIXME: record the input difference and encode it to
+        // a quaternion and multiply it onto the current rotation.
         ui.label("rotation");
         let euler = glam::EulerRot::XYZ;
         let (mut x, mut y, mut z) = rotation.to_euler(euler);
@@ -351,7 +353,7 @@ fn transform_edit(ui: &mut egui::Ui, transform: Mat4) -> Mat4 {
         ui.add(egui::DragValue::new(&mut scale.z));
         scale = Vec3::from_array(scale.to_array().map(|a| {
             if a == 0.0 {
-                a + f32::EPSILON
+                f32::EPSILON
             } else {
                 a
             }

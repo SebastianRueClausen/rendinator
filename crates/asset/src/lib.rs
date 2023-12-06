@@ -161,7 +161,7 @@ unsafe impl bytemuck::NoUninit for Material {}
 #[repr(C)]
 #[derive(Debug, Default, Clone, Copy, Serialize, Deserialize)]
 pub struct Position {
-    encoded: [i16; 3],
+    pub encoded: [i16; 3],
 }
 
 impl Position {

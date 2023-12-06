@@ -42,8 +42,8 @@ impl Instance {
         let extension_names = [
             ext::DebugUtils::name().as_ptr(),
             khr::Surface::name().as_ptr(),
-            #[cfg(target_os = "linux")]
-            khr::WaylandSurface::name().as_ptr(),
+            // #[cfg(target_os = "linux")]
+            // khr::WaylandSurface::name().as_ptr(),
             #[cfg(target_os = "linux")]
             khr::XlibSurface::name().as_ptr(),
             #[cfg(target_os = "linux")]

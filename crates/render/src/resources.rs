@@ -1,11 +1,12 @@
 use std::cell::Cell;
-use std::hash;
 use std::ops::{self, Deref};
+use std::{array, hash, mem, slice};
 
 use ash::vk;
 use eyre::{Context, Result};
+use glam::Mat4;
 
-use crate::command::CommandBuffer;
+use crate::command::{self, Access, BufferBarrier, CommandBuffer};
 use crate::device::Device;
 
 #[derive(Debug, Clone, Copy)]
@@ -16,6 +17,8 @@ pub(crate) enum BufferKind {
     Scratch,
     Descriptor,
     Indirect,
+    AccStructStorage,
+    AccStructInput,
 }
 
 impl BufferKind {
@@ -33,11 +36,20 @@ impl BufferKind {
             BufferKind::Index => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::INDEX_BUFFER
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
             }
             BufferKind::Scratch => vk::BufferUsageFlags::empty(),
             BufferKind::Indirect => {
                 vk::BufferUsageFlags::STORAGE_BUFFER
                     | vk::BufferUsageFlags::INDIRECT_BUFFER
+            }
+            BufferKind::AccStructStorage => {
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+            }
+            BufferKind::AccStructInput => {
+                vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
             }
         };
         specific_flags | base_flags
@@ -346,6 +358,7 @@ impl Memory {
             .allocation_size(size)
             .memory_type_index(memory_type_index)
             .push_next(&mut allocate_flags_info);
+        assert!(size > 0, "trying to allocate 0 bytes");
         let memory = unsafe {
             device
                 .allocate_memory(&allocation_info, None)
@@ -377,7 +390,7 @@ impl Memory {
 #[derive(Debug)]
 pub(crate) struct BufferRange<'a> {
     pub buffer: &'a Buffer,
-    pub offset: u64,
+    pub offset: vk::DeviceSize,
 }
 
 pub(crate) fn bind_buffer_memory(
@@ -662,13 +675,24 @@ impl<'a> Allocator<'a> {
         self
     }
 
+    pub fn alloc_blas(&mut self, blas: &'a Blas) -> &mut Self {
+        self.alloc_buffer(&blas.buffer)
+    }
+
+    pub fn alloc_tlas(&mut self, tlas: &'a Tlas) -> &mut Self {
+        self.alloc_buffer(&tlas.buffer)
+            .alloc_buffer(&tlas.instances)
+            .alloc_buffer(&tlas.scratch)
+    }
+
     pub fn finish(
         &mut self,
         memory_flags: vk::MemoryPropertyFlags,
     ) -> Result<Memory> {
+        let size = self.offset.max(4);
         let memory = Memory::allocate(
             self.device,
-            self.offset,
+            size,
             memory_flags,
             self.memory_type_bits,
         )?;
@@ -736,4 +760,516 @@ impl Sampler {
             device.destroy_sampler(self.sampler, None);
         }
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct BlasRequest {
+    pub vertex_format: vk::Format,
+    pub vertex_stride: u64,
+    pub triangle_count: u32,
+    pub vertex_count: u32,
+    pub first_vertex: u32,
+}
+
+impl BlasRequest {
+    fn geometry(&self) -> vk::AccelerationStructureGeometryKHR {
+        let geometry_data = vk::AccelerationStructureGeometryDataKHR {
+            triangles:
+                vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
+                    .vertex_stride(self.vertex_stride)
+                    .vertex_format(self.vertex_format)
+                    .max_vertex(self.first_vertex + self.vertex_count - 1)
+                    .index_type(vk::IndexType::UINT32)
+                    .build(),
+        };
+        vk::AccelerationStructureGeometryKHR::builder()
+            .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+            .geometry(geometry_data)
+            .build()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct Blas {
+    acceleration_structure: vk::AccelerationStructureKHR,
+    build_scratch_size: vk::DeviceSize,
+    request: BlasRequest,
+    buffer: Buffer,
+}
+
+impl Blas {
+    pub fn new(device: &Device, request: &BlasRequest) -> Result<Self> {
+        let geometry = request.geometry();
+        let build_info =
+            vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                .flags(
+                    vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
+                )
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(slice::from_ref(&geometry))
+                .build();
+        let sizes = unsafe {
+            device.acc_struct_loader.get_acceleration_structure_build_sizes(
+                vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                &build_info,
+                &[request.triangle_count - 1],
+            )
+        };
+        let buffer = Buffer::new(
+            device,
+            &BufferRequest {
+                size: sizes.acceleration_structure_size,
+                kind: BufferKind::AccStructStorage,
+            },
+        )?;
+        let as_info = vk::AccelerationStructureCreateInfoKHR::builder()
+            .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+            .size(sizes.acceleration_structure_size)
+            .buffer(*buffer)
+            .offset(0);
+        let acceleration_structure = unsafe {
+            device
+                .acc_struct_loader
+                .create_acceleration_structure(&as_info, None)
+                .wrap_err("failed to create blas")?
+        };
+        Ok(Self {
+            build_scratch_size: sizes.build_scratch_size,
+            acceleration_structure,
+            request: *request,
+            buffer,
+        })
+    }
+
+    pub fn destroy(&self, device: &Device) {
+        self.buffer.destroy(device);
+        unsafe {
+            device.acc_struct_loader.destroy_acceleration_structure(
+                self.acceleration_structure,
+                None,
+            );
+        }
+    }
+
+    pub fn device_address(&self, device: &Device) -> vk::DeviceAddress {
+        acceleration_structure_device_address(
+            device,
+            self.acceleration_structure,
+        )
+    }
+}
+
+pub(crate) struct BlasBuild<'a> {
+    pub blas: &'a Blas,
+    pub vertices: BufferRange<'a>,
+    pub indices: BufferRange<'a>,
+    pub transform: Mat4,
+}
+
+pub(crate) fn build_blases<'a>(
+    device: &Device,
+    builds: &[BlasBuild<'a>],
+) -> Result<()> {
+    let mesh_transforms: Vec<_> = builds
+        .iter()
+        .map(|mesh| acceleration_structure_transform(mesh.transform))
+        .collect();
+
+    let transform_data = Buffer::new(
+        device,
+        &BufferRequest {
+            kind: BufferKind::AccStructInput,
+            size: mem::size_of_val(mesh_transforms.as_slice())
+                as vk::DeviceSize,
+        },
+    )?;
+
+    let scratch_buffers: Vec<_> = builds
+        .iter()
+        .map(|build| {
+            Buffer::new(
+                device,
+                &BufferRequest {
+                    kind: BufferKind::Storage,
+                    size: build.blas.build_scratch_size,
+                },
+            )
+        })
+        .collect::<Result<_>>()?;
+
+    let mut allocator = Allocator::new(device);
+    allocator.alloc_buffer(&transform_data);
+
+    for buffer in &scratch_buffers {
+        allocator.alloc_buffer(buffer);
+    }
+
+    let scratch_memory =
+        allocator.finish(vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+
+    let transform_data_address = transform_data.device_address(device);
+
+    let geometries: Vec<_> = builds
+        .into_iter()
+        .map(|build| {
+            let request = &build.blas.request;
+            let geometry_data = vk::AccelerationStructureGeometryDataKHR {
+                triangles:
+                    vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
+                        .vertex_stride(request.vertex_stride)
+                        .vertex_format(request.vertex_format)
+                        .transform_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: transform_data_address,
+                        })
+                        .index_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: build
+                                .indices
+                                .buffer
+                                .device_address(device),
+                        })
+                        .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                            device_address: build
+                                .vertices
+                                .buffer
+                                .device_address(device)
+                                + build.vertices.offset,
+                        })
+                        .max_vertex(
+                            request.first_vertex + request.vertex_count - 1,
+                        )
+                        .index_type(vk::IndexType::UINT32)
+                        .build(),
+            };
+            vk::AccelerationStructureGeometryKHR::builder()
+                .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
+                .geometry(geometry_data)
+                .build()
+        })
+        .collect();
+
+    let build_infos: Vec<_> = builds
+        .iter()
+        .zip(geometries.iter())
+        .zip(scratch_buffers.iter())
+        .map(|((build, geometry), scratch_buffer)| {
+            vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .dst_acceleration_structure(build.blas.acceleration_structure)
+                .ty(vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL)
+                .flags(
+                    vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE,
+                )
+                .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+                .geometries(slice::from_ref(geometry))
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: scratch_buffer.device_address(device),
+                })
+                .build()
+        })
+        .collect();
+
+    let range_infos: Vec<_> = builds
+        .iter()
+        .map(|build| {
+            vk::AccelerationStructureBuildRangeInfoKHR::builder()
+                .primitive_count(build.blas.request.triangle_count)
+                .first_vertex(build.blas.request.first_vertex)
+                .primitive_offset(build.indices.offset as u32)
+                .build()
+        })
+        .collect();
+
+    let range_infos_refs: Vec<_> =
+        range_infos.iter().map(|range| slice::from_ref(range)).collect();
+
+    command::quickie(device, |command_buffer| unsafe {
+        let transform_upload_scratch = upload_buffer_data(
+            device,
+            command_buffer,
+            &[BufferWrite {
+                buffer: &transform_data,
+                data: bytemuck::cast_slice(&mesh_transforms),
+            }],
+        )?;
+
+        if build_infos.is_empty() {
+            return Ok(transform_upload_scratch);
+        }
+
+        command_buffer.pipeline_barriers(
+            device,
+            &[],
+            &[BufferBarrier {
+                buffer: &transform_data,
+                src: Access::ALL,
+                dst: Access::ALL,
+            }],
+        );
+
+        device.acc_struct_loader.cmd_build_acceleration_structures(
+            **command_buffer,
+            &build_infos,
+            &range_infos_refs,
+        );
+
+        Ok(transform_upload_scratch)
+    })?
+    .destroy(device);
+
+    transform_data.destroy(device);
+    for buffer in &scratch_buffers {
+        buffer.destroy(device);
+    }
+
+    scratch_memory.free(device);
+
+    Ok(())
+}
+
+pub(crate) struct Tlas {
+    pub acceleration_structure: vk::AccelerationStructureKHR,
+    pub buffer: Buffer,
+    pub scratch: Buffer,
+    pub instances: Buffer,
+}
+
+impl Tlas {
+    pub fn new(device: &Device, instance_count: u32) -> Result<Self> {
+        let modes = [
+            vk::BuildAccelerationStructureModeKHR::BUILD,
+            vk::BuildAccelerationStructureModeKHR::UPDATE,
+        ];
+
+        let [build_size, update_size] = modes.map(|mode| {
+            let geometry_data = vk::AccelerationStructureGeometryDataKHR {
+                instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
+                    .build(),
+            };
+            let geometry = vk::AccelerationStructureGeometryKHR::builder()
+                .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                .flags(vk::GeometryFlagsKHR::OPAQUE)
+                .geometry(geometry_data)
+                .build();
+            let build_info =
+                vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                    .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                    .geometries(slice::from_ref(&geometry))
+                    .flags(
+                        vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE
+                    )
+                    .mode(mode)
+                    .build();
+            unsafe {
+                device.acc_struct_loader.get_acceleration_structure_build_sizes(
+                    vk::AccelerationStructureBuildTypeKHR::DEVICE,
+                    &build_info,
+                    slice::from_ref(&instance_count),
+                )
+            }
+        });
+
+        let buffer = Buffer::new(
+            device,
+            &BufferRequest {
+                size: build_size.acceleration_structure_size,
+                kind: BufferKind::AccStructStorage,
+            },
+        )?;
+
+        let scratch = Buffer::new(
+            device,
+            &BufferRequest {
+                size: build_size
+                    .build_scratch_size
+                    .max(update_size.update_scratch_size),
+                kind: BufferKind::Storage,
+            },
+        )?;
+
+        let instances = Buffer::new(
+            device,
+            &BufferRequest {
+                size: mem::size_of::<TlasInstanceData>() as u64
+                    * instance_count as u64,
+                kind: BufferKind::AccStructInput,
+            },
+        )?;
+
+        let as_info = vk::AccelerationStructureCreateInfoKHR::builder()
+            .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+            .buffer(*buffer)
+            .size(buffer.size)
+            .offset(0);
+        let acceleration_structure = unsafe {
+            device
+                .acc_struct_loader
+                .create_acceleration_structure(&as_info, None)
+                .wrap_err("failed to create tlas")?
+        };
+
+        Ok(Self { acceleration_structure, buffer, scratch, instances })
+    }
+
+    pub fn update(
+        &self,
+        device: &Device,
+        mode: vk::BuildAccelerationStructureModeKHR,
+        instances: &[TlasInstance],
+    ) -> TlasUpdate {
+        let instances = instances
+            .iter()
+            .map(|instance| {
+                let blas_address = instance.blas.device_address(device);
+                let flags = vk::GeometryInstanceFlagsKHR::FORCE_OPAQUE |
+                    vk::GeometryInstanceFlagsKHR::TRIANGLE_FACING_CULL_DISABLE;
+                TlasInstanceData {
+                    transform: acceleration_structure_transform(
+                        instance.transform,
+                    ),
+                    blas_address,
+                    flags: flags.as_raw() as u8,
+                    mask: 0xff,
+                    binding_table_offset: [0x0; 3],
+                    index: [0x0; 3],
+                }
+            })
+            .collect();
+        TlasUpdate { instances, mode }
+    }
+
+    pub fn device_address(&self, device: &Device) -> vk::DeviceAddress {
+        acceleration_structure_device_address(
+            device,
+            self.acceleration_structure,
+        )
+    }
+
+    pub fn destroy(&self, device: &Device) {
+        self.buffer.destroy(device);
+        self.instances.destroy(device);
+        self.scratch.destroy(device);
+        unsafe {
+            device.acc_struct_loader.destroy_acceleration_structure(
+                self.acceleration_structure,
+                None,
+            );
+        }
+    }
+}
+
+pub(crate) struct TlasInstance<'a> {
+    pub blas: &'a Blas,
+    pub transform: Mat4,
+}
+
+pub(crate) struct TlasUpdate {
+    instances: Vec<TlasInstanceData>,
+    mode: vk::BuildAccelerationStructureModeKHR,
+}
+
+impl TlasUpdate {
+    pub fn update(
+        &self,
+        device: &Device,
+        command_buffer: &mut CommandBuffer,
+        tlas: &Tlas,
+    ) {
+        let geometry = &tlas_geometry_info(device, &tlas.instances);
+        let build_info =
+            vk::AccelerationStructureBuildGeometryInfoKHR::builder()
+                .dst_acceleration_structure(tlas.acceleration_structure)
+                .src_acceleration_structure(tlas.acceleration_structure)
+                .ty(vk::AccelerationStructureTypeKHR::TOP_LEVEL)
+                .flags(vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE)
+                .mode(self.mode)
+                .flags(
+                    vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE
+                        | vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE,
+                )
+                .geometries(slice::from_ref(geometry))
+                .scratch_data(vk::DeviceOrHostAddressKHR {
+                    device_address: tlas.scratch.device_address(device),
+                })
+                .build();
+        let build_ranges =
+            vk::AccelerationStructureBuildRangeInfoKHR::builder()
+                .primitive_count(self.instances.len() as u32)
+                .build();
+        unsafe {
+            device.acc_struct_loader.cmd_build_acceleration_structures(
+                **command_buffer,
+                slice::from_ref(&build_info),
+                slice::from_ref(&slice::from_ref(&build_ranges)),
+            );
+        }
+    }
+
+    pub fn buffer_write<'a>(&'a self, tlas: &'a Tlas) -> BufferWrite<'a> {
+        BufferWrite {
+            data: bytemuck::cast_slice(&self.instances),
+            buffer: &tlas.instances,
+        }
+    }
+}
+
+// vk::AccelerationStructureInstanceKHR.
+#[repr(C)]
+#[derive(Clone, Copy, bytemuck::NoUninit)]
+struct TlasInstanceData {
+    transform: [f32; 12],
+    index: [u8; 3],
+    mask: u8,
+    binding_table_offset: [u8; 3],
+    flags: u8,
+    blas_address: vk::DeviceAddress,
+}
+
+fn acceleration_structure_device_address(
+    device: &Device,
+    acc_struct: vk::AccelerationStructureKHR,
+) -> vk::DeviceAddress {
+    let address_info = vk::AccelerationStructureDeviceAddressInfoKHR::builder()
+        .acceleration_structure(acc_struct)
+        .build();
+    unsafe {
+        device
+            .acc_struct_loader
+            .get_acceleration_structure_device_address(&address_info)
+    }
+}
+
+fn tlas_geometry_info(
+    device: &Device,
+    instance_buffer: &Buffer,
+) -> vk::AccelerationStructureGeometryKHR {
+    let geometry_data = vk::AccelerationStructureGeometryDataKHR {
+        instances: vk::AccelerationStructureGeometryInstancesDataKHR::builder()
+            .array_of_pointers(false)
+            .data(vk::DeviceOrHostAddressConstKHR {
+                device_address: instance_buffer.device_address(device),
+            })
+            .build(),
+    };
+    vk::AccelerationStructureGeometryKHR::builder()
+        .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+        .flags(vk::GeometryFlagsKHR::OPAQUE)
+        .geometry(geometry_data)
+        .build()
+}
+
+fn acceleration_structure_transform(transform: Mat4) -> [f32; 12] {
+    let src = transform.transpose().to_cols_array();
+    array::from_fn(|index| src[index])
+}
+
+#[test]
+fn tlas_instance_size() {
+    assert_eq!(
+        mem::size_of::<vk::AccelerationStructureInstanceKHR>(),
+        mem::size_of::<TlasInstanceData>()
+    );
+    assert_eq!(
+        mem::align_of::<vk::AccelerationStructureInstanceKHR>(),
+        mem::align_of::<TlasInstanceData>()
+    );
 }

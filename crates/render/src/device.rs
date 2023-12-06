@@ -15,6 +15,7 @@ pub(crate) struct Device {
     pub queue: vk::Queue,
     pub command_pool: vk::CommandPool,
     pub descriptor_buffer_loader: ext::DescriptorBuffer,
+    pub acc_struct_loader: khr::AccelerationStructure,
     pub descriptor_buffer_properties:
         vk::PhysicalDeviceDescriptorBufferPropertiesEXT,
     pub limits: vk::PhysicalDeviceLimits,
@@ -37,6 +38,10 @@ impl Device {
             khr::Swapchain::name().as_ptr(),
             ext::MeshShader::name().as_ptr(),
             ext::DescriptorBuffer::name().as_ptr(),
+            khr::DeferredHostOperations::name().as_ptr(),
+            khr::AccelerationStructure::name().as_ptr(),
+            khr::RayTracingPipeline::name().as_ptr(),
+            vk::KhrRayQueryFn::name().as_ptr(),
         ];
         let mut features = vk::PhysicalDeviceFeatures2::builder()
             .features({
@@ -80,6 +85,12 @@ impl Device {
                 .descriptor_buffer(true)
                 .descriptor_buffer_image_layout_ignored(true)
                 .build();
+        let mut features_acc_struct =
+            vk::PhysicalDeviceAccelerationStructureFeaturesKHR::builder()
+                .acceleration_structure(true)
+                .build();
+        let mut features_ray_query =
+            vk::PhysicalDeviceRayQueryFeaturesKHR::builder().ray_query(true);
         let device_info = vk::DeviceCreateInfo::builder()
             .queue_create_infos(slice::from_ref(&queue_info))
             .enabled_extension_names(&extensions)
@@ -88,7 +99,9 @@ impl Device {
             .push_next(&mut features_1_2)
             .push_next(&mut features_1_3)
             .push_next(&mut features_mesh)
-            .push_next(&mut features_descriptor_buffer);
+            .push_next(&mut features_descriptor_buffer)
+            .push_next(&mut features_acc_struct)
+            .push_next(&mut features_ray_query);
         let device = unsafe {
             instance.create_device(physical_device, &device_info, None)?
         };
@@ -101,6 +114,8 @@ impl Device {
         };
         let descriptor_buffer_loader =
             ext::DescriptorBuffer::new(instance, &device);
+        let acc_struct_loader =
+            khr::AccelerationStructure::new(instance, &device);
         let descriptor_buffer_properties =
             get_descriptor_buffer_properties(instance, physical_device);
         Ok(Self {
@@ -112,6 +127,7 @@ impl Device {
             queue,
             descriptor_buffer_loader,
             descriptor_buffer_properties,
+            acc_struct_loader,
             limits,
         })
     }

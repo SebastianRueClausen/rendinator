@@ -174,6 +174,8 @@ impl Renderer {
         buffer_writes.extend(scene::buffer_writes(&self.scene, &scene_update));
         buffer_writes.push(self.constants.buffer_write());
 
+        self.scene.update_tlas(&self.device)?;
+
         let (descriptors, descriptor_buffer) = self.create_descriptors()?;
 
         let (buffer, scratchs) =

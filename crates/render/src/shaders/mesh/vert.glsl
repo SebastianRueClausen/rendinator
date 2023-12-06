@@ -57,6 +57,4 @@ void main() {
     material = uint(vertex.material);
     world_position = instance.transform * vec4(position, 1.0);
     gl_Position = constants.proj_view * world_position;
-
-    // color = vec4(tangent_frame.normal * 0.5 + vec3(0.5), 1.0);
 }

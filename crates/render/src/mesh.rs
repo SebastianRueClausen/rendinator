@@ -48,6 +48,7 @@ impl MeshPhase {
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
+            .binding(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
             .array_binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 1024)
             .build(device)?;
         let depth_reduce_descriptor_layout = DescriptorLayoutBuilder::default()
@@ -297,6 +298,7 @@ pub(super) fn create_descriptor(
         .storage_buffer(&scene.instances)
         .storage_buffer(&scene.draw_commands)
         .storage_buffer(&scene.materials)
+        .tlas(&scene.tlas)
         .combined_image_samplers(&scene.texture_sampler, texture_views)
         .build()
 }

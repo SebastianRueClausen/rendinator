@@ -1,6 +1,7 @@
-#version 450
+#version 460
 #extension GL_GOOGLE_include_directive: require
 #extension GL_EXT_nonuniform_qualifier: require
+#extension GL_EXT_ray_query: enable
 
 #include "../scene.glsl"
 #include "../util.glsl"
@@ -16,7 +17,8 @@ layout (binding = 5) buffer Materials {
     Material materials[];
 };
 
-layout (binding = 6) uniform sampler2D textures[];
+layout (binding = 6) uniform accelerationStructureEXT acceleration_structure;
+layout (binding = 7) uniform sampler2D textures[];
 
 layout (location = 0) in vec4 world_position;
 layout (location = 1) in vec3 world_normal;
@@ -26,6 +28,29 @@ layout (location = 4) in vec2 texcoord;
 layout (location = 5) in flat uint material;
 
 layout (location = 0) out vec4 result;
+
+float sun_shadow() {
+    float min_dist = 1.0e-3;
+    float max_dist = 1000.0;
+    vec3 direction = normalize(constants.sun.direction.xyz);
+
+    rayQueryEXT ray_query;
+    rayQueryInitializeEXT(
+        ray_query,
+        acceleration_structure,
+        gl_RayFlagsTerminateOnFirstHitEXT | gl_RayFlagsOpaqueEXT | gl_RayFlagsSkipClosestHitShaderEXT,
+        0xff,
+        world_position.xyz,
+        min_dist,
+        direction,
+        max_dist
+    );
+    rayQueryProceedEXT(ray_query);
+
+    bool occluder_hit = (rayQueryGetIntersectionTypeEXT(ray_query, true) != gl_RayQueryCommittedIntersectionNoneEXT);
+
+    return occluder_hit ? 0.0 : 1.0;
+}
 
 void main() {
     Material material = materials[material];
@@ -84,9 +109,11 @@ void main() {
 
     vec3 radiance = (diffuse + specular)
         * light.normal_dot_light
-        * constants.sun.irradiance.xyz;
+        * constants.sun.irradiance.xyz
+        * sun_shadow();
 
     vec3 ambient = shade.albedo * 0.2;
+    vec3 final = radiance + emissive + ambient;
 
-    result = vec4(pow(neutral_tonemap(radiance + ambient + emissive), vec3(1.0 / 2.2)), 1.0);
+    result = vec4(pow(neutral_tonemap(final), vec3(1.0 / 2.2)), 1.0);
 }

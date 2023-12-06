@@ -3,14 +3,15 @@ use std::mem;
 use ash::vk::{self};
 use asset::BoundingSphere;
 use eyre::Result;
-use glam::{Mat4, Vec3};
+use glam::{Mat4, Quat, Vec3};
 
-use crate::command::{self, Access, ImageLayouts};
+use crate::command::{self, Access, BufferBarrier, ImageLayouts};
 use crate::device::Device;
 use crate::resources::{
-    self, Allocator, Buffer, BufferKind, BufferRequest, BufferWrite, Image,
-    ImageRequest, ImageViewRequest, ImageWrite, Memory, Sampler,
-    SamplerRequest,
+    self, upload_buffer_data, Allocator, Blas, BlasBuild, BlasRequest, Buffer,
+    BufferKind, BufferRange, BufferRequest, BufferWrite, Image, ImageRequest,
+    ImageViewRequest, ImageWrite, Memory, Sampler, SamplerRequest, Tlas,
+    TlasInstance,
 };
 
 pub(super) struct Scene {
@@ -28,6 +29,9 @@ pub(super) struct Scene {
     pub texture_sampler: Sampler,
     pub memory: Memory,
     pub node_tree: NodeTree,
+    pub blases: Vec<Blas>,
+    pub tree_draws: Vec<Draw>,
+    pub tlas: Tlas,
     pub total_draw_count: u32,
 }
 
@@ -80,7 +84,7 @@ impl Scene {
             &BufferRequest {
                 size: mem::size_of_val(scene.vertices.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::Storage,
+                kind: BufferKind::AccStructInput,
             },
         )?;
         let meshlets = Buffer::new(
@@ -137,12 +141,43 @@ impl Scene {
             })
             .collect::<Result<_>>()?;
 
+        let blas_meshes = scene.models.iter().flat_map(|model| {
+            model
+                .mesh_indices
+                .iter()
+                .map(|mesh_index| &scene.meshes[*mesh_index as usize])
+        });
+
+        let blases: Vec<_> = blas_meshes
+            .clone()
+            .map(|mesh| {
+                Blas::new(
+                    device,
+                    &BlasRequest {
+                        vertex_stride: mem::size_of::<asset::Vertex>()
+                            as vk::DeviceSize,
+                        vertex_format: vk::Format::R16G16B16_SNORM,
+                        first_vertex: mesh.vertex_offset,
+                        vertex_count: mesh.vertex_count,
+                        triangle_count: mesh.lods[0].index_count / 3,
+                    },
+                )
+            })
+            .collect::<Result<_>>()?;
+
+        let tlas = Tlas::new(device, tree_draws.len() as u32)?;
+
         let mut allocator = Allocator::new(device);
         for texture in &textures {
             allocator.alloc_image(texture);
         }
 
+        for blas in &blases {
+            allocator.alloc_blas(blas);
+        }
+
         let memory = allocator
+            .alloc_tlas(&tlas)
             .alloc_buffer(&instances)
             .alloc_buffer(&draws)
             .alloc_buffer(&draw_commands)
@@ -244,6 +279,62 @@ impl Scene {
             },
         )?;
 
+        let blas_builds: Vec<_> = blases
+            .iter()
+            .zip(blas_meshes)
+            .map(|(blas, mesh)| BlasBuild {
+                vertices: BufferRange {
+                    buffer: &vertices,
+                    offset: bytemuck::offset_of!(asset::Vertex, position)
+                        as vk::DeviceSize,
+                },
+                indices: BufferRange {
+                    buffer: &indices,
+                    offset: mesh.lods[0].index_offset as vk::DeviceSize
+                        * mem::size_of::<u32>() as vk::DeviceSize,
+                },
+                transform: {
+                    /*
+                    Mat4::from_scale_rotation_translation(
+                        Vec3::splat(mesh.bounding_sphere.radius),
+                        Quat::IDENTITY,
+                        mesh.bounding_sphere.center,
+                    )
+                    */
+                    Mat4::IDENTITY
+                },
+                blas,
+            })
+            .collect();
+
+        resources::build_blases(device, &blas_builds)?;
+
+        let tlas_instances = tlas_instances(&tree_draws, &blases, &node_tree);
+        let tlas_update = tlas.update(
+            device,
+            vk::BuildAccelerationStructureModeKHR::BUILD,
+            &tlas_instances,
+        );
+        command::quickie(device, |command_buffer| {
+            let scratch = upload_buffer_data(
+                device,
+                command_buffer,
+                &[tlas_update.buffer_write(&tlas)],
+            )?;
+            command_buffer.pipeline_barriers(
+                device,
+                &[],
+                &[BufferBarrier {
+                    buffer: &tlas.instances,
+                    src: Access::ALL,
+                    dst: Access::ALL,
+                }],
+            );
+            tlas_update.update(device, command_buffer, &tlas);
+            Ok(scratch)
+        })?
+        .destroy(device);
+
         Ok(Self {
             indices,
             vertices,
@@ -260,7 +351,40 @@ impl Scene {
             draw_commands,
             draw_count,
             total_draw_count,
+            tlas,
+            tree_draws,
+            blases,
         })
+    }
+
+    pub fn update_tlas(&self, device: &Device) -> Result<()> {
+        let tlas_instances =
+            tlas_instances(&self.tree_draws, &self.blases, &self.node_tree);
+        let tlas_update = self.tlas.update(
+            device,
+            vk::BuildAccelerationStructureModeKHR::UPDATE,
+            &tlas_instances,
+        );
+        command::quickie(device, |command_buffer| {
+            let scratch = upload_buffer_data(
+                device,
+                command_buffer,
+                &[tlas_update.buffer_write(&self.tlas)],
+            )?;
+            command_buffer.pipeline_barriers(
+                device,
+                &[],
+                &[BufferBarrier {
+                    buffer: &self.tlas.instances,
+                    src: Access::ALL,
+                    dst: Access::ALL,
+                }],
+            );
+            tlas_update.update(device, command_buffer, &self.tlas);
+            Ok(scratch)
+        })?
+        .destroy(device);
+        Ok(())
     }
 
     pub fn destroy(&self, device: &Device) {
@@ -278,12 +402,39 @@ impl Scene {
             texture.destroy(device);
         }
         self.texture_sampler.destroy(device);
+        for blas in &self.blases {
+            blas.destroy(device);
+        }
+        self.tlas.destroy(device);
         self.memory.free(device);
     }
 
     pub(super) fn update(&self) -> SceneUpdate {
         SceneUpdate { instances: self.node_tree.instances() }
     }
+}
+
+fn tlas_instances<'a>(
+    draws: &[Draw],
+    blases: &'a [Blas],
+    node_tree: &NodeTree,
+) -> Vec<TlasInstance<'a>> {
+    let instance_transform = node_tree.instances();
+    draws
+        .iter()
+        .map(|draw| {
+            let blas = &blases[draw.mesh_index as usize];
+            let something = Mat4::from_scale_rotation_translation(
+                Vec3::splat(draw.radius),
+                Quat::IDENTITY,
+                draw.center,
+            );
+            let transform = instance_transform[draw.instance_index as usize]
+                .transform
+                * something;
+            TlasInstance { transform, blas }
+        })
+        .collect()
 }
 
 #[repr(C)]
