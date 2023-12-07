@@ -1,7 +1,7 @@
 use glam::{Mat4, Vec2, Vec3, Vec4};
 
 #[derive(Debug)]
-pub(crate) struct Camera {
+pub struct Camera {
     pub position: Vec3,
     pub forward: Vec3,
     pub yaw: f32,
@@ -42,12 +42,12 @@ impl Camera {
         }
     }
 
+    pub fn right(&self) -> Vec3 {
+        self.forward.cross(Self::UP).normalize()
+    }
+
     pub fn move_by(&mut self, delta: CameraMove) {
-        let horizontal = self.forward.cross(Self::UP).normalize();
-        self.position += self.forward * delta.forward;
-        self.position -= self.forward * delta.backward;
-        self.position += horizontal * delta.right;
-        self.position -= horizontal * delta.left;
+        self.position += delta.position;
         self.yaw = (self.yaw + delta.yaw) % std::f32::consts::TAU;
         self.pitch = (self.pitch - delta.pitch).clamp(-1.553, 1.553);
         self.forward = Vec3::new(
@@ -85,6 +85,7 @@ pub struct CameraMove {
     pub right: f32,
     pub forward: f32,
     pub backward: f32,
+    pub position: Vec3,
     pub yaw: f32,
     pub pitch: f32,
 }

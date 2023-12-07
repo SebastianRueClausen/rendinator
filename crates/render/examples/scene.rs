@@ -10,7 +10,7 @@ use eyre::Result;
 use glam::{Mat4, Quat, Vec2, Vec3};
 use raw_window_handle::HasRawDisplayHandle;
 use render::scene::NodeTree;
-use render::{CameraMove, FrameRequest, GuiRequest, Renderer};
+use render::{Camera, CameraMove, FrameRequest, GuiRequest, Renderer};
 use winit::event::{
     ElementState, Event, ModifiersState, VirtualKeyCode, WindowEvent,
 };
@@ -199,7 +199,8 @@ fn main() {
                     let gui = gui.render(&window, &mut scene_state, renderer);
                     renderer
                         .render_frame(&FrameRequest {
-                            camera_move: inputs.camera_move(dt),
+                            camera_move: inputs
+                                .camera_move(renderer.camera(), dt),
                             gui,
                         })
                         .unwrap_or_else(|_| {
@@ -400,6 +401,7 @@ struct Inputs {
     modifier_state: ModifiersState,
     mouse_position: Option<Vec2>,
     mouse_delta: Option<Vec2>,
+    camera_velocity: Vec3,
 }
 
 impl Inputs {
@@ -434,28 +436,40 @@ impl Inputs {
         self.modifier_state.shift()
     }
 
-    fn camera_move(&mut self, dt: Duration) -> CameraMove {
+    fn camera_move(&mut self, camera: &Camera, dt: Duration) -> CameraMove {
         let mut camera_move = CameraMove::default();
         let dt = dt.as_secs_f32();
-        let move_speed = 50.0;
-        let mouse_sensitivity = 0.05;
+
+        let acceleration = 5.0;
+        let drag = 8.0;
+        let sensitivity = 0.05;
+
+        self.camera_velocity -= self.camera_velocity * drag * dt.min(1.0);
+
         if self.is_key_pressed(VirtualKeyCode::W) {
-            camera_move.backward += move_speed * dt;
+            self.camera_velocity -= camera.forward * acceleration * dt;
         }
         if self.is_key_pressed(VirtualKeyCode::S) {
-            camera_move.forward += move_speed * dt;
+            self.camera_velocity += camera.forward * acceleration * dt;
         }
+
+        let right = camera.right();
+
         if self.is_key_pressed(VirtualKeyCode::A) {
-            camera_move.left += move_speed * dt;
+            self.camera_velocity -= right * acceleration * dt;
         }
         if self.is_key_pressed(VirtualKeyCode::D) {
-            camera_move.right += move_speed * dt;
+            self.camera_velocity += right * acceleration * dt;
         }
+
+        camera_move.position = self.camera_velocity;
+
         let mouse_delta = self.mouse_delta();
         if self.is_shift_pressed() {
-            camera_move.yaw += mouse_sensitivity * mouse_delta.x;
-            camera_move.pitch += mouse_sensitivity * mouse_delta.y;
+            camera_move.yaw += sensitivity * mouse_delta.x;
+            camera_move.pitch += sensitivity * mouse_delta.y;
         }
+
         camera_move
     }
 }

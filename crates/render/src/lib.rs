@@ -1,6 +1,5 @@
 use ash::vk::{self};
-use camera::Camera;
-pub use camera::CameraMove;
+pub use camera::{Camera, CameraMove};
 use command::{ImageBarrier, MipLevels};
 use constants::Constants;
 use descriptor::{Descriptor, DescriptorBuffer, DescriptorData};
@@ -281,13 +280,16 @@ impl Renderer {
     pub fn change_scene(&mut self, scene: &asset::Scene) -> Result<()> {
         self.device.wait_until_idle()?;
         self.scene.destroy(&self.device);
-        println!("got here");
         self.scene = Scene::new(&self.device, &scene)?;
         Ok(())
     }
 
     pub fn move_camera(&mut self, camera_move: CameraMove) {
         self.camera.move_by(camera_move);
+    }
+
+    pub fn camera(&self) -> &Camera {
+        &self.camera
     }
 
     fn update(&mut self, update: Update) -> Result<()> {

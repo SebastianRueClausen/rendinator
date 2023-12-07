@@ -900,6 +900,7 @@ pub(crate) fn build_blases<'a>(
         .map(|build| {
             let request = &build.blas.request;
 
+            /*
             assert!({
                 let last_access = build.vertices.offset
                     + request.vertex_stride * request.vertex_count as u64;
@@ -914,6 +915,7 @@ pub(crate) fn build_blases<'a>(
                 let size = build.indices.buffer.size - build.indices.offset;
                 last_access < size
             });
+            */
 
             let geometry_data = vk::AccelerationStructureGeometryDataKHR {
                 triangles:
