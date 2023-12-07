@@ -60,19 +60,6 @@ vec3 decode_position(BoundingSphere bounding_sphere, int16_t encoded[3]) {
     float y = dequantize_snorm(16, encoded[1]);
     float z = dequantize_snorm(16, encoded[2]);
     vec3 position = vec3(x, y, z);
-
-    /*
-    mat4 matrix = mat4(
-        bounding_sphere.radius, 0.0, 0.0, 0.0,
-        0.0, bounding_sphere.radius, 0.0, 0.0,
-        0.0, 0.0, bounding_sphere.radius, 0.0,
-        bounding_sphere.center.x,
-        bounding_sphere.center.y,
-        bounding_sphere.center.z,
-        1.0
-    );
-    */
-
     return (position * bounding_sphere.radius) + bounding_sphere.center;
 }
 

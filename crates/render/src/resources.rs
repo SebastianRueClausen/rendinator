@@ -6,7 +6,7 @@ use ash::vk;
 use eyre::{Context, Result};
 use glam::Mat4;
 
-use crate::command::{self, Access, BufferBarrier, CommandBuffer};
+use crate::command::{self, CommandBuffer};
 use crate::device::Device;
 
 #[derive(Debug, Clone, Copy)]
@@ -813,13 +813,13 @@ impl Blas {
             device.acc_struct_loader.get_acceleration_structure_build_sizes(
                 vk::AccelerationStructureBuildTypeKHR::DEVICE,
                 &build_info,
-                &[request.triangle_count - 1],
+                &[request.triangle_count],
             )
         };
         let buffer = Buffer::new(
             device,
             &BufferRequest {
-                size: sizes.acceleration_structure_size,
+                size: sizes.acceleration_structure_size + 128,
                 kind: BufferKind::AccStructStorage,
             },
         )?;
@@ -835,7 +835,7 @@ impl Blas {
                 .wrap_err("failed to create blas")?
         };
         Ok(Self {
-            build_scratch_size: sizes.build_scratch_size,
+            build_scratch_size: sizes.build_scratch_size * 2,
             acceleration_structure,
             request: *request,
             buffer,
@@ -864,26 +864,15 @@ pub(crate) struct BlasBuild<'a> {
     pub blas: &'a Blas,
     pub vertices: BufferRange<'a>,
     pub indices: BufferRange<'a>,
-    pub transform: Mat4,
 }
 
 pub(crate) fn build_blases<'a>(
     device: &Device,
     builds: &[BlasBuild<'a>],
 ) -> Result<()> {
-    let mesh_transforms: Vec<_> = builds
-        .iter()
-        .map(|mesh| acceleration_structure_transform(mesh.transform))
-        .collect();
-
-    let transform_data = Buffer::new(
-        device,
-        &BufferRequest {
-            kind: BufferKind::AccStructInput,
-            size: mem::size_of_val(mesh_transforms.as_slice())
-                as vk::DeviceSize,
-        },
-    )?;
+    if builds.is_empty() {
+        return Ok(());
+    }
 
     let scratch_buffers: Vec<_> = builds
         .iter()
@@ -899,8 +888,6 @@ pub(crate) fn build_blases<'a>(
         .collect::<Result<_>>()?;
 
     let mut allocator = Allocator::new(device);
-    allocator.alloc_buffer(&transform_data);
-
     for buffer in &scratch_buffers {
         allocator.alloc_buffer(buffer);
     }
@@ -908,20 +895,31 @@ pub(crate) fn build_blases<'a>(
     let scratch_memory =
         allocator.finish(vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
 
-    let transform_data_address = transform_data.device_address(device);
-
     let geometries: Vec<_> = builds
         .into_iter()
         .map(|build| {
             let request = &build.blas.request;
+
+            assert!({
+                let last_access = build.vertices.offset
+                    + request.vertex_stride * request.vertex_count as u64;
+                let size = build.vertices.buffer.size - build.vertices.offset;
+                last_access < size
+            });
+
+            assert!({
+                let last_access = request.triangle_count as u64
+                    * mem::size_of::<u32>() as u64
+                    * 3;
+                let size = build.indices.buffer.size - build.indices.offset;
+                last_access < size
+            });
+
             let geometry_data = vk::AccelerationStructureGeometryDataKHR {
                 triangles:
                     vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
                         .vertex_stride(request.vertex_stride)
                         .vertex_format(request.vertex_format)
-                        .transform_data(vk::DeviceOrHostAddressConstKHR {
-                            device_address: transform_data_address,
-                        })
                         .index_data(vk::DeviceOrHostAddressConstKHR {
                             device_address: build
                                 .indices
@@ -973,8 +971,8 @@ pub(crate) fn build_blases<'a>(
         .map(|build| {
             vk::AccelerationStructureBuildRangeInfoKHR::builder()
                 .primitive_count(build.blas.request.triangle_count)
-                .first_vertex(build.blas.request.first_vertex)
                 .primitive_offset(build.indices.offset as u32)
+                .first_vertex(build.blas.request.first_vertex)
                 .build()
         })
         .collect();
@@ -983,44 +981,17 @@ pub(crate) fn build_blases<'a>(
         range_infos.iter().map(|range| slice::from_ref(range)).collect();
 
     command::quickie(device, |command_buffer| unsafe {
-        let transform_upload_scratch = upload_buffer_data(
-            device,
-            command_buffer,
-            &[BufferWrite {
-                buffer: &transform_data,
-                data: bytemuck::cast_slice(&mesh_transforms),
-            }],
-        )?;
-
-        if build_infos.is_empty() {
-            return Ok(transform_upload_scratch);
-        }
-
-        command_buffer.pipeline_barriers(
-            device,
-            &[],
-            &[BufferBarrier {
-                buffer: &transform_data,
-                src: Access::ALL,
-                dst: Access::ALL,
-            }],
-        );
-
         device.acc_struct_loader.cmd_build_acceleration_structures(
             **command_buffer,
             &build_infos,
             &range_infos_refs,
         );
+        Ok(())
+    })?;
 
-        Ok(transform_upload_scratch)
-    })?
-    .destroy(device);
-
-    transform_data.destroy(device);
     for buffer in &scratch_buffers {
         buffer.destroy(device);
     }
-
     scratch_memory.free(device);
 
     Ok(())

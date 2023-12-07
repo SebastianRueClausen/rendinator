@@ -293,16 +293,6 @@ impl Scene {
                     offset: mesh.lods[0].index_offset as vk::DeviceSize
                         * mem::size_of::<u32>() as vk::DeviceSize,
                 },
-                transform: {
-                    /*
-                    Mat4::from_scale_rotation_translation(
-                        Vec3::splat(mesh.bounding_sphere.radius),
-                        Quat::IDENTITY,
-                        mesh.bounding_sphere.center,
-                    )
-                    */
-                    Mat4::IDENTITY
-                },
                 blas,
             })
             .collect();

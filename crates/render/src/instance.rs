@@ -28,7 +28,10 @@ impl Instance {
                         | Severity::VERBOSE,
                 )
                 .message_type(
-                    Type::GENERAL | Type::PERFORMANCE | Type::VALIDATION,
+                    Type::GENERAL
+                        | Type::PERFORMANCE
+                        | Type::VALIDATION
+                        | Type::DEVICE_ADDRESS_BINDING,
                 )
                 .pfn_user_callback(Some(debug_callback))
         };
@@ -42,8 +45,8 @@ impl Instance {
         let extension_names = [
             ext::DebugUtils::name().as_ptr(),
             khr::Surface::name().as_ptr(),
-            // #[cfg(target_os = "linux")]
-            // khr::WaylandSurface::name().as_ptr(),
+            #[cfg(target_os = "linux")]
+            khr::WaylandSurface::name().as_ptr(),
             #[cfg(target_os = "linux")]
             khr::XlibSurface::name().as_ptr(),
             #[cfg(target_os = "linux")]

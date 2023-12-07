@@ -1,8 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
-use std::{mem, thread};
+use std::{fs, mem, thread};
 
+use aftermath_rs as aftermath;
 use asset_import::Progress;
 use bit_set::BitSet;
 use eyre::Result;
@@ -78,6 +79,30 @@ fn load_scene(
     }
 }
 
+struct CrashReporter;
+
+impl aftermath::AftermathDelegate for CrashReporter {
+    fn dumped(&mut self, dump_data: &[u8]) {
+        let report_path = "crash.nv-gpudmp";
+        fs::write(report_path, dump_data)
+            .expect("failed to write crash report");
+        println!("wrote nvidia-aftermath crash report to {report_path}");
+    }
+
+    fn shader_debug_info(&mut self, _data: &[u8]) {}
+    fn description(&mut self, _describe: &mut aftermath::DescriptionBuilder) {}
+}
+
+fn create_crash_report() -> ! {
+    let status = aftermath::Status::wait_for_status(Some(
+        std::time::Duration::from_secs(5),
+    ));
+    if status != aftermath::Status::Finished {
+        panic!("Unexpected crash dump status: {:?}", status);
+    }
+    std::process::exit(1);
+}
+
 fn main() {
     let event_loop = EventLoop::new();
     let window = Window::new(&event_loop).unwrap();
@@ -88,6 +113,8 @@ fn main() {
     let mut scene_state = SceneState::default();
     let mut inputs = Inputs::default();
     let mut last_update = Instant::now();
+
+    let _crash_reporter = aftermath::Aftermath::new(CrashReporter);
 
     event_loop.run(move |event, _, ctrl| {
         ctrl.set_poll();
@@ -154,7 +181,9 @@ fn main() {
                                 if let Some(renderer) = &mut renderer {
                                     renderer
                                         .change_scene(&scene)
-                                        .expect("failed to set scene");
+                                        .unwrap_or_else(|_| {
+                                            create_crash_report()
+                                        });
                                 }
                                 SceneState::Loaded { path: path.clone() }
                             }
@@ -173,7 +202,9 @@ fn main() {
                             camera_move: inputs.camera_move(dt),
                             gui,
                         })
-                        .expect("failed to render frame");
+                        .unwrap_or_else(|_| {
+                            create_crash_report();
+                        });
                 }
                 window.request_redraw();
             }

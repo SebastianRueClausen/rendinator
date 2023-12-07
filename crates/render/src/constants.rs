@@ -33,7 +33,7 @@ impl ConstantData {
         _prev: Option<Self>,
     ) -> Self {
         let sun = DirectionalLight {
-            direction: Vec4::new(0.0, 1.0, 0.0, 0.0),
+            direction: Vec4::new(1.0, 1.0, 0.0, 0.0).normalize(),
             irradiance: Vec4::splat(6.0),
         };
         Self {

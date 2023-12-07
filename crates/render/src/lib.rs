@@ -281,6 +281,7 @@ impl Renderer {
     pub fn change_scene(&mut self, scene: &asset::Scene) -> Result<()> {
         self.device.wait_until_idle()?;
         self.scene.destroy(&self.device);
+        println!("got here");
         self.scene = Scene::new(&self.device, &scene)?;
         Ok(())
     }

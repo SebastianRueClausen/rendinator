@@ -26,6 +26,7 @@ egui = { version = "0.23.0" }
 epaint = { version = "0.23.0", features = ["bytemuck"] }
 bit-set = "0.5.3"
 asset_import = { path = "../asset_import" }
+aftermath-rs = "0.1.2"
 
 [[example]]
 name = "scene"
