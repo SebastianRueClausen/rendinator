@@ -36,16 +36,17 @@ impl ConstantData {
             direction: Vec4::new(1.0, 1.0, 0.0, 0.0).normalize(),
             irradiance: Vec4::splat(6.0),
         };
+        let proj = camera.proj();
         Self {
             screen_size: UVec2 {
                 x: swapchain.extent.width,
                 y: swapchain.extent.height,
             },
-            proj: camera.proj,
+            proj,
             view: camera.view,
             frustrum_planes: camera.frustrum_planes(),
             camera_position: camera.position.extend(0.0),
-            proj_view: camera.proj * camera.view,
+            proj_view: proj * camera.view,
             z_near: camera.z_near,
             z_far: camera.z_far,
             sun,

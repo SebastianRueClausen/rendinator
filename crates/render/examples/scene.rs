@@ -196,16 +196,22 @@ fn main() {
                 };
 
                 if let Some(renderer) = &mut renderer {
-                    let gui = gui.render(&window, &mut scene_state, renderer);
-                    renderer
-                        .render_frame(&FrameRequest {
-                            camera_move: inputs
-                                .camera_move(renderer.camera(), dt),
-                            gui,
-                        })
-                        .unwrap_or_else(|_| {
+                    let gui = gui.render(
+                        &window,
+                        &mut scene_state,
+                        &mut inputs,
+                        renderer,
+                    );
+                    let frame_request = FrameRequest {
+                        camera_move: inputs
+                            .camera_move(renderer.camera_mut(), dt),
+                        gui,
+                    };
+                    renderer.render_frame(&frame_request).unwrap_or_else(
+                        |_| {
                             create_crash_report();
-                        });
+                        },
+                    );
                 }
                 window.request_redraw();
             }
@@ -238,16 +244,18 @@ impl Gui {
         &mut self,
         window: &winit::window::Window,
         scene_state: &mut SceneState,
+        inputs: &mut Inputs,
         renderer: &mut Renderer,
     ) -> GuiRequest {
         let input = self.input_state.take_egui_input(&window);
-        let output = self.context.run(input, |ctx| {
+        let output = self.context.run(input, |context| {
             scene_window(
-                ctx,
+                context,
                 &mut self.state,
                 scene_state,
                 renderer.node_tree_mut(),
             );
+            camera_window(context, inputs, renderer.camera_mut());
         });
         let primitives = self.context.tessellate(output.shapes);
         let pixels_per_point = self.context.pixels_per_point();
@@ -265,6 +273,40 @@ impl Gui {
     fn handle_resize(&mut self) {
         self.context = egui::Context::default();
     }
+}
+
+fn camera_window(
+    context: &egui::Context,
+    inputs: &mut Inputs,
+    camera: &mut Camera,
+) {
+    egui::Window::new("camera").resizable(true).show(context, |ui| {
+        egui::Grid::new("transform").show(ui, |ui| {
+            ui.label("acceleration");
+            ui.add(
+                egui::DragValue::new(&mut inputs.camera_acceleration)
+                    .speed(0.1),
+            );
+            ui.end_row();
+
+            ui.label("drag");
+            ui.add(egui::DragValue::new(&mut inputs.camera_drag).speed(0.1));
+            ui.end_row();
+
+            ui.label("position");
+            vec3_drag_values(ui, &mut camera.position);
+            ui.end_row();
+
+            ui.label("fov");
+            ui.drag_angle(&mut camera.fov);
+            ui.end_row();
+
+            if ui.button("return to origin").clicked() {
+                camera.position = Vec3::ZERO;
+            }
+            ui.end_row();
+        });
+    });
 }
 
 fn scene_window(
@@ -357,6 +399,12 @@ fn scene_tree(
     }
 }
 
+fn vec3_drag_values(ui: &mut egui::Ui, vec: &mut Vec3) {
+    ui.add(egui::DragValue::new(&mut vec.x));
+    ui.add(egui::DragValue::new(&mut vec.y));
+    ui.add(egui::DragValue::new(&mut vec.z));
+}
+
 fn transform_edit(ui: &mut egui::Ui, transform: Mat4) -> Mat4 {
     let (mut scale, mut rotation, mut translation) =
         transform.to_scale_rotation_translation();
@@ -366,23 +414,19 @@ fn transform_edit(ui: &mut egui::Ui, transform: Mat4) -> Mat4 {
         ui.label("rotation");
         let euler = glam::EulerRot::XYZ;
         let (mut x, mut y, mut z) = rotation.to_euler(euler);
-        ui.drag_angle_tau(&mut x);
-        ui.drag_angle_tau(&mut y);
-        ui.drag_angle_tau(&mut z);
+        ui.drag_angle(&mut x);
+        ui.drag_angle(&mut y);
+        ui.drag_angle(&mut z);
         let [x, y, z] = [x, y, z].map(|a| a % std::f32::consts::TAU);
         rotation = Quat::from_euler(euler, x, y, z);
         ui.end_row();
 
         ui.label("translation");
-        ui.add(egui::DragValue::new(&mut translation.x));
-        ui.add(egui::DragValue::new(&mut translation.y));
-        ui.add(egui::DragValue::new(&mut translation.z));
+        vec3_drag_values(ui, &mut translation);
         ui.end_row();
 
         ui.label("scale");
-        ui.add(egui::DragValue::new(&mut scale.x));
-        ui.add(egui::DragValue::new(&mut scale.y));
-        ui.add(egui::DragValue::new(&mut scale.z));
+        vec3_drag_values(ui, &mut scale);
         scale = Vec3::from_array(scale.to_array().map(|a| {
             if a == 0.0 {
                 f32::EPSILON
@@ -395,13 +439,28 @@ fn transform_edit(ui: &mut egui::Ui, transform: Mat4) -> Mat4 {
     Mat4::from_scale_rotation_translation(scale, rotation, translation)
 }
 
-#[derive(Default)]
 struct Inputs {
     keys_pressed: BitSet,
     modifier_state: ModifiersState,
     mouse_position: Option<Vec2>,
     mouse_delta: Option<Vec2>,
     camera_velocity: Vec3,
+    camera_drag: f32,
+    camera_acceleration: f32,
+}
+
+impl Default for Inputs {
+    fn default() -> Self {
+        Self {
+            keys_pressed: BitSet::new(),
+            modifier_state: ModifiersState::empty(),
+            mouse_position: None,
+            mouse_delta: None,
+            camera_velocity: Vec3::ZERO,
+            camera_acceleration: 5.0,
+            camera_drag: 8.0,
+        }
+    }
 }
 
 impl Inputs {
@@ -462,7 +521,7 @@ impl Inputs {
             self.camera_velocity += right * acceleration * dt;
         }
 
-        camera_move.position = self.camera_velocity;
+        camera_move.translation = self.camera_velocity;
 
         let mouse_delta = self.mouse_delta();
         if self.is_shift_pressed() {

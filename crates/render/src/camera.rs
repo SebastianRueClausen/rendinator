@@ -7,7 +7,6 @@ pub struct Camera {
     pub yaw: f32,
     pub pitch: f32,
     pub view: Mat4,
-    pub proj: Mat4,
     pub z_near: f32,
     pub z_far: f32,
     pub fov: f32,
@@ -27,27 +26,19 @@ impl Camera {
         let fov = std::f32::consts::FRAC_PI_2;
         let view = Mat4::look_at_rh(position, position + forward, Self::UP);
         let aspect = surface_size.x / surface_size.y;
-        let proj = proj(fov, aspect, z_near);
-        Self {
-            position,
-            forward,
-            yaw,
-            pitch,
-            view,
-            proj,
-            z_near,
-            z_far,
-            fov,
-            aspect,
-        }
+        Self { position, forward, yaw, pitch, view, z_near, z_far, fov, aspect }
     }
 
     pub fn right(&self) -> Vec3 {
         self.forward.cross(Self::UP).normalize()
     }
 
+    pub fn proj(&self) -> Mat4 {
+        proj(self.fov, self.aspect, self.z_near)
+    }
+
     pub fn move_by(&mut self, delta: CameraMove) {
-        self.position += delta.position;
+        self.position += delta.translation;
         self.yaw = (self.yaw + delta.yaw) % std::f32::consts::TAU;
         self.pitch = (self.pitch - delta.pitch).clamp(-1.553, 1.553);
         self.forward = Vec3::new(
@@ -64,7 +55,7 @@ impl Camera {
     }
 
     pub fn frustrum_planes(&self) -> [Vec4; 6] {
-        let proj_view = self.proj * self.view;
+        let proj_view = self.proj() * self.view;
 
         let planes = [
             proj_view.row(3) + proj_view.row(0),
@@ -81,11 +72,7 @@ impl Camera {
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CameraMove {
-    pub left: f32,
-    pub right: f32,
-    pub forward: f32,
-    pub backward: f32,
-    pub position: Vec3,
+    pub translation: Vec3,
     pub yaw: f32,
     pub pitch: f32,
 }

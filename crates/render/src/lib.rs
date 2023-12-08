@@ -288,8 +288,8 @@ impl Renderer {
         self.camera.move_by(camera_move);
     }
 
-    pub fn camera(&self) -> &Camera {
-        &self.camera
+    pub fn camera_mut(&mut self) -> &mut Camera {
+        &mut self.camera
     }
 
     fn update(&mut self, update: Update) -> Result<()> {
