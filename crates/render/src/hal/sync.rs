@@ -1,7 +1,7 @@
 use ash::vk;
 use eyre::{Context, Result};
 
-use crate::device::Device;
+use super::Device;
 
 pub(crate) struct Sync {
     pub acquire: vk::Semaphore,

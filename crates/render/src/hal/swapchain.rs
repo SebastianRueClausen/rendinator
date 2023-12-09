@@ -5,12 +5,9 @@ use ash::vk;
 use eyre::{Context, Result};
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 
-use crate::device::Device;
-use crate::instance::Instance;
-use crate::resources::{Image, ImageView, ImageViewRequest};
-use crate::sync::Sync;
+use super::{Device, Image, ImageView, ImageViewRequest, Instance, Sync};
 
-pub(crate) struct Swapchain {
+pub struct Swapchain {
     surface_loader: khr::Surface,
     swapchain_loader: khr::Swapchain,
     surface: vk::SurfaceKHR,
@@ -20,7 +17,7 @@ pub(crate) struct Swapchain {
 }
 
 impl Swapchain {
-    pub(super) fn new(
+    pub fn new(
         instance: &Instance,
         device: &Device,
         window: RawWindowHandle,
@@ -103,14 +100,14 @@ impl Swapchain {
         Ok((swapchain, images))
     }
 
-    pub(super) fn destroy(&self, _device: &Device) {
+    pub fn destroy(&self, _device: &Device) {
         unsafe {
             self.swapchain_loader.destroy_swapchain(self.swapchain, None);
             self.surface_loader.destroy_surface(self.surface, None);
         }
     }
 
-    pub(super) fn image_index(&self, sync: &Sync) -> Result<u32> {
+    pub fn image_index(&self, sync: &Sync) -> Result<u32> {
         let (index, outdated) = unsafe {
             self.swapchain_loader
                 .acquire_next_image(
@@ -127,7 +124,7 @@ impl Swapchain {
         Ok(index)
     }
 
-    pub(super) fn present(
+    pub fn present(
         &self,
         device: &Device,
         sync: &Sync,

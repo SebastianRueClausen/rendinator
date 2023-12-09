@@ -6,11 +6,7 @@ use eyre::Result;
 use glam::{Mat4, UVec2, Vec4};
 
 use crate::camera::Camera;
-use crate::device::Device;
-use crate::resources::{
-    self, Buffer, BufferKind, BufferRequest, BufferWrite, Memory,
-};
-use crate::swapchain::Swapchain;
+use crate::hal;
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -28,7 +24,7 @@ pub(crate) struct ConstantData {
 
 impl ConstantData {
     pub fn new(
-        swapchain: &Swapchain,
+        swapchain: &hal::Swapchain,
         camera: &Camera,
         _prev: Option<Self>,
     ) -> Self {
@@ -56,41 +52,41 @@ impl ConstantData {
 
 pub(crate) struct Constants {
     pub data: ConstantData,
-    pub buffer: Buffer,
-    pub memory: Memory,
+    pub buffer: hal::Buffer,
+    pub memory: hal::Memory,
 }
 
 impl Constants {
     pub fn new(
-        device: &Device,
-        swapchain: &Swapchain,
+        device: &hal::Device,
+        swapchain: &hal::Swapchain,
         camera: &Camera,
     ) -> Result<Self> {
-        let buffer = Buffer::new(
+        let buffer = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of::<ConstantData>() as vk::DeviceSize,
-                kind: BufferKind::Uniform,
+                kind: hal::BufferKind::Uniform,
             },
         )?;
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
-        let memory = resources::buffer_memory(device, &buffer, memory_flags)?;
+        let memory = hal::buffer_memory(device, &buffer, memory_flags)?;
         let data = ConstantData::new(swapchain, camera, None);
         Ok(Self { buffer, memory, data })
     }
 
-    pub fn update(&mut self, swapchain: &Swapchain, camera: &Camera) {
+    pub fn update(&mut self, swapchain: &hal::Swapchain, camera: &Camera) {
         self.data = ConstantData::new(swapchain, camera, Some(self.data));
     }
 
-    pub fn buffer_write(&self) -> BufferWrite {
-        BufferWrite {
+    pub fn buffer_write(&self) -> hal::BufferWrite {
+        hal::BufferWrite {
             buffer: &self.buffer,
             data: bytemuck::bytes_of(&self.data),
         }
     }
 
-    pub fn destroy(&self, device: &Device) {
+    pub fn destroy(&self, device: &hal::Device) {
         self.buffer.destroy(device);
         self.memory.free(device);
     }

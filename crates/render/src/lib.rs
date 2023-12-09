@@ -1,39 +1,24 @@
 use ash::vk::{self};
 pub use camera::{Camera, CameraMove};
-use command::{ImageBarrier, MipLevels};
 use constants::Constants;
-use descriptor::{Descriptor, DescriptorBuffer, DescriptorData};
-use device::Device;
 use eyre::Result;
 use glam::Vec2;
 #[cfg(feature = "gui")]
 use gui::Gui;
 #[cfg(feature = "gui")]
 pub use gui::GuiRequest;
-use instance::Instance;
 use mesh::MeshPhase;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use render_targets::RenderTargets;
 use scene::{NodeTree, Scene};
-use swapchain::Swapchain;
-use sync::Sync;
-
-use crate::command::Access;
 
 mod camera;
-mod command;
 mod constants;
 mod debug;
-mod descriptor;
-mod device;
-mod instance;
+mod hal;
 mod mesh;
 mod render_targets;
-mod resources;
 pub mod scene;
-mod shader;
-mod swapchain;
-mod sync;
 
 #[cfg(feature = "gui")]
 mod gui;
@@ -54,10 +39,10 @@ pub struct FrameRequest {
 }
 
 pub struct Renderer {
-    instance: Instance,
-    device: Device,
-    swapchain: Swapchain,
-    sync: Sync,
+    instance: hal::Instance,
+    device: hal::Device,
+    swapchain: hal::Swapchain,
+    sync: hal::Sync,
     scene: Scene,
     constants: Constants,
     mesh_phase: MeshPhase,
@@ -69,12 +54,12 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(request: RendererRequest) -> Result<Self> {
-        let instance = Instance::new(request.validate)?;
-        let device = Device::new(&instance)?;
-        let sync = Sync::new(&device)?;
+        let instance = hal::Instance::new(request.validate)?;
+        let device = hal::Device::new(&instance)?;
+        let sync = hal::Sync::new(&device)?;
         let extent =
             vk::Extent2D { width: request.width, height: request.height };
-        let (swapchain, swapchain_images) = Swapchain::new(
+        let (swapchain, swapchain_images) = hal::Swapchain::new(
             &instance,
             &device,
             request.window,
@@ -108,8 +93,10 @@ impl Renderer {
         })
     }
 
-    fn create_descriptors(&self) -> Result<(Descriptors, DescriptorBuffer)> {
-        let mut descriptor_data = DescriptorData::new(&self.device);
+    fn create_descriptors(
+        &self,
+    ) -> Result<(Descriptors, hal::DescriptorBuffer)> {
+        let mut descriptor_data = hal::DescriptorData::new(&self.device);
         let passes = Descriptors {
             #[cfg(feature = "gui")]
             gui: gui::create_descriptor(
@@ -140,7 +127,7 @@ impl Renderer {
             ),
         };
         let descriptor_buffer =
-            DescriptorBuffer::new(&self.device, &descriptor_data)?;
+            hal::DescriptorBuffer::new(&self.device, &descriptor_data)?;
         Ok((passes, descriptor_buffer))
     }
 
@@ -178,11 +165,11 @@ impl Renderer {
         let (descriptors, descriptor_buffer) = self.create_descriptors()?;
 
         let (buffer, scratchs) =
-            command::frame(&self.device, &self.sync, |command_buffer| {
+            hal::command::frame(&self.device, &self.sync, |command_buffer| {
                 let swapchain_image =
                     &self.render_targets.swapchain[swapchain_index as usize];
 
-                let buffer_scratch = resources::upload_buffer_data(
+                let buffer_scratch = hal::upload_buffer_data(
                     &self.device,
                     command_buffer,
                     &buffer_writes,
@@ -194,16 +181,16 @@ impl Renderer {
                         self.gui.textures.iter().map(|texture| &texture.image);
                     command_buffer.ensure_image_layouts(
                         &self.device,
-                        command::ImageLayouts {
+                        hal::ImageLayouts {
                             layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                            src: Access::NONE,
-                            dst: Access::TRANSFER_DST,
+                            src: hal::Access::NONE,
+                            dst: hal::Access::TRANSFER_DST,
                         },
                         images,
                     );
                 }
 
-                let image_scratch = resources::upload_image_data(
+                let image_scratch = hal::upload_image_data(
                     &self.device,
                     command_buffer,
                     &image_writes,
@@ -228,10 +215,10 @@ impl Renderer {
                         self.gui.textures.iter().map(|texture| &texture.image);
                     command_buffer.ensure_image_layouts(
                         &self.device,
-                        command::ImageLayouts {
+                        hal::ImageLayouts {
                             layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                            src: Access::TRANSFER_DST,
-                            dst: Access::NONE,
+                            src: hal::Access::TRANSFER_DST,
+                            dst: hal::Access::NONE,
                         },
                         images,
                     );
@@ -247,12 +234,12 @@ impl Renderer {
 
                 command_buffer.pipeline_barriers(
                     &self.device,
-                    &[ImageBarrier {
+                    &[hal::ImageBarrier {
                         image: swapchain_image,
                         new_layout: vk::ImageLayout::PRESENT_SRC_KHR,
-                        mip_levels: MipLevels::All,
-                        src: Access::ALL,
-                        dst: Access::NONE,
+                        mip_levels: hal::MipLevels::All,
+                        src: hal::Access::ALL,
+                        dst: hal::Access::NONE,
                     }],
                     &[],
                 );
@@ -328,8 +315,8 @@ bitflags::bitflags! {
 
 struct Descriptors {
     #[cfg(feature = "gui")]
-    gui: Descriptor,
-    mesh_phase: Descriptor,
-    depth_reduce: Vec<Descriptor>,
-    cull: Descriptor,
+    gui: hal::Descriptor,
+    mesh_phase: hal::Descriptor,
+    depth_reduce: Vec<hal::Descriptor>,
+    cull: hal::Descriptor,
 }

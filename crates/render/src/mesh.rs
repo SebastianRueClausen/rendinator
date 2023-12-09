@@ -4,44 +4,30 @@ use ash::vk::{self};
 use eyre::Result;
 use glam::Vec2;
 
-use crate::command::{
-    Access, Attachment, BeginRendering, BufferBarrier, CommandBuffer,
-    ImageBarrier, Load, MipLevels,
-};
 use crate::constants::Constants;
-use crate::descriptor::{
-    Descriptor, DescriptorData, DescriptorLayout, DescriptorLayoutBuilder,
-};
-use crate::device::Device;
 use crate::render_targets::RenderTargets;
-use crate::resources::{
-    image_memory, Image, ImageRequest, ImageViewRequest, Memory, Sampler,
-    SamplerRequest,
-};
 use crate::scene::{DrawCommand, Scene};
-use crate::shader::{
-    GraphicsPipelineRequest, Pipeline, PipelineLayout, Shader, ShaderRequest,
-    ShaderStage, Specializations,
-};
-use crate::swapchain::Swapchain;
-use crate::{render_targets, Descriptors};
+use crate::{hal, render_targets, Descriptors};
 
 pub(crate) struct MeshPhase {
-    pipeline: Pipeline,
-    depth_reduce_pipeline: Pipeline,
-    pre_cull_pipeline: Pipeline,
-    post_cull_pipeline: Pipeline,
-    descriptor_layout: DescriptorLayout,
-    cull_descriptor_layout: DescriptorLayout,
-    depth_reduce_descriptor_layout: DescriptorLayout,
-    depth_pyramid: Image,
-    depth_sampler: Sampler,
-    memory: Memory,
+    pipeline: hal::Pipeline,
+    depth_reduce_pipeline: hal::Pipeline,
+    pre_cull_pipeline: hal::Pipeline,
+    post_cull_pipeline: hal::Pipeline,
+    descriptor_layout: hal::DescriptorLayout,
+    cull_descriptor_layout: hal::DescriptorLayout,
+    depth_reduce_descriptor_layout: hal::DescriptorLayout,
+    depth_pyramid: hal::Image,
+    depth_sampler: hal::Sampler,
+    memory: hal::Memory,
 }
 
 impl MeshPhase {
-    pub fn new(device: &Device, swapchain: &Swapchain) -> Result<Self> {
-        let descriptor_layout = DescriptorLayoutBuilder::default()
+    pub fn new(
+        device: &hal::Device,
+        swapchain: &hal::Swapchain,
+    ) -> Result<Self> {
+        let descriptor_layout = hal::DescriptorLayoutBuilder::default()
             .binding(vk::DescriptorType::UNIFORM_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
@@ -51,11 +37,12 @@ impl MeshPhase {
             .binding(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
             .array_binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 1024)
             .build(device)?;
-        let depth_reduce_descriptor_layout = DescriptorLayoutBuilder::default()
-            .binding(vk::DescriptorType::STORAGE_IMAGE)
-            .binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .build(device)?;
-        let cull_descriptor_layout = DescriptorLayoutBuilder::default()
+        let depth_reduce_descriptor_layout =
+            hal::DescriptorLayoutBuilder::default()
+                .binding(vk::DescriptorType::STORAGE_IMAGE)
+                .binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .build(device)?;
+        let cull_descriptor_layout = hal::DescriptorLayoutBuilder::default()
             .binding(vk::DescriptorType::UNIFORM_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
@@ -64,9 +51,9 @@ impl MeshPhase {
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .build(device)?;
-        let vertex_shader = Shader::new(
+        let vertex_shader = hal::Shader::new(
             device,
-            &ShaderRequest {
+            &hal::ShaderRequest {
                 stage: vk::ShaderStageFlags::VERTEX,
                 source: vk_shader_macros::include_glsl!(
                     "src/shaders/mesh/vert.glsl",
@@ -74,9 +61,9 @@ impl MeshPhase {
                 ),
             },
         )?;
-        let fragment_shader = Shader::new(
+        let fragment_shader = hal::Shader::new(
             device,
-            &ShaderRequest {
+            &hal::ShaderRequest {
                 stage: vk::ShaderStageFlags::FRAGMENT,
                 source: vk_shader_macros::include_glsl!(
                     "src/shaders/mesh/frag.glsl",
@@ -84,24 +71,24 @@ impl MeshPhase {
                 ),
             },
         )?;
-        let pipeline_layout = PipelineLayout {
+        let pipeline_layout = hal::PipelineLayout {
             descriptors: &[&descriptor_layout],
             push_constant: None,
         };
-        let specializations = Specializations::default();
-        let pipeline = Pipeline::graphics(
+        let specializations = hal::Specializations::default();
+        let pipeline = hal::Pipeline::graphics(
             device,
             &pipeline_layout,
-            &GraphicsPipelineRequest {
+            &hal::GraphicsPipelineRequest {
                 color_formats: &[swapchain.format],
                 depth_format: Some(render_targets::DEPTH_FORMAT),
                 cull_mode: vk::CullModeFlags::BACK,
                 shaders: &[
-                    ShaderStage {
+                    hal::ShaderStage {
                         shader: &vertex_shader,
                         specializations: &specializations,
                     },
-                    ShaderStage {
+                    hal::ShaderStage {
                         shader: &fragment_shader,
                         specializations: &specializations,
                     },
@@ -142,7 +129,7 @@ impl MeshPhase {
         })
     }
 
-    pub fn destroy(&self, device: &Device) {
+    pub fn destroy(&self, device: &hal::Device) {
         self.descriptor_layout.destroy(device);
         self.depth_reduce_descriptor_layout.destroy(device);
         self.cull_descriptor_layout.destroy(device);
@@ -169,9 +156,9 @@ struct CullData {
 }
 
 fn create_depth_pyramid(
-    device: &Device,
-    swapchain: &Swapchain,
-) -> Result<(Image, Memory)> {
+    device: &hal::Device,
+    swapchain: &hal::Swapchain,
+) -> Result<(hal::Image, hal::Memory)> {
     let vk::Extent2D { width, height } = swapchain.extent;
     // Find previous power of 2.
     let width = (width / 2).next_power_of_two();
@@ -181,34 +168,37 @@ fn create_depth_pyramid(
     let usage = vk::ImageUsageFlags::SAMPLED
         | vk::ImageUsageFlags::STORAGE
         | vk::ImageUsageFlags::TRANSFER_SRC;
-    let mut image = Image::new(
+    let mut image = hal::Image::new(
         device,
-        &ImageRequest {
+        &hal::ImageRequest {
             format: vk::Format::R32_SFLOAT,
             mip_level_count,
             extent,
             usage,
         },
     )?;
-    let memory =
-        image_memory(device, &image, vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
+    let memory = hal::image_memory(
+        device,
+        &image,
+        vk::MemoryPropertyFlags::DEVICE_LOCAL,
+    )?;
     for base_mip_level in 0..mip_level_count {
         image.add_view(
             device,
-            ImageViewRequest { mip_level_count: 1, base_mip_level },
+            hal::ImageViewRequest { mip_level_count: 1, base_mip_level },
         )?;
     }
     image.add_view(
         device,
-        ImageViewRequest { mip_level_count, base_mip_level: 0 },
+        hal::ImageViewRequest { mip_level_count, base_mip_level: 0 },
     )?;
     Ok((image, memory))
 }
 
-fn create_depth_sampler(device: &Device) -> Result<Sampler> {
-    Sampler::new(
+fn create_depth_sampler(device: &hal::Device) -> Result<hal::Sampler> {
+    hal::Sampler::new(
         device,
-        &SamplerRequest {
+        &hal::SamplerRequest {
             filter: vk::Filter::LINEAR,
             address_mode: vk::SamplerAddressMode::CLAMP_TO_EDGE,
             reduction_mode: Some(vk::SamplerReductionMode::MIN),
@@ -218,10 +208,10 @@ fn create_depth_sampler(device: &Device) -> Result<Sampler> {
 }
 
 fn create_depth_reduce_pipeline(
-    device: &Device,
-    descriptor_layout: &DescriptorLayout,
-) -> Result<Pipeline> {
-    let layout = PipelineLayout {
+    device: &hal::Device,
+    descriptor_layout: &hal::DescriptorLayout,
+) -> Result<hal::Pipeline> {
+    let layout = hal::PipelineLayout {
         descriptors: &[descriptor_layout],
         push_constant: Some(vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -229,9 +219,9 @@ fn create_depth_reduce_pipeline(
             offset: 0,
         }),
     };
-    let shader = Shader::new(
+    let shader = hal::Shader::new(
         device,
-        &ShaderRequest {
+        &hal::ShaderRequest {
             stage: vk::ShaderStageFlags::COMPUTE,
             source: vk_shader_macros::include_glsl!(
                 "src/shaders/mesh/depth_reduce.comp.glsl",
@@ -239,20 +229,20 @@ fn create_depth_reduce_pipeline(
             ),
         },
     )?;
-    let specializations = Specializations::default();
+    let specializations = hal::Specializations::default();
     let shader_stage =
-        ShaderStage { shader: &shader, specializations: &specializations };
-    let pipeline = Pipeline::compute(device, &layout, shader_stage)?;
+        hal::ShaderStage { shader: &shader, specializations: &specializations };
+    let pipeline = hal::Pipeline::compute(device, &layout, shader_stage)?;
     shader.destroy(device);
     Ok(pipeline)
 }
 
 fn create_cull_pipeline(
-    device: &Device,
-    descriptor_layout: &DescriptorLayout,
+    device: &hal::Device,
+    descriptor_layout: &hal::DescriptorLayout,
     phase: DrawPhase,
-) -> Result<Pipeline> {
-    let layout = PipelineLayout {
+) -> Result<hal::Pipeline> {
+    let layout = hal::PipelineLayout {
         descriptors: &[descriptor_layout],
         push_constant: Some(vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::COMPUTE,
@@ -260,9 +250,9 @@ fn create_cull_pipeline(
             offset: 0,
         }),
     };
-    let shader = Shader::new(
+    let shader = hal::Shader::new(
         device,
-        &ShaderRequest {
+        &hal::ShaderRequest {
             stage: vk::ShaderStageFlags::COMPUTE,
             source: vk_shader_macros::include_glsl!(
                 "src/shaders/mesh/draw_cull.comp.glsl",
@@ -271,26 +261,26 @@ fn create_cull_pipeline(
         },
     )?;
     let specializations = match phase {
-        DrawPhase::Pre => Specializations::default(),
+        DrawPhase::Pre => hal::Specializations::default(),
         DrawPhase::Post => {
-            Specializations::default().entry(&1u32.to_le_bytes())
+            hal::Specializations::default().entry(&1u32.to_le_bytes())
         }
     };
     let shader_stage =
-        ShaderStage { shader: &shader, specializations: &specializations };
-    let pipeline = Pipeline::compute(device, &layout, shader_stage)?;
+        hal::ShaderStage { shader: &shader, specializations: &specializations };
+    let pipeline = hal::Pipeline::compute(device, &layout, shader_stage)?;
     shader.destroy(device);
     Ok(pipeline)
 }
 
 pub(super) fn create_descriptor(
-    device: &Device,
+    device: &hal::Device,
     mesh_phase: &MeshPhase,
     constants: &Constants,
     scene: &Scene,
-    data: &mut DescriptorData,
-) -> Descriptor {
-    let texture_views = scene.textures.iter().map(Image::full_view);
+    data: &mut hal::DescriptorData,
+) -> hal::Descriptor {
+    let texture_views = scene.textures.iter().map(hal::Image::full_view);
     data.builder(device, &mesh_phase.descriptor_layout)
         .uniform_buffer(&constants.buffer)
         .storage_buffer(&scene.vertices)
@@ -304,26 +294,27 @@ pub(super) fn create_descriptor(
 }
 
 pub(super) fn create_depth_reduce_descriptors(
-    device: &Device,
+    device: &hal::Device,
     mesh_phase: &MeshPhase,
     render_targets: &RenderTargets,
-    data: &mut DescriptorData,
-) -> Vec<Descriptor> {
+    data: &mut hal::DescriptorData,
+) -> Vec<hal::Descriptor> {
     let layout = &mesh_phase.depth_reduce_descriptor_layout;
     (0..mesh_phase.depth_pyramid.mip_level_count)
         .map(|mip_level| {
             let input = if let Some(input_level) = mip_level.checked_sub(1) {
-                mesh_phase.depth_pyramid.view(&ImageViewRequest {
+                mesh_phase.depth_pyramid.view(&hal::ImageViewRequest {
                     mip_level_count: 1,
                     base_mip_level: input_level,
                 })
             } else {
                 render_targets.depth.full_view()
             };
-            let output = mesh_phase.depth_pyramid.view(&ImageViewRequest {
-                mip_level_count: 1,
-                base_mip_level: mip_level,
-            });
+            let output =
+                mesh_phase.depth_pyramid.view(&hal::ImageViewRequest {
+                    mip_level_count: 1,
+                    base_mip_level: mip_level,
+                });
             data.builder(device, layout)
                 .storage_image(&output)
                 .combined_image_sampler(&mesh_phase.depth_sampler, input)
@@ -333,12 +324,12 @@ pub(super) fn create_depth_reduce_descriptors(
 }
 
 pub(crate) fn create_cull_descriptor(
-    device: &Device,
+    device: &hal::Device,
     mesh_phase: &MeshPhase,
     constants: &Constants,
     scene: &Scene,
-    data: &mut DescriptorData,
-) -> Descriptor {
+    data: &mut hal::DescriptorData,
+) -> hal::Descriptor {
     let depth_pyramid = mesh_phase.depth_pyramid.full_view();
     data.builder(device, &mesh_phase.cull_descriptor_layout)
         .uniform_buffer(&constants.buffer)
@@ -352,8 +343,8 @@ pub(crate) fn create_cull_descriptor(
 }
 
 fn cull<'a>(
-    device: &Device,
-    command_buffer: &mut CommandBuffer<'a>,
+    device: &hal::Device,
+    command_buffer: &mut hal::CommandBuffer<'a>,
     descriptors: &Descriptors,
     mesh_phase: &'a MeshPhase,
     phase: DrawPhase,
@@ -370,10 +361,10 @@ fn cull<'a>(
         command_buffer.pipeline_barriers(
             device,
             &[],
-            &[BufferBarrier {
+            &[hal::BufferBarrier {
                 buffer: &scene.draw_count,
-                src: Access::INDIRECT_READ,
-                dst: Access::TRANSFER_DST,
+                src: hal::Access::INDIRECT_READ,
+                dst: hal::Access::TRANSFER_DST,
             }],
         );
     }
@@ -382,30 +373,30 @@ fn cull<'a>(
         .fill_buffer(device, &scene.draw_count, 0)
         .pipeline_barriers(
             device,
-            &[ImageBarrier {
+            &[hal::ImageBarrier {
                 image: &mesh_phase.depth_pyramid,
                 new_layout: vk::ImageLayout::GENERAL,
-                mip_levels: MipLevels::All,
+                mip_levels: hal::MipLevels::All,
                 src: match phase {
-                    DrawPhase::Pre => Access::NONE,
-                    DrawPhase::Post => Access::COMPUTE_WRITE,
+                    DrawPhase::Pre => hal::Access::NONE,
+                    DrawPhase::Post => hal::Access::COMPUTE_WRITE,
                 },
-                dst: Access::COMPUTE_READ,
+                dst: hal::Access::COMPUTE_READ,
             }],
             &[
-                BufferBarrier {
+                hal::BufferBarrier {
                     buffer: &scene.draw_count,
-                    src: Access::TRANSFER_DST,
-                    dst: Access::COMPUTE_WRITE,
+                    src: hal::Access::TRANSFER_DST,
+                    dst: hal::Access::COMPUTE_WRITE,
                 },
-                BufferBarrier {
+                hal::BufferBarrier {
                     buffer: &scene.draw_commands,
-                    src: Access::INDIRECT_READ
-                        | Access {
+                    src: hal::Access::INDIRECT_READ
+                        | hal::Access {
                             stage: vk::PipelineStageFlags2::VERTEX_SHADER,
                             access: vk::AccessFlags2::SHADER_READ,
                         },
-                    dst: Access::COMPUTE_WRITE,
+                    dst: hal::Access::COMPUTE_WRITE,
                 },
             ],
         )
@@ -416,8 +407,8 @@ fn cull<'a>(
 }
 
 pub(super) fn depth_reduce<'a>(
-    device: &Device,
-    command_buffer: &mut CommandBuffer<'a>,
+    device: &hal::Device,
+    command_buffer: &mut hal::CommandBuffer<'a>,
     descriptors: &Descriptors,
     mesh_phase: &'a MeshPhase,
 ) {
@@ -439,18 +430,18 @@ pub(super) fn depth_reduce<'a>(
             .dispatch(device, width.div_ceil(32), height.div_ceil(32), 1)
             .pipeline_barriers(
                 device,
-                &[ImageBarrier {
+                &[hal::ImageBarrier {
                     image: &mesh_phase.depth_pyramid,
                     new_layout: vk::ImageLayout::GENERAL,
-                    mip_levels: MipLevels::Levels {
+                    mip_levels: hal::MipLevels::Levels {
                         base: output_level as u32,
                         count: 1,
                     },
-                    src: Access {
+                    src: hal::Access {
                         stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
                         access: vk::AccessFlags2::SHADER_STORAGE_WRITE,
                     },
-                    dst: Access {
+                    dst: hal::Access {
                         stage: vk::PipelineStageFlags2::COMPUTE_SHADER,
                         access: vk::AccessFlags2::SHADER_SAMPLED_READ,
                     },
@@ -461,9 +452,9 @@ pub(super) fn depth_reduce<'a>(
 }
 
 fn draw<'a>(
-    device: &Device,
-    command_buffer: &mut CommandBuffer<'a>,
-    swapchain_image: &'a Image,
+    device: &hal::Device,
+    command_buffer: &mut hal::CommandBuffer<'a>,
+    swapchain_image: &'a hal::Image,
     descriptors: &Descriptors,
     mesh_phase: &'a MeshPhase,
     render_targets: &'a RenderTargets,
@@ -477,18 +468,18 @@ fn draw<'a>(
 
     let (depht_load, color_load) = match phase {
         DrawPhase::Pre => {
-            let depth_load = Load::Clear(vk::ClearValue {
+            let depth_load = hal::Load::Clear(vk::ClearValue {
                 depth_stencil: vk::ClearDepthStencilValue {
                     depth: 0.0,
                     stencil: 0,
                 },
             });
-            let color_load = Load::Clear(vk::ClearValue {
+            let color_load = hal::Load::Clear(vk::ClearValue {
                 color: vk::ClearColorValue { float32: [0.0; 4] },
             });
             (depth_load, color_load)
         }
-        DrawPhase::Post => (Load::Load, Load::Load),
+        DrawPhase::Post => (hal::Load::Load, hal::Load::Load),
     };
 
     command_buffer
@@ -512,13 +503,15 @@ fn draw<'a>(
         .bind_descriptor(device, &mesh_phase.pipeline, &descriptors.mesh_phase)
         .begin_rendering(
             device,
-            &BeginRendering {
-                depth_attachment: Some(Attachment {
-                    view: render_targets.depth.view(&ImageViewRequest::BASE),
+            &hal::BeginRendering {
+                depth_attachment: Some(hal::Attachment {
+                    view: render_targets
+                        .depth
+                        .view(&hal::ImageViewRequest::BASE),
                     load: depht_load,
                 }),
-                color_attachments: &[Attachment {
-                    view: swapchain_image.view(&ImageViewRequest::BASE),
+                color_attachments: &[hal::Attachment {
+                    view: swapchain_image.view(&hal::ImageViewRequest::BASE),
                     load: color_load,
                 }],
                 extent,
@@ -536,9 +529,9 @@ fn draw<'a>(
 }
 
 pub(super) fn render<'a>(
-    device: &Device,
-    command_buffer: &mut CommandBuffer<'a>,
-    swapchain_image: &'a Image,
+    device: &hal::Device,
+    command_buffer: &mut hal::CommandBuffer<'a>,
+    swapchain_image: &'a hal::Image,
     descriptors: &Descriptors,
     mesh_phase: &'a MeshPhase,
     render_targets: &'a RenderTargets,
@@ -554,32 +547,32 @@ pub(super) fn render<'a>(
     );
 
     let buffer_barriers = [
-        BufferBarrier {
+        hal::BufferBarrier {
             buffer: &scene.draw_count,
-            src: Access::COMPUTE_WRITE,
-            dst: Access::INDIRECT_READ,
+            src: hal::Access::COMPUTE_WRITE,
+            dst: hal::Access::INDIRECT_READ,
         },
-        BufferBarrier {
+        hal::BufferBarrier {
             buffer: &scene.draw_commands,
-            src: Access::COMPUTE_WRITE,
-            dst: Access::INDIRECT_READ,
+            src: hal::Access::COMPUTE_WRITE,
+            dst: hal::Access::INDIRECT_READ,
         },
     ];
 
     let image_barriers = [
-        ImageBarrier {
+        hal::ImageBarrier {
             image: &render_targets.depth,
             new_layout: vk::ImageLayout::DEPTH_ATTACHMENT_OPTIMAL,
-            mip_levels: MipLevels::All,
-            src: Access::NONE,
-            dst: Access::DEPTH_BUFFER_RENDER,
+            mip_levels: hal::MipLevels::All,
+            src: hal::Access::NONE,
+            dst: hal::Access::DEPTH_BUFFER_RENDER,
         },
-        ImageBarrier {
+        hal::ImageBarrier {
             image: &swapchain_image,
             new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            mip_levels: MipLevels::All,
-            src: Access::NONE,
-            dst: Access::COLOR_BUFFER_RENDER,
+            mip_levels: hal::MipLevels::All,
+            src: hal::Access::NONE,
+            dst: hal::Access::COLOR_BUFFER_RENDER,
         },
     ];
 
@@ -598,12 +591,12 @@ pub(super) fn render<'a>(
 
     command_buffer.pipeline_barriers(
         device,
-        &[ImageBarrier {
+        &[hal::ImageBarrier {
             image: &render_targets.depth,
             new_layout: vk::ImageLayout::GENERAL,
-            mip_levels: MipLevels::All,
-            src: Access::DEPTH_BUFFER_RENDER,
-            dst: Access::DEPTH_BUFFER_READ,
+            mip_levels: hal::MipLevels::All,
+            src: hal::Access::DEPTH_BUFFER_RENDER,
+            dst: hal::Access::DEPTH_BUFFER_READ,
         }],
         &[],
     );

@@ -5,15 +5,14 @@ use std::slice;
 use ash::vk::{self};
 use eyre::{Context, Result};
 
-use crate::descriptor;
-use crate::device::Device;
+use super::{DescriptorLayout, Device};
 
-pub(crate) struct ShaderRequest<'a> {
+pub struct ShaderRequest<'a> {
     pub source: &'a [u32],
     pub stage: vk::ShaderStageFlags,
 }
 
-pub(crate) struct Shader {
+pub struct Shader {
     pub module: vk::ShaderModule,
     stage: vk::ShaderStageFlags,
 }
@@ -46,8 +45,8 @@ impl Shader {
 }
 
 #[derive(Default)]
-pub(crate) struct PipelineLayout<'a> {
-    pub descriptors: &'a [&'a descriptor::DescriptorLayout],
+pub struct PipelineLayout<'a> {
+    pub descriptors: &'a [&'a DescriptorLayout],
     pub push_constant: Option<vk::PushConstantRange>,
 }
 
@@ -88,7 +87,7 @@ fn create_shader_info(
         .build()
 }
 
-pub(crate) struct Pipeline {
+pub struct Pipeline {
     pipeline: vk::Pipeline,
     pub layout: vk::PipelineLayout,
     pub push_constant_stages: vk::ShaderStageFlags,
@@ -104,7 +103,7 @@ impl Deref for Pipeline {
 }
 
 #[derive(Default)]
-pub(crate) struct Specializations {
+pub struct Specializations {
     entries: Vec<vk::SpecializationMapEntry>,
     data: Vec<u8>,
 }
@@ -122,12 +121,12 @@ impl Specializations {
     }
 }
 
-pub(crate) struct ShaderStage<'a> {
+pub struct ShaderStage<'a> {
     pub specializations: &'a Specializations,
     pub shader: &'a Shader,
 }
 
-pub(crate) struct GraphicsPipelineRequest<'a> {
+pub struct GraphicsPipelineRequest<'a> {
     pub color_formats: &'a [vk::Format],
     pub depth_format: Option<vk::Format>,
     pub shaders: &'a [ShaderStage<'a>],

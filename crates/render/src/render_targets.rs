@@ -1,32 +1,28 @@
 use ash::vk;
 use eyre::Result;
 
-use crate::device::Device;
-use crate::resources::{
-    Allocator, Image, ImageRequest, ImageViewRequest, Memory,
-};
-use crate::swapchain::Swapchain;
+use crate::hal;
 
 pub(crate) struct RenderTargets {
-    pub depth: Image,
-    pub swapchain: Vec<Image>,
-    memory: Memory,
+    pub depth: hal::Image,
+    pub swapchain: Vec<hal::Image>,
+    memory: hal::Memory,
 }
 
 impl RenderTargets {
     pub fn new(
-        device: &Device,
-        swapchain_images: Vec<Image>,
-        swapchain: &Swapchain,
+        device: &hal::Device,
+        swapchain_images: Vec<hal::Image>,
+        swapchain: &hal::Swapchain,
     ) -> Result<Self> {
         let extent = vk::Extent3D {
             width: swapchain.extent.width,
             height: swapchain.extent.height,
             depth: 1,
         };
-        let mut depth = Image::new(
+        let mut depth = hal::Image::new(
             device,
-            &ImageRequest {
+            &hal::ImageRequest {
                 format: DEPTH_FORMAT,
                 mip_level_count: 1,
                 usage: vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
@@ -34,14 +30,14 @@ impl RenderTargets {
                 extent,
             },
         )?;
-        let memory = Allocator::new(device)
+        let memory = hal::Allocator::new(device)
             .alloc_image(&depth)
             .finish(vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
-        depth.add_view(device, ImageViewRequest::BASE)?;
+        depth.add_view(device, hal::ImageViewRequest::BASE)?;
         Ok(Self { depth, memory, swapchain: swapchain_images })
     }
 
-    pub fn destroy(&self, device: &Device) {
+    pub fn destroy(&self, device: &hal::Device) {
         for image in &self.swapchain {
             image.destroy(device);
         }

@@ -5,13 +5,12 @@ use std::slice;
 use ash::vk;
 use eyre::{Context, Result};
 
-use crate::descriptor::{Descriptor, DescriptorBuffer};
-use crate::device::Device;
-use crate::resources::{Buffer, Image, ImageView};
-use crate::shader::Pipeline;
-use crate::sync::Sync;
+use super::{
+    Buffer, Descriptor, DescriptorBuffer, Device, Image, ImageView, Pipeline,
+    Sync,
+};
 
-pub(crate) struct CommandBuffer<'a> {
+pub struct CommandBuffer<'a> {
     buffer: vk::CommandBuffer,
     image_layouts: HashMap<&'a Image, vk::ImageLayout>,
 }
@@ -455,7 +454,7 @@ impl<'a> CommandBuffer<'a> {
     }
 }
 
-pub(crate) enum Load {
+pub enum Load {
     Clear(vk::ClearValue),
     Load,
 }
@@ -469,7 +468,7 @@ impl Load {
     }
 }
 
-pub(crate) struct ImageBlit<'a> {
+pub struct ImageBlit<'a> {
     pub src: &'a Image,
     pub dst: &'a Image,
     pub src_offsets: [vk::Offset3D; 2],
@@ -479,18 +478,18 @@ pub(crate) struct ImageBlit<'a> {
     pub filter: vk::Filter,
 }
 
-pub(crate) struct Attachment<'a> {
+pub struct Attachment<'a> {
     pub view: &'a ImageView,
     pub load: Load,
 }
 
-pub(crate) struct BeginRendering<'a> {
+pub struct BeginRendering<'a> {
     pub color_attachments: &'a [Attachment<'a>],
     pub depth_attachment: Option<Attachment<'a>>,
     pub extent: vk::Extent2D,
 }
 
-pub(crate) struct DrawIndexed {
+pub struct DrawIndexed {
     pub index_count: u32,
     pub instance_count: u32,
     pub first_index: u32,
@@ -499,7 +498,7 @@ pub(crate) struct DrawIndexed {
 }
 
 #[derive(Default)]
-pub(crate) enum MipLevels {
+pub enum MipLevels {
     #[default]
     All,
     Levels {
@@ -508,7 +507,7 @@ pub(crate) enum MipLevels {
     },
 }
 
-pub(crate) struct ImageBarrier<'a> {
+pub struct ImageBarrier<'a> {
     pub image: &'a Image,
     pub new_layout: vk::ImageLayout,
     pub mip_levels: MipLevels,
@@ -516,20 +515,20 @@ pub(crate) struct ImageBarrier<'a> {
     pub dst: Access,
 }
 
-pub(crate) struct BufferBarrier<'a> {
+pub struct BufferBarrier<'a> {
     pub buffer: &'a Buffer,
     pub src: Access,
     pub dst: Access,
 }
 
-pub(crate) struct ImageLayouts {
+pub struct ImageLayouts {
     pub layout: vk::ImageLayout,
     pub src: Access,
     pub dst: Access,
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Access {
+pub struct Access {
     pub stage: vk::PipelineStageFlags2,
     pub access: vk::AccessFlags2,
 }
@@ -592,7 +591,7 @@ impl Access {
     };
 }
 
-pub(crate) fn quickie<'a, F, R>(device: &Device, f: F) -> Result<R>
+pub fn quickie<'a, F, R>(device: &Device, f: F) -> Result<R>
 where
     F: FnOnce(&mut CommandBuffer<'a>) -> Result<R>,
 {
@@ -606,7 +605,7 @@ where
     Ok(result)
 }
 
-pub(crate) fn frame<'a, F, R>(
+pub fn frame<'a, F, R>(
     device: &Device,
     sync: &Sync,
     f: F,

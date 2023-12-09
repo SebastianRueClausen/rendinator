@@ -4,21 +4,19 @@ use std::ops::Deref;
 use ash::vk;
 use eyre::{Context, Result};
 
-use crate::device::Device;
-use crate::resources::{
-    buffer_memory, Buffer, BufferKind, BufferRequest, BufferWrite, ImageView,
-    Memory, Sampler, Tlas,
+use super::{
+    buffer_memory, command, resources, Buffer, BufferKind, BufferRequest,
+    BufferWrite, Device, ImageView, Memory, Sampler, Tlas,
 };
-use crate::{command, resources};
 
 #[derive(Clone, Copy)]
-pub(crate) struct LayoutBinding {
+pub struct LayoutBinding {
     pub ty: vk::DescriptorType,
     pub count: u32,
 }
 
 #[derive(Default)]
-pub(crate) struct DescriptorLayoutBuilder {
+pub struct DescriptorLayoutBuilder {
     bindings: Vec<LayoutBinding>,
 }
 
@@ -42,7 +40,7 @@ impl DescriptorLayoutBuilder {
     }
 }
 
-pub(crate) struct DescriptorLayout {
+pub struct DescriptorLayout {
     layout: vk::DescriptorSetLayout,
 }
 
@@ -108,7 +106,7 @@ impl DescriptorLayout {
     }
 }
 
-pub(super) struct DescriptorBuffer {
+pub struct DescriptorBuffer {
     pub buffer: Buffer,
     pub memory: Memory,
 }
@@ -141,7 +139,7 @@ impl DescriptorBuffer {
     }
 }
 
-pub(crate) struct DescriptorBuilder<'a> {
+pub struct DescriptorBuilder<'a> {
     layout: &'a DescriptorLayout,
     device: &'a Device,
     data: &'a mut DescriptorData,
@@ -341,7 +339,7 @@ impl<'a> DescriptorBuilder<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct DescriptorData {
+pub struct DescriptorData {
     alignment: usize,
     data: Vec<u8>,
 }
@@ -377,6 +375,6 @@ impl DescriptorData {
     }
 }
 
-pub(crate) struct Descriptor {
+pub struct Descriptor {
     pub buffer_offset: vk::DeviceSize,
 }

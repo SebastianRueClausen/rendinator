@@ -6,11 +6,11 @@ use ash::vk;
 use eyre::{Context, Result};
 use glam::Mat4;
 
-use crate::command::{self, CommandBuffer};
-use crate::device::Device;
+use super::command::{self, CommandBuffer};
+use super::Device;
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum BufferKind {
+pub enum BufferKind {
     Index,
     Storage,
     Uniform,
@@ -57,13 +57,13 @@ impl BufferKind {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BufferRequest {
+pub struct BufferRequest {
     pub size: u64,
     pub kind: BufferKind,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Buffer {
+pub struct Buffer {
     pub buffer: vk::Buffer,
     #[allow(dead_code)]
     pub size: vk::DeviceSize,
@@ -112,7 +112,7 @@ fn format_aspect(format: vk::Format) -> vk::ImageAspectFlags {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct ImageViewRequest {
+pub struct ImageViewRequest {
     pub mip_level_count: u32,
     pub base_mip_level: u32,
 }
@@ -122,7 +122,7 @@ impl ImageViewRequest {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ImageView {
+pub struct ImageView {
     view: vk::ImageView,
     request: ImageViewRequest,
 }
@@ -171,7 +171,7 @@ impl ImageView {
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct ImageRequest {
+pub struct ImageRequest {
     pub extent: vk::Extent3D,
     pub format: vk::Format,
     pub mip_level_count: u32,
@@ -179,7 +179,7 @@ pub(crate) struct ImageRequest {
 }
 
 #[derive(Debug)]
-pub(crate) struct Image {
+pub struct Image {
     pub image: vk::Image,
     pub extent: vk::Extent3D,
     pub format: vk::Format,
@@ -296,10 +296,7 @@ impl Image {
     }
 }
 
-pub(crate) fn mip_level_extent(
-    extent: vk::Extent3D,
-    level: u32,
-) -> vk::Extent3D {
+pub fn mip_level_extent(extent: vk::Extent3D, level: u32) -> vk::Extent3D {
     vk::Extent3D {
         width: extent.width >> level,
         height: extent.height >> level,
@@ -307,10 +304,7 @@ pub(crate) fn mip_level_extent(
     }
 }
 
-pub(crate) fn mip_level_offset(
-    offset: vk::Offset3D,
-    level: u32,
-) -> vk::Offset3D {
+pub fn mip_level_offset(offset: vk::Offset3D, level: u32) -> vk::Offset3D {
     vk::Offset3D { x: offset.x >> level, y: offset.y >> level, z: offset.z }
 }
 
@@ -331,7 +325,7 @@ fn memory_type_index(
     Err(eyre::eyre!("invalid memory type"))
 }
 
-pub(crate) struct Memory {
+pub struct Memory {
     memory: vk::DeviceMemory,
 }
 
@@ -388,12 +382,12 @@ impl Memory {
 }
 
 #[derive(Debug)]
-pub(crate) struct BufferRange<'a> {
+pub struct BufferRange<'a> {
     pub buffer: &'a Buffer,
     pub offset: vk::DeviceSize,
 }
 
-pub(crate) fn bind_buffer_memory(
+pub fn bind_buffer_memory(
     device: &Device,
     memory: &Memory,
     buffer_ranges: &[BufferRange],
@@ -420,12 +414,12 @@ pub(crate) fn bind_buffer_memory(
 }
 
 #[derive(Debug)]
-pub(crate) struct ImageRange<'a> {
+pub struct ImageRange<'a> {
     pub image: &'a Image,
     pub offset: u64,
 }
 
-pub(crate) fn bind_image_memory(
+pub fn bind_image_memory(
     device: &Device,
     memory: &Memory,
     image_ranges: &[ImageRange],
@@ -451,7 +445,7 @@ pub(crate) fn bind_image_memory(
     }
 }
 
-pub(crate) fn buffer_memory(
+pub fn buffer_memory(
     device: &Device,
     buffer: &Buffer,
     memory_flags: vk::MemoryPropertyFlags,
@@ -472,7 +466,7 @@ pub(crate) fn buffer_memory(
     Ok(buffer_memory)
 }
 
-pub(crate) fn image_memory(
+pub fn image_memory(
     device: &Device,
     image: &Image,
     memory_flags: vk::MemoryPropertyFlags,
@@ -492,13 +486,13 @@ pub(crate) fn image_memory(
     Ok(image_memory)
 }
 
-pub(crate) struct Scratch {
+pub struct Scratch {
     pub buffer: Buffer,
     pub memory: Memory,
 }
 
 impl Scratch {
-    pub(crate) fn new(device: &Device, size: vk::DeviceSize) -> Result<Self> {
+    pub fn new(device: &Device, size: vk::DeviceSize) -> Result<Self> {
         let buffer = Buffer::new(
             device,
             &BufferRequest { size, kind: BufferKind::Scratch },
@@ -509,18 +503,18 @@ impl Scratch {
         Ok(Self { buffer, memory })
     }
 
-    pub(crate) fn destroy(&self, device: &Device) {
+    pub fn destroy(&self, device: &Device) {
         self.buffer.destroy(device);
         self.memory.free(device);
     }
 }
 
-pub(crate) struct BufferWrite<'a> {
+pub struct BufferWrite<'a> {
     pub buffer: &'a Buffer,
     pub data: &'a [u8],
 }
 
-pub(crate) fn upload_buffer_data(
+pub fn upload_buffer_data(
     device: &Device,
     command_buffer: &CommandBuffer,
     buffer_writes: &[BufferWrite],
@@ -555,14 +549,14 @@ pub(crate) fn upload_buffer_data(
     Ok(scratch)
 }
 
-pub(crate) struct ImageWrite<'a> {
+pub struct ImageWrite<'a> {
     pub image: &'a Image,
     pub offset: vk::Offset3D,
     pub extent: vk::Extent3D,
     pub mips: &'a [Box<[u8]>],
 }
 
-pub(crate) fn upload_image_data(
+pub fn upload_image_data(
     device: &Device,
     command_buffer: &CommandBuffer,
     image_writes: &[ImageWrite],
@@ -626,7 +620,7 @@ pub(crate) fn upload_image_data(
     Ok(scratch)
 }
 
-pub(crate) struct Allocator<'a> {
+pub struct Allocator<'a> {
     device: &'a Device,
     offset: vk::DeviceSize,
     memory_type_bits: u32,
@@ -705,14 +699,14 @@ impl<'a> Allocator<'a> {
 }
 
 #[derive(Default)]
-pub(crate) struct SamplerRequest {
+pub struct SamplerRequest {
     pub filter: vk::Filter,
     pub max_anisotropy: Option<f32>,
     pub address_mode: vk::SamplerAddressMode,
     pub reduction_mode: Option<vk::SamplerReductionMode>,
 }
 
-pub(crate) struct Sampler {
+pub struct Sampler {
     sampler: vk::Sampler,
 }
 
@@ -763,7 +757,7 @@ impl Sampler {
 }
 
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct BlasRequest {
+pub struct BlasRequest {
     pub vertex_format: vk::Format,
     pub vertex_stride: u64,
     pub triangle_count: u32,
@@ -790,7 +784,7 @@ impl BlasRequest {
 }
 
 #[derive(Debug)]
-pub(crate) struct Blas {
+pub struct Blas {
     acceleration_structure: vk::AccelerationStructureKHR,
     build_scratch_size: vk::DeviceSize,
     request: BlasRequest,
@@ -860,13 +854,13 @@ impl Blas {
     }
 }
 
-pub(crate) struct BlasBuild<'a> {
+pub struct BlasBuild<'a> {
     pub blas: &'a Blas,
     pub vertices: BufferRange<'a>,
     pub indices: BufferRange<'a>,
 }
 
-pub(crate) fn build_blases<'a>(
+pub fn build_blases<'a>(
     device: &Device,
     builds: &[BlasBuild<'a>],
 ) -> Result<()> {
@@ -899,24 +893,6 @@ pub(crate) fn build_blases<'a>(
         .into_iter()
         .map(|build| {
             let request = &build.blas.request;
-
-            /*
-            assert!({
-                let last_access = build.vertices.offset
-                    + request.vertex_stride * request.vertex_count as u64;
-                let size = build.vertices.buffer.size - build.vertices.offset;
-                last_access < size
-            });
-
-            assert!({
-                let last_access = request.triangle_count as u64
-                    * mem::size_of::<u32>() as u64
-                    * 3;
-                let size = build.indices.buffer.size - build.indices.offset;
-                last_access < size
-            });
-            */
-
             let geometry_data = vk::AccelerationStructureGeometryDataKHR {
                 triangles:
                     vk::AccelerationStructureGeometryTrianglesDataKHR::builder()
@@ -999,7 +975,7 @@ pub(crate) fn build_blases<'a>(
     Ok(())
 }
 
-pub(crate) struct Tlas {
+pub struct Tlas {
     pub acceleration_structure: vk::AccelerationStructureKHR,
     pub buffer: Buffer,
     pub scratch: Buffer,
@@ -1130,12 +1106,12 @@ impl Tlas {
     }
 }
 
-pub(crate) struct TlasInstance<'a> {
+pub struct TlasInstance<'a> {
     pub blas: &'a Blas,
     pub transform: Mat4,
 }
 
-pub(crate) struct TlasUpdate {
+pub struct TlasUpdate {
     instances: Vec<TlasInstanceData>,
     mode: vk::BuildAccelerationStructureModeKHR,
 }

@@ -5,7 +5,7 @@ use ash::extensions::{ext, khr};
 use ash::vk;
 use eyre::{Result, WrapErr};
 
-pub(crate) struct Instance {
+pub struct Instance {
     pub entry: ash::Entry,
     pub instance: ash::Instance,
     pub debug_utils: ext::DebugUtils,
@@ -13,7 +13,7 @@ pub(crate) struct Instance {
 }
 
 impl Instance {
-    pub(super) fn new(validate: bool) -> Result<Self> {
+    pub fn new(validate: bool) -> Result<Self> {
         let entry = unsafe { ash::Entry::load().wrap_err("loading entry")? };
         let mut debug_info = {
             use vk::{
@@ -67,7 +67,7 @@ impl Instance {
         Ok(Self { entry, instance, debug_utils, debug_messenger })
     }
 
-    pub(super) fn destroy(&self) {
+    pub fn destroy(&self) {
         unsafe {
             self.debug_utils
                 .destroy_debug_utils_messenger(self.debug_messenger, None);

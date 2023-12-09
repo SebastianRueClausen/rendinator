@@ -5,118 +5,111 @@ use asset::BoundingSphere;
 use eyre::Result;
 use glam::{Mat4, Quat, Vec3};
 
-use crate::command::{self, Access, BufferBarrier, ImageLayouts};
-use crate::device::Device;
-use crate::resources::{
-    self, upload_buffer_data, Allocator, Blas, BlasBuild, BlasRequest, Buffer,
-    BufferKind, BufferRange, BufferRequest, BufferWrite, Image, ImageRequest,
-    ImageViewRequest, ImageWrite, Memory, Sampler, SamplerRequest, Tlas,
-    TlasInstance,
-};
+use crate::hal;
 
 pub(super) struct Scene {
-    pub indices: Buffer,
-    pub vertices: Buffer,
-    pub meshlets: Buffer,
-    pub meshlet_data: Buffer,
-    pub materials: Buffer,
-    pub meshes: Buffer,
-    pub instances: Buffer,
-    pub draws: Buffer,
-    pub draw_commands: Buffer,
-    pub draw_count: Buffer,
-    pub textures: Vec<Image>,
-    pub texture_sampler: Sampler,
-    pub memory: Memory,
+    pub indices: hal::Buffer,
+    pub vertices: hal::Buffer,
+    pub meshlets: hal::Buffer,
+    pub meshlet_data: hal::Buffer,
+    pub materials: hal::Buffer,
+    pub meshes: hal::Buffer,
+    pub instances: hal::Buffer,
+    pub draws: hal::Buffer,
+    pub draw_commands: hal::Buffer,
+    pub draw_count: hal::Buffer,
+    pub textures: Vec<hal::Image>,
+    pub texture_sampler: hal::Sampler,
+    pub memory: hal::Memory,
     pub node_tree: NodeTree,
-    pub blases: Vec<Blas>,
+    pub blases: Vec<hal::Blas>,
     pub tree_draws: Vec<Draw>,
-    pub tlas: Tlas,
+    pub tlas: hal::Tlas,
     pub total_draw_count: u32,
 }
 
 impl Scene {
-    pub fn new(device: &Device, scene: &asset::Scene) -> Result<Self> {
+    pub fn new(device: &hal::Device, scene: &asset::Scene) -> Result<Self> {
         let node_tree = NodeTree::from_instances(scene);
         let tree_draws = node_tree.draws(&scene);
         let total_draw_count = tree_draws.len() as u32;
 
-        let draws = Buffer::new(
+        let draws = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(tree_draws.as_slice()) as u64,
-                kind: BufferKind::Indirect,
+                kind: hal::BufferKind::Indirect,
             },
         )?;
-        let draw_commands = Buffer::new(
+        let draw_commands = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of::<DrawCommand>() as u64
                     * total_draw_count as u64,
-                kind: BufferKind::Indirect,
+                kind: hal::BufferKind::Indirect,
             },
         )?;
-        let draw_count = Buffer::new(
+        let draw_count = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of::<u32>() as u64,
-                kind: BufferKind::Indirect,
+                kind: hal::BufferKind::Indirect,
             },
         )?;
-        let instances = Buffer::new(
+        let instances = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: node_tree.instance_count as u64
                     * mem::size_of::<Instance>() as u64,
-                kind: BufferKind::Storage,
+                kind: hal::BufferKind::Storage,
             },
         )?;
-        let indices = Buffer::new(
+        let indices = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(scene.indices.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::Index,
+                kind: hal::BufferKind::Index,
             },
         )?;
-        let vertices = Buffer::new(
+        let vertices = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(scene.vertices.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::AccStructInput,
+                kind: hal::BufferKind::AccStructInput,
             },
         )?;
-        let meshlets = Buffer::new(
+        let meshlets = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(scene.meshlets.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::Storage,
+                kind: hal::BufferKind::Storage,
             },
         )?;
-        let meshlet_data = Buffer::new(
+        let meshlet_data = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(scene.meshlet_data.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::Storage,
+                kind: hal::BufferKind::Storage,
             },
         )?;
-        let meshes = Buffer::new(
+        let meshes = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(scene.meshes.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::Storage,
+                kind: hal::BufferKind::Storage,
             },
         )?;
-        let materials = Buffer::new(
+        let materials = hal::Buffer::new(
             device,
-            &BufferRequest {
+            &hal::BufferRequest {
                 size: mem::size_of_val(scene.materials.as_slice())
                     as vk::DeviceSize,
-                kind: BufferKind::Storage,
+                kind: hal::BufferKind::Storage,
             },
         )?;
 
@@ -127,7 +120,7 @@ impl Scene {
                 let mip_level_count = texture.mips.len() as u32;
                 let usage = vk::ImageUsageFlags::TRANSFER_DST
                     | vk::ImageUsageFlags::SAMPLED;
-                let request = ImageRequest {
+                let request = hal::ImageRequest {
                     format: texture_kind_format(texture.kind),
                     extent: vk::Extent3D {
                         width: texture.width,
@@ -137,7 +130,7 @@ impl Scene {
                     mip_level_count,
                     usage,
                 };
-                Image::new(device, &request)
+                hal::Image::new(device, &request)
             })
             .collect::<Result<_>>()?;
 
@@ -151,9 +144,9 @@ impl Scene {
         let blases: Vec<_> = blas_meshes
             .clone()
             .map(|mesh| {
-                Blas::new(
+                hal::Blas::new(
                     device,
-                    &BlasRequest {
+                    &hal::BlasRequest {
                         vertex_stride: mem::size_of::<asset::Vertex>()
                             as vk::DeviceSize,
                         vertex_format: vk::Format::R16G16B16_SNORM,
@@ -165,9 +158,9 @@ impl Scene {
             })
             .collect::<Result<_>>()?;
 
-        let tlas = Tlas::new(device, tree_draws.len() as u32)?;
+        let tlas = hal::Tlas::new(device, tree_draws.len() as u32)?;
 
-        let mut allocator = Allocator::new(device);
+        let mut allocator = hal::Allocator::new(device);
         for texture in &textures {
             allocator.alloc_image(texture);
         }
@@ -193,7 +186,7 @@ impl Scene {
         for (image, texture) in textures.iter_mut().zip(scene.textures.iter()) {
             image.add_view(
                 device,
-                ImageViewRequest {
+                hal::ImageViewRequest {
                     mip_level_count: texture.mips.len() as u32,
                     base_mip_level: 0,
                 },
@@ -203,7 +196,7 @@ impl Scene {
         let texture_writes: Vec<_> = textures
             .iter()
             .zip(scene.textures.iter())
-            .map(|(image, texture)| ImageWrite {
+            .map(|(image, texture)| hal::ImageWrite {
                 offset: vk::Offset3D::default(),
                 extent: image.extent,
                 mips: &texture.mips,
@@ -212,52 +205,52 @@ impl Scene {
             .collect();
 
         let buffer_writes = [
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &indices,
                 data: bytemuck::cast_slice(&scene.indices),
             },
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &vertices,
                 data: bytemuck::cast_slice(&scene.vertices),
             },
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &meshlets,
                 data: bytemuck::cast_slice(&scene.meshlets),
             },
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &meshlet_data,
                 data: bytemuck::cast_slice(&scene.meshlet_data),
             },
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &meshes,
                 data: bytemuck::cast_slice(&scene.meshes),
             },
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &materials,
                 data: bytemuck::cast_slice(&scene.materials),
             },
-            BufferWrite {
+            hal::BufferWrite {
                 buffer: &draws,
                 data: bytemuck::cast_slice(&tree_draws),
             },
         ];
 
-        let scratch = command::quickie(device, |command_buffer| {
+        let scratch = hal::command::quickie(device, |command_buffer| {
             command_buffer.ensure_image_layouts(
                 device,
-                ImageLayouts {
+                hal::ImageLayouts {
                     layout: vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    src: Access::NONE,
-                    dst: Access::ALL,
+                    src: hal::Access::NONE,
+                    dst: hal::Access::ALL,
                 },
                 textures.iter().map(|texture| texture),
             );
-            let buffer_scratch = resources::upload_buffer_data(
+            let buffer_scratch = hal::upload_buffer_data(
                 device,
                 &command_buffer,
                 &buffer_writes,
             )?;
-            let image_scratch = resources::upload_image_data(
+            let image_scratch = hal::upload_image_data(
                 device,
                 &command_buffer,
                 &texture_writes,
@@ -269,9 +262,9 @@ impl Scene {
             scratch.destroy(device);
         }
 
-        let texture_sampler = Sampler::new(
+        let texture_sampler = hal::Sampler::new(
             device,
-            &SamplerRequest {
+            &hal::SamplerRequest {
                 filter: vk::Filter::LINEAR,
                 max_anisotropy: Some(device.limits.max_sampler_anisotropy),
                 address_mode: vk::SamplerAddressMode::REPEAT,
@@ -282,13 +275,13 @@ impl Scene {
         let blas_builds: Vec<_> = blases
             .iter()
             .zip(blas_meshes)
-            .map(|(blas, mesh)| BlasBuild {
-                vertices: BufferRange {
+            .map(|(blas, mesh)| hal::BlasBuild {
+                vertices: hal::BufferRange {
                     buffer: &vertices,
                     offset: bytemuck::offset_of!(asset::Vertex, position)
                         as vk::DeviceSize,
                 },
-                indices: BufferRange {
+                indices: hal::BufferRange {
                     buffer: &indices,
                     offset: mesh.lods[0].index_offset as vk::DeviceSize
                         * mem::size_of::<u32>() as vk::DeviceSize,
@@ -297,7 +290,7 @@ impl Scene {
             })
             .collect();
 
-        resources::build_blases(device, &blas_builds)?;
+        hal::build_blases(device, &blas_builds)?;
 
         let tlas_instances = tlas_instances(&tree_draws, &blases, &node_tree);
         let tlas_update = tlas.update(
@@ -305,8 +298,8 @@ impl Scene {
             vk::BuildAccelerationStructureModeKHR::BUILD,
             &tlas_instances,
         );
-        command::quickie(device, |command_buffer| {
-            let scratch = upload_buffer_data(
+        hal::command::quickie(device, |command_buffer| {
+            let scratch = hal::upload_buffer_data(
                 device,
                 command_buffer,
                 &[tlas_update.buffer_write(&tlas)],
@@ -314,10 +307,10 @@ impl Scene {
             command_buffer.pipeline_barriers(
                 device,
                 &[],
-                &[BufferBarrier {
+                &[hal::BufferBarrier {
                     buffer: &tlas.instances,
-                    src: Access::ALL,
-                    dst: Access::ALL,
+                    src: hal::Access::ALL,
+                    dst: hal::Access::ALL,
                 }],
             );
             tlas_update.update(device, command_buffer, &tlas);
@@ -347,7 +340,7 @@ impl Scene {
         })
     }
 
-    pub fn update_tlas(&self, device: &Device) -> Result<()> {
+    pub fn update_tlas(&self, device: &hal::Device) -> Result<()> {
         let tlas_instances =
             tlas_instances(&self.tree_draws, &self.blases, &self.node_tree);
         let tlas_update = self.tlas.update(
@@ -355,8 +348,8 @@ impl Scene {
             vk::BuildAccelerationStructureModeKHR::UPDATE,
             &tlas_instances,
         );
-        command::quickie(device, |command_buffer| {
-            let scratch = upload_buffer_data(
+        hal::command::quickie(device, |command_buffer| {
+            let scratch = hal::upload_buffer_data(
                 device,
                 command_buffer,
                 &[tlas_update.buffer_write(&self.tlas)],
@@ -364,10 +357,10 @@ impl Scene {
             command_buffer.pipeline_barriers(
                 device,
                 &[],
-                &[BufferBarrier {
+                &[hal::BufferBarrier {
                     buffer: &self.tlas.instances,
-                    src: Access::ALL,
-                    dst: Access::ALL,
+                    src: hal::Access::ALL,
+                    dst: hal::Access::ALL,
                 }],
             );
             tlas_update.update(device, command_buffer, &self.tlas);
@@ -377,7 +370,7 @@ impl Scene {
         Ok(())
     }
 
-    pub fn destroy(&self, device: &Device) {
+    pub fn destroy(&self, device: &hal::Device) {
         self.instances.destroy(device);
         self.draws.destroy(device);
         self.draw_commands.destroy(device);
@@ -406,9 +399,9 @@ impl Scene {
 
 fn tlas_instances<'a>(
     draws: &[Draw],
-    blases: &'a [Blas],
+    blases: &'a [hal::Blas],
     node_tree: &NodeTree,
-) -> Vec<TlasInstance<'a>> {
+) -> Vec<hal::TlasInstance<'a>> {
     let instance_transform = node_tree.instances();
     draws
         .iter()
@@ -422,7 +415,7 @@ fn tlas_instances<'a>(
             let transform = instance_transform[draw.instance_index as usize]
                 .transform
                 * something;
-            TlasInstance { transform, blas }
+            hal::TlasInstance { transform, blas }
         })
         .collect()
 }
@@ -583,8 +576,8 @@ pub(super) struct SceneUpdate {
 pub(super) fn buffer_writes<'a>(
     scene: &'a Scene,
     update: &'a SceneUpdate,
-) -> impl Iterator<Item = BufferWrite<'a>> {
-    [BufferWrite {
+) -> impl Iterator<Item = hal::BufferWrite<'a>> {
+    [hal::BufferWrite {
         data: bytemuck::cast_slice(&update.instances),
         buffer: &scene.instances,
     }]

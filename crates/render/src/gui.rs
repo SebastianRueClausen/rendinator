@@ -4,25 +4,8 @@ use ash::vk::{self, MemoryPropertyFlags};
 use eyre::Result;
 use glam::Vec2;
 
-use crate::command::{
-    Attachment, BeginRendering, CommandBuffer, DrawIndexed, Load,
-};
 use crate::constants::Constants;
-use crate::descriptor::{
-    Descriptor, DescriptorData, DescriptorLayout, DescriptorLayoutBuilder,
-};
-use crate::device::Device;
-use crate::resources::{
-    self, Allocator, Buffer, BufferKind, BufferRequest, BufferWrite, Image,
-    ImageRequest, ImageViewRequest, ImageWrite, Memory, Sampler,
-    SamplerRequest,
-};
-use crate::shader::{
-    GraphicsPipelineRequest, Pipeline, PipelineLayout, Shader, ShaderRequest,
-    ShaderStage, Specializations,
-};
-use crate::swapchain::Swapchain;
-use crate::{Descriptors, Update};
+use crate::{hal, Descriptors, Update};
 
 pub struct GuiRequest {
     pub primitives: Vec<egui::ClippedPrimitive>,
@@ -32,37 +15,40 @@ pub struct GuiRequest {
 
 pub(super) struct Texture {
     pub id: epaint::TextureId,
-    pub image: Image,
-    pub memory: Memory,
+    pub image: hal::Image,
+    pub memory: hal::Memory,
 }
 
 pub(super) struct Gui {
-    pub vertices: Buffer,
-    pub indices: Buffer,
-    memory: Memory,
-    pipeline: Pipeline,
-    descriptor_layout: DescriptorLayout,
-    sampler: Sampler,
+    pub vertices: hal::Buffer,
+    pub indices: hal::Buffer,
+    memory: hal::Memory,
+    pipeline: hal::Pipeline,
+    descriptor_layout: hal::DescriptorLayout,
+    sampler: hal::Sampler,
     pub textures: Vec<Texture>,
 }
 
 impl Gui {
-    pub fn new(device: &Device, swapchain: &Swapchain) -> Result<Self> {
+    pub fn new(
+        device: &hal::Device,
+        swapchain: &hal::Swapchain,
+    ) -> Result<Self> {
         let (indices, vertices, memory) = create_buffers(
             device,
             INITIAL_VERTEX_BUFFER_SIZE,
             INITIAL_INDEX_BUFFER_SIZE,
         )?;
         let textures = Vec::default();
-        let descriptor_layout = DescriptorLayoutBuilder::default()
+        let descriptor_layout = hal::DescriptorLayoutBuilder::default()
             .binding(vk::DescriptorType::UNIFORM_BUFFER)
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .array_binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 1024)
             .build(device)?;
         let pipeline = create_pipeline(device, swapchain, &descriptor_layout)?;
-        let sampler = Sampler::new(
+        let sampler = hal::Sampler::new(
             device,
-            &SamplerRequest {
+            &hal::SamplerRequest {
                 filter: vk::Filter::LINEAR,
                 address_mode: vk::SamplerAddressMode::CLAMP_TO_EDGE,
                 ..Default::default()
@@ -81,8 +67,8 @@ impl Gui {
 
     pub fn update(
         &mut self,
-        device: &Device,
-        swapchain: &Swapchain,
+        device: &hal::Device,
+        swapchain: &hal::Swapchain,
         request: &GuiRequest,
     ) -> Result<GuiUpdate> {
         let mut update = GuiUpdate::default();
@@ -198,7 +184,7 @@ impl Gui {
             .expect("invalid texture id")
     }
 
-    pub fn destroy(&self, device: &Device) {
+    pub fn destroy(&self, device: &hal::Device) {
         self.descriptor_layout.destroy(device);
         self.pipeline.destroy(device);
         self.indices.destroy(device);
@@ -213,13 +199,13 @@ impl Gui {
 }
 
 fn create_texture(
-    device: &Device,
+    device: &hal::Device,
     id: epaint::TextureId,
     extent: vk::Extent3D,
 ) -> Result<Texture> {
-    let mut image = Image::new(
+    let mut image = hal::Image::new(
         device,
-        &ImageRequest {
+        &hal::ImageRequest {
             format: vk::Format::R8G8B8A8_SRGB,
             mip_level_count: 1,
             usage: vk::ImageUsageFlags::SAMPLED
@@ -228,21 +214,18 @@ fn create_texture(
             extent,
         },
     )?;
-    let memory = resources::image_memory(
-        device,
-        &image,
-        MemoryPropertyFlags::DEVICE_LOCAL,
-    )?;
+    let memory =
+        hal::image_memory(device, &image, MemoryPropertyFlags::DEVICE_LOCAL)?;
     let view_request =
-        ImageViewRequest { mip_level_count: 1, base_mip_level: 0 };
+        hal::ImageViewRequest { mip_level_count: 1, base_mip_level: 0 };
     image.add_view(device, view_request)?;
     Ok(Texture { image, memory, id })
 }
 
-pub(super) fn create_shaders(device: &Device) -> Result<[Shader; 2]> {
-    let vertex_shader = Shader::new(
+pub(super) fn create_shaders(device: &hal::Device) -> Result<[hal::Shader; 2]> {
+    let vertex_shader = hal::Shader::new(
         device,
-        &ShaderRequest {
+        &hal::ShaderRequest {
             stage: vk::ShaderStageFlags::VERTEX,
             source: vk_shader_macros::include_glsl!(
                 "src/shaders/gui/vert.glsl",
@@ -250,9 +233,9 @@ pub(super) fn create_shaders(device: &Device) -> Result<[Shader; 2]> {
             ),
         },
     )?;
-    let fragment_shader = Shader::new(
+    let fragment_shader = hal::Shader::new(
         device,
-        &ShaderRequest {
+        &hal::ShaderRequest {
             stage: vk::ShaderStageFlags::FRAGMENT,
             source: vk_shader_macros::include_glsl!(
                 "src/shaders/gui/frag.glsl",
@@ -264,12 +247,12 @@ pub(super) fn create_shaders(device: &Device) -> Result<[Shader; 2]> {
 }
 
 pub(super) fn create_pipeline(
-    device: &Device,
-    swapchain: &Swapchain,
-    descriptor_layout: &DescriptorLayout,
-) -> Result<Pipeline> {
+    device: &hal::Device,
+    swapchain: &hal::Swapchain,
+    descriptor_layout: &hal::DescriptorLayout,
+) -> Result<hal::Pipeline> {
     let shaders = create_shaders(device)?;
-    let pipeline_layout = PipelineLayout {
+    let pipeline_layout = hal::PipelineLayout {
         descriptors: &[&descriptor_layout],
         push_constant: Some(vk::PushConstantRange {
             stage_flags: vk::ShaderStageFlags::VERTEX
@@ -278,20 +261,20 @@ pub(super) fn create_pipeline(
             offset: 0,
         }),
     };
-    let specializations = Specializations::default();
-    let pipeline = Pipeline::graphics(
+    let specializations = hal::Specializations::default();
+    let pipeline = hal::Pipeline::graphics(
         device,
         &pipeline_layout,
-        &GraphicsPipelineRequest {
+        &hal::GraphicsPipelineRequest {
             color_formats: &[swapchain.format],
             depth_format: None,
             cull_mode: vk::CullModeFlags::NONE,
             shaders: &[
-                ShaderStage {
+                hal::ShaderStage {
                     shader: &shaders[0],
                     specializations: &specializations,
                 },
-                ShaderStage {
+                hal::ShaderStage {
                     shader: &shaders[1],
                     specializations: &specializations,
                 },
@@ -305,19 +288,25 @@ pub(super) fn create_pipeline(
 }
 
 fn create_buffers(
-    device: &Device,
+    device: &hal::Device,
     index_buffer_size: vk::DeviceSize,
     vertex_buffer_size: vk::DeviceSize,
-) -> Result<(Buffer, Buffer, Memory)> {
-    let indices = Buffer::new(
+) -> Result<(hal::Buffer, hal::Buffer, hal::Memory)> {
+    let indices = hal::Buffer::new(
         device,
-        &BufferRequest { size: index_buffer_size, kind: BufferKind::Index },
+        &hal::BufferRequest {
+            size: index_buffer_size,
+            kind: hal::BufferKind::Index,
+        },
     )?;
-    let vertices = Buffer::new(
+    let vertices = hal::Buffer::new(
         device,
-        &BufferRequest { size: vertex_buffer_size, kind: BufferKind::Storage },
+        &hal::BufferRequest {
+            size: vertex_buffer_size,
+            kind: hal::BufferKind::Storage,
+        },
     )?;
-    let mut allocator = Allocator::new(device);
+    let mut allocator = hal::Allocator::new(device);
     allocator.alloc_buffer(&indices);
     allocator.alloc_buffer(&vertices);
     let memory = allocator.finish(vk::MemoryPropertyFlags::DEVICE_LOCAL)?;
@@ -385,36 +374,36 @@ pub(super) struct Draw {
 pub(super) fn image_writes<'a>(
     gui: &'a Gui,
     update: &'a GuiUpdate,
-) -> impl Iterator<Item = ImageWrite<'a>> {
+) -> impl Iterator<Item = hal::ImageWrite<'a>> {
     update.texture_updates.iter().map(|update| {
         let TextureUpdate { bytes, extent, offset, index } = update;
         let mips = slice::from_ref(bytes);
         let image = &gui.textures[*index].image;
-        ImageWrite { mips, image, extent: *extent, offset: *offset }
+        hal::ImageWrite { mips, image, extent: *extent, offset: *offset }
     })
 }
 
 pub(super) fn buffer_writes<'a>(
     gui: &'a Gui,
     update: &'a GuiUpdate,
-) -> impl Iterator<Item = BufferWrite<'a>> {
+) -> impl Iterator<Item = hal::BufferWrite<'a>> {
     let writes = [
-        BufferWrite { buffer: &gui.indices, data: &update.indices },
-        BufferWrite { buffer: &gui.vertices, data: &update.vertices },
+        hal::BufferWrite { buffer: &gui.indices, data: &update.indices },
+        hal::BufferWrite { buffer: &gui.vertices, data: &update.vertices },
     ];
     writes.into_iter()
 }
 
 pub(super) fn create_descriptor(
-    device: &Device,
+    device: &hal::Device,
     gui: &Gui,
     constants: &Constants,
-    data: &mut DescriptorData,
-) -> Descriptor {
+    data: &mut hal::DescriptorData,
+) -> hal::Descriptor {
     let textures = gui
         .textures
         .iter()
-        .map(|texture| texture.image.view(&ImageViewRequest::BASE));
+        .map(|texture| texture.image.view(&hal::ImageViewRequest::BASE));
     data.builder(device, &gui.descriptor_layout)
         .uniform_buffer(&constants.buffer)
         .storage_buffer(&gui.vertices)
@@ -423,9 +412,9 @@ pub(super) fn create_descriptor(
 }
 
 pub(super) fn render(
-    device: &Device,
-    command_buffer: &mut CommandBuffer,
-    swapchain_image: &Image,
+    device: &hal::Device,
+    command_buffer: &mut hal::CommandBuffer,
+    swapchain_image: &hal::Image,
     descriptors: &Descriptors,
     update: &GuiUpdate,
     gui: &Gui,
@@ -450,11 +439,11 @@ pub(super) fn render(
         .bind_descriptor(device, &gui.pipeline, &descriptors.gui)
         .begin_rendering(
             device,
-            &BeginRendering {
+            &hal::BeginRendering {
                 depth_attachment: None,
-                color_attachments: &[Attachment {
-                    view: swapchain_image.view(&ImageViewRequest::BASE),
-                    load: Load::Load,
+                color_attachments: &[hal::Attachment {
+                    view: swapchain_image.view(&hal::ImageViewRequest::BASE),
+                    load: hal::Load::Load,
                 }],
                 extent,
             },
@@ -474,7 +463,7 @@ pub(super) fn render(
             )
             .draw_indexed(
                 device,
-                &DrawIndexed {
+                &hal::DrawIndexed {
                     index_count: draw.index_count,
                     first_index: draw.index_start,
                     vertex_offset: draw.vertex_offset,

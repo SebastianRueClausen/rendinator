@@ -5,9 +5,9 @@ use ash::extensions::{ext, khr};
 use ash::vk;
 use eyre::{Context, Result};
 
-use crate::instance::Instance;
+use super::Instance;
 
-pub(crate) struct Device {
+pub struct Device {
     pub device: ash::Device,
     pub physical_device: vk::PhysicalDevice,
     pub queue_family_index: u32,
@@ -22,7 +22,7 @@ pub(crate) struct Device {
 }
 
 impl Device {
-    pub(super) fn new(instance: &Instance) -> Result<Self> {
+    pub fn new(instance: &Instance) -> Result<Self> {
         let (physical_device, queue_family_index) =
             select_physical_device(instance)?;
         let memory_properties = unsafe {
@@ -132,11 +132,11 @@ impl Device {
         })
     }
 
-    pub(crate) fn wait_until_idle(&self) -> Result<()> {
+    pub fn wait_until_idle(&self) -> Result<()> {
         unsafe { self.device_wait_idle().wrap_err("failed to wait idle") }
     }
 
-    pub(super) fn destroy(&self) {
+    pub fn destroy(&self) {
         unsafe {
             self.device.destroy_command_pool(self.command_pool, None);
             self.device.destroy_device(None);
@@ -183,7 +183,7 @@ fn get_descriptor_buffer_properties(
     }
 }
 
-pub(super) fn select_physical_device(
+fn select_physical_device(
     instance: &Instance,
 ) -> Result<(vk::PhysicalDevice, u32)> {
     let mut fallback = None;
