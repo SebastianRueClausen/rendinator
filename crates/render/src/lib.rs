@@ -2,7 +2,7 @@ use ash::vk::{self};
 pub use camera::{Camera, CameraMove};
 use constants::Constants;
 use eyre::Result;
-use glam::Vec2;
+use glam::{Vec2, Vec3, Vec4};
 #[cfg(feature = "gui")]
 use gui::Gui;
 #[cfg(feature = "gui")]
@@ -50,6 +50,7 @@ pub struct Renderer {
     #[cfg(feature = "gui")]
     gui: Gui,
     camera: Camera,
+    sun: Sun,
 }
 
 impl Renderer {
@@ -77,7 +78,8 @@ impl Renderer {
             x: swapchain.extent.width as f32,
             y: swapchain.extent.height as f32,
         });
-        let constants = Constants::new(&device, &swapchain, &camera)?;
+        let sun = Sun::default();
+        let constants = Constants::new(&device, &swapchain, &camera, sun)?;
         Ok(Self {
             instance,
             device,
@@ -90,6 +92,7 @@ impl Renderer {
             #[cfg(feature = "gui")]
             gui,
             camera,
+            sun,
         })
     }
 
@@ -279,10 +282,45 @@ impl Renderer {
         &mut self.camera
     }
 
+    pub fn sun_mut(&mut self) -> &mut Sun {
+        &mut self.sun
+    }
+
     fn update(&mut self, update: Update) -> Result<()> {
-        self.constants.update(&self.swapchain, &self.camera);
+        self.constants.update(&self.swapchain, &self.camera, self.sun);
         if update.contains(Update::RECREATE_DESCRIPTORS) {}
         Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct Sun {
+    pub azimuth: f32,
+    pub elevation: f32,
+    pub irradiance: Vec3,
+}
+
+impl From<Sun> for asset::DirectionalLight {
+    fn from(sun: Sun) -> Self {
+        Self {
+            irradiance: sun.irradiance.extend(0.0),
+            direction: Vec4::new(
+                sun.azimuth.sin() * sun.elevation.cos(),
+                sun.azimuth.cos() * sun.elevation.cos(),
+                sun.elevation.sin(),
+                0.0,
+            ),
+        }
+    }
+}
+
+impl Default for Sun {
+    fn default() -> Self {
+        Self {
+            azimuth: 0.0,
+            elevation: std::f32::consts::PI,
+            irradiance: Vec3::splat(6.0),
+        }
     }
 }
 

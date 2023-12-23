@@ -6,7 +6,7 @@ use eyre::Result;
 use glam::{Mat4, UVec2, Vec4};
 
 use crate::camera::Camera;
-use crate::hal;
+use crate::{hal, Sun};
 
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::NoUninit)]
@@ -26,12 +26,9 @@ impl ConstantData {
     pub fn new(
         swapchain: &hal::Swapchain,
         camera: &Camera,
+        sun: Sun,
         _prev: Option<Self>,
     ) -> Self {
-        let sun = DirectionalLight {
-            direction: Vec4::new(1.0, 1.0, 0.0, 0.0).normalize(),
-            irradiance: Vec4::splat(6.0),
-        };
         let proj = camera.proj();
         Self {
             screen_size: UVec2 {
@@ -45,7 +42,7 @@ impl ConstantData {
             proj_view: proj * camera.view,
             z_near: camera.z_near,
             z_far: camera.z_far,
-            sun,
+            sun: sun.into(),
         }
     }
 }
@@ -61,6 +58,7 @@ impl Constants {
         device: &hal::Device,
         swapchain: &hal::Swapchain,
         camera: &Camera,
+        sun: Sun,
     ) -> Result<Self> {
         let buffer = hal::Buffer::new(
             device,
@@ -71,12 +69,17 @@ impl Constants {
         )?;
         let memory_flags = vk::MemoryPropertyFlags::DEVICE_LOCAL;
         let memory = hal::buffer_memory(device, &buffer, memory_flags)?;
-        let data = ConstantData::new(swapchain, camera, None);
+        let data = ConstantData::new(swapchain, camera, sun, None);
         Ok(Self { buffer, memory, data })
     }
 
-    pub fn update(&mut self, swapchain: &hal::Swapchain, camera: &Camera) {
-        self.data = ConstantData::new(swapchain, camera, Some(self.data));
+    pub fn update(
+        &mut self,
+        swapchain: &hal::Swapchain,
+        camera: &Camera,
+        sun: Sun,
+    ) {
+        self.data = ConstantData::new(swapchain, camera, sun, Some(self.data));
     }
 
     pub fn buffer_write(&self) -> hal::BufferWrite {

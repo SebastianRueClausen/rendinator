@@ -256,6 +256,7 @@ impl Gui {
                 renderer.node_tree_mut(),
             );
             camera_window(context, inputs, renderer.camera_mut());
+            light_window(context, renderer.sun_mut());
         });
         let primitives = self.context.tessellate(output.shapes);
         let pixels_per_point = self.context.pixels_per_point();
@@ -304,6 +305,24 @@ fn camera_window(
             if ui.button("return to origin").clicked() {
                 camera.position = Vec3::ZERO;
             }
+            ui.end_row();
+        });
+    });
+}
+
+fn light_window(context: &egui::Context, sun: &mut render::Sun) {
+    egui::Window::new("lights").resizable(true).show(context, |ui| {
+        egui::Grid::new("transform").show(ui, |ui| {
+            ui.label("sun irradiance");
+            vec3_drag_values(ui, &mut sun.irradiance);
+            ui.end_row();
+
+            ui.label("sun azimuth");
+            ui.drag_angle(&mut sun.azimuth);
+            ui.end_row();
+
+            ui.label("sun elevation");
+            ui.drag_angle(&mut sun.elevation);
             ui.end_row();
         });
     });

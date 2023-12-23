@@ -14,4 +14,4 @@ pub use instance::*;
 pub use resources::*;
 pub use shader::*;
 pub use swapchain::*;
-pub use sync::*;
+pub(crate) use sync::*;
