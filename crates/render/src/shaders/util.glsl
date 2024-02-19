@@ -53,4 +53,21 @@ float saturate(float value) {
     return clamp(value, 0.0, 1.0);
 }
 
+uint hash_uint(uint x) {
+    x ^= x >> 17;
+    x *= 0xed5ad4bbU;
+    x ^= x >> 11;
+    x *= 0xac4c1b51U;
+    x ^= x >> 15;
+    x *= 0x31848babU;
+    x ^= x >> 14;
+    return x;
+}
+
+struct Triangle {
+    vec3 v0;
+    vec3 v1;
+    vec3 v2;
+};
+
 #endif

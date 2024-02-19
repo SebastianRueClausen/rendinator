@@ -46,9 +46,12 @@ impl Device {
         let mut features = vk::PhysicalDeviceFeatures2::builder()
             .features({
                 vk::PhysicalDeviceFeatures::builder()
+                    .independent_blend(true)
                     .multi_draw_indirect(true)
                     .pipeline_statistics_query(true)
                     .sampler_anisotropy(true)
+                    // For access to the primitive index in shaders.
+                    .geometry_shader(true)
                     .shader_int16(true)
                     .shader_int64(true)
                     .build()

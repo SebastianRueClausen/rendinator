@@ -454,6 +454,7 @@ impl<'a> CommandBuffer<'a> {
     }
 }
 
+#[derive(Clone, Copy)]
 pub enum Load {
     Clear(vk::ClearValue),
     Load,

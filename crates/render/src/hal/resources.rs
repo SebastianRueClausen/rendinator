@@ -791,6 +791,14 @@ pub struct Blas {
     buffer: Buffer,
 }
 
+impl Deref for Blas {
+    type Target = vk::AccelerationStructureKHR;
+
+    fn deref(&self) -> &Self::Target {
+        &self.acceleration_structure
+    }
+}
+
 impl Blas {
     pub fn new(device: &Device, request: &BlasRequest) -> Result<Self> {
         let geometry = request.geometry();
@@ -980,6 +988,14 @@ pub struct Tlas {
     pub buffer: Buffer,
     pub scratch: Buffer,
     pub instances: Buffer,
+}
+
+impl Deref for Tlas {
+    type Target = vk::AccelerationStructureKHR;
+
+    fn deref(&self) -> &Self::Target {
+        &self.acceleration_structure
+    }
 }
 
 impl Tlas {

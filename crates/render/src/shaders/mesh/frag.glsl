@@ -26,8 +26,10 @@ layout (location = 2) in vec3 world_tangent;
 layout (location = 3) in vec3 world_bitangent;
 layout (location = 4) in vec2 texcoord;
 layout (location = 5) in flat uint material;
+layout (location = 6) in flat uint draw_index;
 
-layout (location = 0) out vec4 result;
+layout (location = 0) out vec4 color_result;
+layout (location = 1) out uvec4 visibility_result;
 
 float sun_shadow() {
     float min_dist = 1.0e-3;
@@ -115,5 +117,11 @@ void main() {
     vec3 ambient = shade.albedo * 0.2;
     vec3 final = radiance + emissive + ambient;
 
-    result = vec4(pow(neutral_tonemap(final), vec3(1.0 / 2.2)), 1.0);
+    color_result = vec4(pow(neutral_tonemap(final), vec3(1.0 / 2.2)), 1.0);
+    visibility_result = uvec4(
+        gl_PrimitiveID,
+        draw_index,
+        0,
+        0
+    );
 }

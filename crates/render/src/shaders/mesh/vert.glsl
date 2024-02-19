@@ -37,6 +37,7 @@ layout (location = 2) out vec3 world_tangent;
 layout (location = 3) out vec3 world_bitangent;
 layout (location = 4) out vec2 texcoord;
 layout (location = 5) out flat uint material;
+layout (location = 6) out flat uint draw_index;
 
 void main() {
     Vertex vertex = vertices[gl_VertexIndex];
@@ -55,6 +56,7 @@ void main() {
     world_bitangent = tangent_frame.bitangent_sign * cross(world_normal, world_tangent);
     texcoord = decode_texcoord(vertex.texcoord);
     material = uint(vertex.material);
+    draw_index = gl_DrawIDARB;
     world_position = instance.transform * vec4(position, 1.0);
     gl_Position = constants.proj_view * world_position;
 }

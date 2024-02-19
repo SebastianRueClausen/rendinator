@@ -2,21 +2,23 @@ use std::mem;
 
 use ash::vk::{self};
 use eyre::Result;
-use glam::Vec2;
+use glam::{Mat4, Vec2};
 
 use crate::constants::Constants;
 use crate::render_targets::RenderTargets;
 use crate::scene::{DrawCommand, Scene};
-use crate::{hal, render_targets, Descriptors};
+use crate::{hal, Descriptors};
 
 pub(crate) struct MeshPhase {
     pipeline: hal::Pipeline,
     depth_reduce_pipeline: hal::Pipeline,
     pre_cull_pipeline: hal::Pipeline,
     post_cull_pipeline: hal::Pipeline,
+    gbuffer_pipeline: hal::Pipeline,
     descriptor_layout: hal::DescriptorLayout,
     cull_descriptor_layout: hal::DescriptorLayout,
     depth_reduce_descriptor_layout: hal::DescriptorLayout,
+    gbuffer_descriptor_layout: hal::DescriptorLayout,
     depth_pyramid: hal::Image,
     depth_sampler: hal::Sampler,
     memory: hal::Memory,
@@ -26,6 +28,7 @@ impl MeshPhase {
     pub fn new(
         device: &hal::Device,
         swapchain: &hal::Swapchain,
+        render_targets: &RenderTargets,
     ) -> Result<Self> {
         let descriptor_layout = hal::DescriptorLayoutBuilder::default()
             .binding(vk::DescriptorType::UNIFORM_BUFFER)
@@ -51,6 +54,9 @@ impl MeshPhase {
             .binding(vk::DescriptorType::STORAGE_BUFFER)
             .binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .build(device)?;
+        let gbuffer_descriptor_layout =
+            create_gbuffer_descriptor_layout(device)?;
+
         let vertex_shader = hal::Shader::new(
             device,
             &hal::ShaderRequest {
@@ -80,8 +86,20 @@ impl MeshPhase {
             device,
             &pipeline_layout,
             &hal::GraphicsPipelineRequest {
-                color_formats: &[swapchain.format],
-                depth_format: Some(render_targets::DEPTH_FORMAT),
+                color_attachments: &[
+                    hal::ColorAttachment {
+                        format: swapchain.format,
+                        blend: Some(hal::Blend {
+                            src: vk::BlendFactor::ONE,
+                            dst: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                        }),
+                    },
+                    hal::ColorAttachment {
+                        format: render_targets.visibility.format,
+                        blend: None,
+                    },
+                ],
+                depth_format: Some(render_targets.depth.format),
                 cull_mode: vk::CullModeFlags::BACK,
                 shaders: &[
                     hal::ShaderStage {
@@ -115,6 +133,8 @@ impl MeshPhase {
             &cull_descriptor_layout,
             DrawPhase::Post,
         )?;
+        let gbuffer_pipeline =
+            create_gbuffer_pipeline(device, &gbuffer_descriptor_layout)?;
         Ok(Self {
             pipeline,
             descriptor_layout,
@@ -123,6 +143,8 @@ impl MeshPhase {
             cull_descriptor_layout,
             pre_cull_pipeline,
             post_cull_pipeline,
+            gbuffer_descriptor_layout,
+            gbuffer_pipeline,
             depth_pyramid,
             memory,
             depth_sampler,
@@ -133,10 +155,12 @@ impl MeshPhase {
         self.descriptor_layout.destroy(device);
         self.depth_reduce_descriptor_layout.destroy(device);
         self.cull_descriptor_layout.destroy(device);
+        self.gbuffer_descriptor_layout.destroy(device);
         self.pipeline.destroy(device);
         self.depth_reduce_pipeline.destroy(device);
         self.pre_cull_pipeline.destroy(device);
         self.post_cull_pipeline.destroy(device);
+        self.gbuffer_pipeline.destroy(device);
         self.depth_pyramid.destroy(device);
         self.memory.free(device);
         self.depth_sampler.destroy(device);
@@ -225,6 +249,59 @@ fn create_depth_reduce_pipeline(
             stage: vk::ShaderStageFlags::COMPUTE,
             source: vk_shader_macros::include_glsl!(
                 "src/shaders/mesh/depth_reduce.comp.glsl",
+                kind: comp,
+            ),
+        },
+    )?;
+    let specializations = hal::Specializations::default();
+    let shader_stage =
+        hal::ShaderStage { shader: &shader, specializations: &specializations };
+    let pipeline = hal::Pipeline::compute(device, &layout, shader_stage)?;
+    shader.destroy(device);
+    Ok(pipeline)
+}
+
+fn create_gbuffer_descriptor_layout(
+    device: &hal::Device,
+) -> Result<hal::DescriptorLayout> {
+    hal::DescriptorLayoutBuilder::default()
+        // Constant buffer.
+        .binding(vk::DescriptorType::UNIFORM_BUFFER)
+        // Scene buffers.
+        .binding(vk::DescriptorType::STORAGE_BUFFER)
+        .binding(vk::DescriptorType::STORAGE_BUFFER)
+        .binding(vk::DescriptorType::STORAGE_BUFFER)
+        .binding(vk::DescriptorType::STORAGE_BUFFER)
+        .binding(vk::DescriptorType::STORAGE_BUFFER)
+        // Visibility buffer.
+        .binding(vk::DescriptorType::STORAGE_IMAGE)
+        // G-buffers.
+        .binding(vk::DescriptorType::STORAGE_IMAGE)
+        .binding(vk::DescriptorType::STORAGE_IMAGE)
+        .binding(vk::DescriptorType::STORAGE_IMAGE)
+        // Textures.
+        .array_binding(vk::DescriptorType::COMBINED_IMAGE_SAMPLER, 1024)
+        .build(device)
+}
+
+fn create_gbuffer_pipeline(
+    device: &hal::Device,
+    descriptor_layout: &hal::DescriptorLayout,
+) -> Result<hal::Pipeline> {
+    let layout = hal::PipelineLayout {
+        descriptors: &[descriptor_layout],
+        push_constant: Some(vk::PushConstantRange {
+            stage_flags: vk::ShaderStageFlags::COMPUTE,
+            size: mem::size_of::<Mat4>() as u32,
+            offset: 0,
+        }),
+    };
+    let shader = hal::Shader::new(
+        device,
+        &hal::ShaderRequest {
+            stage: vk::ShaderStageFlags::COMPUTE,
+            source: vk_shader_macros::include_glsl!(
+                "src/shaders/mesh/gbuffer.comp.glsl",
                 kind: comp,
             ),
         },
@@ -339,6 +416,30 @@ pub(crate) fn create_cull_descriptor(
         .storage_buffer(&scene.draw_commands)
         .storage_buffer(&scene.draw_count)
         .combined_image_sampler(&mesh_phase.depth_sampler, depth_pyramid)
+        .build()
+}
+
+pub(crate) fn create_gbuffer_descriptor(
+    device: &hal::Device,
+    mesh_phase: &MeshPhase,
+    constants: &Constants,
+    render_targets: &RenderTargets,
+    scene: &Scene,
+    data: &mut hal::DescriptorData,
+) -> hal::Descriptor {
+    let texture_views = scene.textures.iter().map(hal::Image::full_view);
+    data.builder(device, &mesh_phase.gbuffer_descriptor_layout)
+        .uniform_buffer(&constants.buffer)
+        .storage_buffer(&scene.instances)
+        .storage_buffer(&scene.draws)
+        .storage_buffer(&scene.indices)
+        .storage_buffer(&scene.vertices)
+        .storage_buffer(&scene.materials)
+        .storage_image(&render_targets.visibility.full_view())
+        .storage_image(&render_targets.gbuffer0.full_view())
+        .storage_image(&render_targets.gbuffer1.full_view())
+        .storage_image(&render_targets.gbuffer2.full_view())
+        .combined_image_samplers(&scene.texture_sampler, texture_views)
         .build()
 }
 
@@ -510,10 +611,19 @@ fn draw<'a>(
                         .view(&hal::ImageViewRequest::BASE),
                     load: depht_load,
                 }),
-                color_attachments: &[hal::Attachment {
-                    view: swapchain_image.view(&hal::ImageViewRequest::BASE),
-                    load: color_load,
-                }],
+                color_attachments: &[
+                    hal::Attachment {
+                        view: swapchain_image
+                            .view(&hal::ImageViewRequest::BASE),
+                        load: color_load,
+                    },
+                    hal::Attachment {
+                        view: render_targets
+                            .visibility
+                            .view(&hal::ImageViewRequest::BASE),
+                        load: color_load,
+                    },
+                ],
                 extent,
             },
         )
@@ -528,6 +638,39 @@ fn draw<'a>(
         .end_rendering(device);
 }
 
+fn generate_gbuffer<'a>(
+    device: &hal::Device,
+    command_buffer: &mut hal::CommandBuffer<'a>,
+    descriptors: &Descriptors,
+    mesh_phase: &'a MeshPhase,
+    render_targets: &'a RenderTargets,
+    constants: &Constants,
+) {
+    let vk::Extent3D { width, height, .. } = render_targets.visibility.extent;
+    let width = width.div_ceil(32);
+    let height = height.div_ceil(32);
+
+    let mut ray_matrix = constants.data.proj_view;
+    ray_matrix.col_mut(3)[0] = 0.0;
+    ray_matrix.col_mut(3)[1] = 0.0;
+    ray_matrix.col_mut(3)[2] = 0.0;
+    ray_matrix = ray_matrix.inverse();
+
+    command_buffer
+        .bind_pipeline(device, &mesh_phase.gbuffer_pipeline)
+        .bind_descriptor(
+            device,
+            &mesh_phase.gbuffer_pipeline,
+            &descriptors.gbuffer,
+        )
+        .push_constants(
+            device,
+            &mesh_phase.gbuffer_pipeline,
+            bytemuck::bytes_of(&ray_matrix),
+        )
+        .dispatch(device, width, height, 1);
+}
+
 pub(super) fn render<'a>(
     device: &hal::Device,
     command_buffer: &mut hal::CommandBuffer<'a>,
@@ -536,6 +679,7 @@ pub(super) fn render<'a>(
     mesh_phase: &'a MeshPhase,
     render_targets: &'a RenderTargets,
     scene: &Scene,
+    constants: &Constants,
 ) {
     cull(
         device,
@@ -569,6 +713,13 @@ pub(super) fn render<'a>(
         },
         hal::ImageBarrier {
             image: &swapchain_image,
+            new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            mip_levels: hal::MipLevels::All,
+            src: hal::Access::NONE,
+            dst: hal::Access::COLOR_BUFFER_RENDER,
+        },
+        hal::ImageBarrier {
+            image: &render_targets.visibility,
             new_layout: vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             mip_levels: hal::MipLevels::All,
             src: hal::Access::NONE,
@@ -623,5 +774,41 @@ pub(super) fn render<'a>(
         render_targets,
         scene,
         DrawPhase::Post,
+    );
+
+    fn gbuffer_barrier<'a>(gbuffer: &'a hal::Image) -> hal::ImageBarrier<'a> {
+        hal::ImageBarrier {
+            image: gbuffer,
+            new_layout: vk::ImageLayout::GENERAL,
+            mip_levels: hal::MipLevels::All,
+            src: hal::Access::NONE,
+            dst: hal::Access::COMPUTE_WRITE,
+        }
+    }
+
+    command_buffer.pipeline_barriers(
+        device,
+        &[
+            hal::ImageBarrier {
+                image: &render_targets.visibility,
+                new_layout: vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                mip_levels: hal::MipLevels::All,
+                src: hal::Access::COLOR_BUFFER_RENDER,
+                dst: hal::Access::COMPUTE_READ,
+            },
+            gbuffer_barrier(&render_targets.gbuffer0),
+            gbuffer_barrier(&render_targets.gbuffer1),
+            gbuffer_barrier(&render_targets.gbuffer2),
+        ],
+        &[],
+    );
+
+    generate_gbuffer(
+        device,
+        command_buffer,
+        descriptors,
+        mesh_phase,
+        render_targets,
+        constants,
     );
 }

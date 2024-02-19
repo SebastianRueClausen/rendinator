@@ -266,7 +266,13 @@ pub(super) fn create_pipeline(
         device,
         &pipeline_layout,
         &hal::GraphicsPipelineRequest {
-            color_formats: &[swapchain.format],
+            color_attachments: &[hal::ColorAttachment {
+                format: swapchain.format,
+                blend: Some(hal::Blend {
+                    src: vk::BlendFactor::ONE,
+                    dst: vk::BlendFactor::ONE_MINUS_SRC_ALPHA,
+                }),
+            }],
             depth_format: None,
             cull_mode: vk::CullModeFlags::NONE,
             shaders: &[

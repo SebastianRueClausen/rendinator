@@ -11,6 +11,7 @@ use mesh::MeshPhase;
 use raw_window_handle::{RawDisplayHandle, RawWindowHandle};
 use render_targets::RenderTargets;
 use scene::{NodeTree, Scene};
+use shade::ShadePhase;
 
 mod camera;
 mod constants;
@@ -19,6 +20,7 @@ mod hal;
 mod mesh;
 mod render_targets;
 pub mod scene;
+mod shade;
 
 #[cfg(feature = "gui")]
 mod gui;
@@ -46,6 +48,7 @@ pub struct Renderer {
     scene: Scene,
     constants: Constants,
     mesh_phase: MeshPhase,
+    shade_phase: ShadePhase,
     render_targets: RenderTargets,
     #[cfg(feature = "gui")]
     gui: Gui,
@@ -71,9 +74,10 @@ impl Renderer {
         let scene = Scene::new(&device, scene)?;
         #[cfg(feature = "gui")]
         let gui = Gui::new(&device, &swapchain)?;
-        let mesh_phase = MeshPhase::new(&device, &swapchain)?;
         let render_targets =
             RenderTargets::new(&device, swapchain_images, &swapchain)?;
+        let mesh_phase = MeshPhase::new(&device, &swapchain, &render_targets)?;
+        let shade_phase = ShadePhase::new(&device, &scene, &render_targets)?;
         let camera = Camera::new(Vec2 {
             x: swapchain.extent.width as f32,
             y: swapchain.extent.height as f32,
@@ -87,6 +91,7 @@ impl Renderer {
             sync,
             constants,
             mesh_phase,
+            shade_phase,
             render_targets,
             scene,
             #[cfg(feature = "gui")]
@@ -125,6 +130,14 @@ impl Renderer {
                 &self.device,
                 &self.mesh_phase,
                 &self.constants,
+                &self.scene,
+                &mut descriptor_data,
+            ),
+            gbuffer: mesh::create_gbuffer_descriptor(
+                &self.device,
+                &self.mesh_phase,
+                &self.constants,
+                &self.render_targets,
                 &self.scene,
                 &mut descriptor_data,
             ),
@@ -210,6 +223,7 @@ impl Renderer {
                     &self.mesh_phase,
                     &self.render_targets,
                     &self.scene,
+                    &self.constants,
                 );
 
                 #[cfg(feature = "gui")]
@@ -331,6 +345,7 @@ impl Drop for Renderer {
         }
         self.render_targets.destroy(&self.device);
         self.mesh_phase.destroy(&self.device);
+        self.shade_phase.destroy(&self.device);
         #[cfg(feature = "gui")]
         {
             self.gui.destroy(&self.device);
@@ -357,4 +372,5 @@ struct Descriptors {
     mesh_phase: hal::Descriptor,
     depth_reduce: Vec<hal::Descriptor>,
     cull: hal::Descriptor,
+    gbuffer: hal::Descriptor,
 }

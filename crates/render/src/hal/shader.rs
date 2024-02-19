@@ -126,8 +126,20 @@ pub struct ShaderStage<'a> {
     pub shader: &'a Shader,
 }
 
+#[derive(Clone, Copy, Default)]
+pub struct Blend {
+    pub src: vk::BlendFactor,
+    pub dst: vk::BlendFactor,
+}
+
+#[derive(Clone, Copy)]
+pub struct ColorAttachment {
+    pub format: vk::Format,
+    pub blend: Option<Blend>,
+}
+
 pub struct GraphicsPipelineRequest<'a> {
-    pub color_formats: &'a [vk::Format],
+    pub color_attachments: &'a [ColorAttachment],
     pub depth_format: Option<vk::Format>,
     pub shaders: &'a [ShaderStage<'a>],
     pub cull_mode: vk::CullModeFlags,
@@ -200,9 +212,14 @@ impl Pipeline {
                 create_shader_info(shader.shader, &entry_point, specialization)
             })
             .collect();
+        let color_attachment_formats: Vec<_> = request
+            .color_attachments
+            .iter()
+            .map(|attachment| attachment.format)
+            .collect();
         let mut rendering_info = vk::PipelineRenderingCreateInfo::builder()
             .depth_attachment_format(request.depth_format.unwrap_or_default())
-            .color_attachment_formats(request.color_formats)
+            .color_attachment_formats(&color_attachment_formats)
             .build();
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
         let input_info = vk::PipelineInputAssemblyStateCreateInfo::builder()
@@ -223,15 +240,30 @@ impl Pipeline {
                 .depth_compare_op(vk::CompareOp::GREATER)
                 .depth_test_enable(request.depth_format.is_some())
                 .depth_write_enable(request.depth_format.is_some());
+        let color_attachment_states: Vec<_> = request
+            .color_attachments
+            .iter()
+            .map(|attachment| {
+                let blend = attachment.blend.unwrap_or_default();
+                vk::PipelineColorBlendAttachmentState::builder()
+                    .blend_enable(attachment.blend.is_some())
+                    .src_color_blend_factor(blend.src)
+                    .dst_color_blend_factor(blend.dst)
+                    .color_write_mask(vk::ColorComponentFlags::RGBA)
+                    .build()
+            })
+            .collect();
+        /*
         let color_attachment_state =
             vk::PipelineColorBlendAttachmentState::builder()
                 .color_write_mask(vk::ColorComponentFlags::RGBA)
                 .blend_enable(true)
                 .src_color_blend_factor(vk::BlendFactor::ONE)
                 .dst_color_blend_factor(vk::BlendFactor::ONE_MINUS_SRC_ALPHA);
+        */
         let color_blend_state =
             vk::PipelineColorBlendStateCreateInfo::builder()
-                .attachments(slice::from_ref(&color_attachment_state));
+                .attachments(&color_attachment_states);
         let dynamic_states =
             [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic_state = vk::PipelineDynamicStateCreateInfo::builder()
